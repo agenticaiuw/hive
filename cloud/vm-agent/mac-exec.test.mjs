@@ -12,9 +12,12 @@ import { requestCatalog } from './task-catalog.mjs';
 
 const codex = process.env.HIVE_TEST_CODEX ?? '/root/.local/bin/codex';
 const releaseCheck = process.env.HIVE_UPDATE_CHECK === '1';
+// The desktop MCP alone may take 60 seconds to start. The release gate starts
+// many test processes together; allow startup plus both fixture model turns.
+const execTimeout = 90000;
 
 test('exec exposes and invokes transfer before continuing a repaired task', {
-  skip: !releaseCheck && !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the agent-facing catalog', timeout: 45000,
+  skip: !releaseCheck && !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the agent-facing catalog', timeout: 3 * execTimeout + 15000,
 }, async t => {
   // The release gate must prove exposure and invocation before retrying. A developer's
   // restricted sandbox may skip this integration test, but that is never release evidence.
@@ -143,21 +146,35 @@ globalThis.fetch = async (url, options) => {
     if (repaired) args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
     if (!macEnabled) args.push('-c', 'mcp_servers.mac.enabled=false');
     args.push('-');
-    const child = spawn(codex, args, { cwd: dir,
+    const child = spawn(codex, args, { cwd: dir, detached: true,
       env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir, CODEX_HOME: dir },
       stdio: ['pipe', 'pipe', 'pipe'] });
     let errors = '', events = '';
     child.stderr.on('data', b => { errors = (errors + b).slice(-8000); });
     child.stdout.on('data', b => { events += b; });
-    const stop = () => { child.kill('SIGKILL'); child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); };
-    t.after(stop);
-    const timer = setTimeout(stop, 12000);
+    let ended = false, timedOut = false;
+    const closed = new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code, signal) => { ended = true; resolve({ code, signal }); });
+    });
+    const stop = () => {
+      if (ended || !child.pid) return;
+      // codex is a launcher: terminate its native child and MCP processes too,
+      // and let close drain their output before removing the fixture directory.
+      try { process.kill(-child.pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    };
+    t.after(async () => { stop(); await closed; });
+    const timer = setTimeout(() => { timedOut = true; stop(); }, execTimeout);
     child.stdin.end(`${GUIDE}\n\n${repaired ? 'Continue after the repair.' : 'New task.'} Probe the fixture transfer before proceeding.`);
     let status;
-    try { status = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); }); }
+    try { status = await closed; }
     finally { clearTimeout(timer); server.off('request', handle); }
     if (failure) throw failure;
-    assert.equal(status, 0, errors);
+    assert.equal(status.code, 0, `${repaired ? 'repair retry' : 'new task'} (${namespace}): `
+      + `${timedOut ? `timed out after ${execTimeout}ms` : `exited with ${status.code}`}; `
+      + `signal=${status.signal}; model requests=${requests}; probe received=${probed}\n`
+      + `stderr:\n${errors}\nstdout:\n${events.slice(-8000)}`);
     assert.ok(probed, 'exec must discover and invoke the transfer before continuing');
     const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
     if (!codeMode) assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);

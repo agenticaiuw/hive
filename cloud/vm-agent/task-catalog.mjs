@@ -1,5 +1,5 @@
 // tools/list proves that an MCP server registered tools, not that the owner task's model
-// received them on the surface it uses. Inspect the first request from that very exec thread,
+// received them on the surface it uses. Inspect every request from that very exec thread,
 // including Responses Lite's additional_tools and code-mode declarations. Keep only names
 // and the verdict in the task's report; the agent must still probe before copying a file.
 import { readFileSync, readdirSync } from 'node:fs';
@@ -35,11 +35,37 @@ export function requestCatalog(request, threadId) {
     ...(!ok ? { why: `The owner task model did not receive desktop.transfer_file with the Mac-to-VM probe schema${exec ? ' inside functions.exec' : ''}.` } : {}) };
 }
 
-/** null until this thread has made a model request; another thread's catalog is not evidence. */
-export function readTaskCatalog(root, threadId) {
+// againBrief appends this line when a repair returns to the owner task, including when the
+// board later continues that task in a new run. Ordinary tasks need no Mac readiness probe.
+export function transferProbeRequired(brief) {
+  return [...brief.matchAll(/^Hive just changed itself for this task, because it couldn't (.+):$/gm)]
+    .some(([, need]) => /\bMac[- ]to[- ]VM\b/i.test(need) && /\btransfer\b|\bcopy\b/i.test(need));
+}
+
+/** The actual exec event, not a model's claim or a previous task's successful probe. */
+export function transferProbeSucceeded(event) {
+  const call = event.item;
+  if (event.type !== 'item.completed' || call?.type !== 'mcp_tool_call' || call.status !== 'completed'
+    || !['desktop', 'mac'].includes(call.server) || call.tool !== 'transfer_file'
+    || call.arguments?.check_only !== true || call.arguments?.direction !== 'to_vm'
+    || call.result?.isError || call.error) return false;
+  return (call.result?.content ?? []).some(part => {
+    if (part.type !== 'text') return false;
+    try {
+      const result = JSON.parse(part.text);
+      return result.ready === true && result.copied === false && result.direction === 'to_vm'
+        && result.mac_path === call.arguments.mac_path;
+    } catch { return false; }
+  });
+}
+
+/** null until all recorded requests are readable; another thread's catalog is not evidence.
+ * Cache parsed payloads, which never change once complete, so polling doesn't reread task history. */
+export function readTaskCatalog(root, threadId, seen = new Map()) {
   if (!threadId) return null;
   let dirs;
   try { dirs = readdirSync(root, { withFileTypes: true }); } catch { return null; }
+  let catalog = null, requests = 0;
   for (const dir of dirs.filter(d => d.isDirectory())) {
     let lines;
     try { lines = readFileSync(join(root, dir.name, 'trace.jsonl'), 'utf8').split('\n'); } catch { continue; }
@@ -50,11 +76,19 @@ export function readTaskCatalog(root, threadId) {
       const path = event.payload.request_payload?.path;
       if (!/^payloads\/[\w-]+\.json$/.test(path ?? '')) continue;
       try {
-        return requestCatalog(JSON.parse(readFileSync(join(root, dir.name, path), 'utf8')), threadId);
+        const key = `${threadId}/${dir.name}/${path}`;
+        let next = seen.get(key);
+        if (!next) {
+          next = requestCatalog(JSON.parse(readFileSync(join(root, dir.name, path), 'utf8')), threadId);
+          seen.set(key, next);
+        }
+        catalog = { ...next, requests: ++requests };
+        // A later healthy catalog cannot erase a request that ran without the tool.
+        if (!catalog.ok) return catalog;
       } catch { return null; } // the payload may not have finished writing yet
     }
   }
-  return null;
+  return catalog;
 }
 
 // Codex writes private traces as root, while hive-task runs as the VM user. The
