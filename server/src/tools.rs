@@ -10,11 +10,6 @@ fn n(d: &str) -> Value { json!({ "type": "number", "description": d }) }
 
 pub fn common() -> Vec<Value> {
     vec![
-        tool("report", "Say how your task ended. done=true with the outcome when it's finished. done=false only when it truly \
-            needs the owner: why = the exact reason you stopped, need = exactly what you need from them. Then end your turn.",
-            json!({ "done": { "type": "boolean" }, "outcome": s("What you did and what came of it (done=true)."),
-                "why": s("Exact reason you stopped (done=false)."), "need": s("Exactly what you need from the owner (done=false).") }),
-            &["done", "outcome", "why", "need"]),
         tool("message_agent", "Send a message to the agent working on another task (to coordinate, hand over, or ask).",
             json!({ "task": n("The other task's id."), "text": s("The message.") }), &["task", "text"]),
         tool("list_tasks", "Hive's open tasks and who is working on each.", json!({}), &[]),
