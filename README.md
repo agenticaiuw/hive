@@ -1,21 +1,34 @@
 # Hive
 
-The club's one project ([agenticaiuw.com/hive](https://agenticaiuw.com/hive)): agents that use your computer, phone and browser the way you do. One brain runs in the cloud; every device connects to it and says what agents can do with it.
+The club's one project ([agenticaiuw.com/hive](https://agenticaiuw.com/hive)): agents that use your computer, phone and browser the way you do.
 
-Each team works in its own folder:
+## How it fits together
 
-| Folder | Team | What's in it |
+- **One brain.** The server on the VM is the only place agents run. Codex is signed in there and nowhere else.
+- **Every request goes to the orchestrator first.** It turns the owner's words into rules (standing instructions, scoped to everywhere, a node, a site, an app or a folder) and tasks, or passes them to the agent already on that task.
+- **One agent per task**, with the tools of the nodes the task needs. A turn ends with done and the outcome, or exactly why it stopped and what the owner must do; there is no "stuck".
+- **Nodes bring their own tools.** The Mac, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.
+- **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
+- **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive; nodes with a checkout pick the change up from the VM.
+
+## Where things are
+
+Folders follow the parts of Hive, not the club's teams: parts last longer than team lineups, and one team often looks after several parts.
+
+| Folder | What it is | Looked after by |
 |---|---|---|
-| `cloud/` | Cloud | The server on the VM: orchestrator, agents, database, API. `cloud/node/` is the device contract. |
-| `desktop/` | Automation | The Mac app (Windows next): keyboard, mouse, screen, shell, files. Also Claude Code's hook. |
-| `mobile/` | Automation | The iPhone: tap, swipe, type and screenshots through its relay. |
-| `browser/` | Automation | The Chrome and Safari extensions. |
-| `dashboard/` | Product Design | The dashboard the server shows at `/`. |
-| `research/` | Research | How Hive fits together and how agents handle what they know. |
-| `wearable/` | Hardware | The screenless wearable. |
+| `protocol/` | The one agreement between the server and everything that connects to it, and the Rust library nodes use to speak it | Cloud, with every team that uses it |
+| `server/` | The brain: orchestrator, agents, database, API | Cloud |
+| `vm/` | How the VM runs Hive: its services, installer and screen | Cloud |
+| `dashboard/` | The dashboard the server shows at `/` | Product Design |
+| `mac/` | The Mac as a node (`hive`): keyboard, mouse, screen, shell, files; also Claude Code's hook | Automation |
+| `phone/` | The iPhone as a node (`hive-phone`, runs on the VM next to the server) | Automation |
 
-Teams meet in two places only:
-- **The device contract** (top of `cloud/node/src/lib.rs`): pair, say hello with your tools, take calls, answer them. A new device is a new folder that speaks it; the cloud doesn't change.
-- **The API** the dashboard and devices call (`cloud/src/api.rs`).
+A folder appears with its first code: a new device, like Hardware's wearable, is a new top-level folder that speaks `protocol/`, and the server doesn't change for it.
 
-Build everything with `cargo build --release`. Before pushing, run `node --test tests/*.test.mjs`.
+## Working together
+
+- Change anything inside a part freely. Parts meet only at `protocol/`, so changes there follow its rules: add, never alter, in a pull request of its own.
+- Keep pull requests small and merge them into `main` within a day or two; long-lived branches drift.
+- Tests sit next to the code they test: `#[cfg(test)]` in the same file, or a `tests/` folder inside the part.
+- `cargo build --release` builds everything and `cargo test` tests it. Every push and pull request runs both, plus a check that keeps personal details out of this public repo (`.github/`).

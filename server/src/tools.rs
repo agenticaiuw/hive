@@ -1,5 +1,5 @@
-//! The cloud's own tools. Every device declares its own (see cloud/node), and a task's agent gets those of the task's devices.
-use hive_node::{n, s, tool};
+//! The cloud's own tools. Every device declares its own (see protocol/), and a task's agent gets those of the task's devices.
+use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 
 pub fn cloud(nodes: &[String]) -> Vec<Value> {

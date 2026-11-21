@@ -80,7 +80,7 @@ test("the repository holds none of the owner's personal details", t => {
   if (!files) return t.skip('not a git checkout')
   const found = []
   for (const [file, text] of files) {
-    if (file === 'cloud/shared/privacy.test.mjs') continue
+    if (file === path.relative(ROOT, import.meta.filename)) continue
     for (const rule of RULES) {
       for (const m of text.matchAll(rule.find)) {
         if (rule.allowed(m)) continue

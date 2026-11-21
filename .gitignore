@@ -1,28 +1,4 @@
-# Secrets
+/target/
 .env
 .env.*
-
-# Build output
-target/
-build/
-build-*/
-dist/
-node_modules/
-.svelte-kit/
-.wrangler/
-.venv/
-__pycache__/
-
-# Editors and macOS
 .DS_Store
-.idea/
-.vscode/
-xcuserdata/
-
-# The old Hive, still on the owner's disk until the new one replaces it; not part of the repo
-desktop/app/
-desktop/claude-code/
-mobile/relay/
-mobile/ios/
-agent_sessions/
-diagnostics/

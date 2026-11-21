@@ -4,7 +4,7 @@ use crate::args;
 use crate::codex::{tool_result, Codex, Event};
 use crate::db::{now, Db};
 use crate::tools;
-use hive_node::b64;
+use hive_protocol::b64;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -273,7 +273,7 @@ impl Hive {
         t += "\nWhere you work:\n";
         t += VM_NOTES;
         if nodes.iter().any(|n| n == "hive") {
-            t += &format!("\n- Hive's own code: the git checkout at {}; README.md says which club team's folder holds what. Keep it lean. \
+            t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. \
                 Commit with a clear message, then call reinstall; devices with a checkout of Hive pick the commit up from here.", self.repo.display());
         }
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
