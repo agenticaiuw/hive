@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("HIVE_GIT");
+/// Where downloaded nodes (no checkout of Hive) get each new build: GitHub builds one for every push to main.
+pub const RELEASES: &str = "https://github.com/agenticaiuw/hive/releases/download/latest";
 
 pub struct Conf { pub server: String, pub token: String, pub id: String, pub repo: String }
 
@@ -39,7 +41,8 @@ pub fn load(name: &str) -> Option<Conf> {
 
 /// Trade a pairing code for this device's token and save it (readable only by this user).
 pub fn pair(name: &str, server: &str, code: &str, kind: &str, label: &str, repo: &str) -> Result<Conf, String> {
-    let server = server.trim_end_matches('/').to_string();
+    let server = server.trim().trim_end_matches('/');
+    let server = if server.contains("://") { server.to_string() } else { format!("https://{server}") };
     let r = ureq::post(&format!("{server}/api/pair")).set("content-type", "application/json")
         .send_string(&json!({ "code": code.trim(), "kind": kind, "name": label }).to_string());
     let body = match r {
@@ -83,16 +86,18 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
     let (c, handle) = (Arc::new(c), Arc::new(handle));
     let hello = json!({ "id": c.id, "kind": node.kind, "name": node.name, "version": VERSION, "notes": node.notes, "tools": node.tools });
     let mut last_hello = Instant::now() - Duration::from_secs(3600);
-    let mut tried = String::new();
+    let mut tried = (String::new(), Instant::now());
     loop {
         if last_hello.elapsed() > Duration::from_secs(60) {
             match call(&c, "POST", "/api/node/hello", Some(&hello), 20) {
                 Ok((200, v)) => {
                     last_hello = Instant::now();
                     let want = v["version"].as_str().unwrap_or("").to_string();
-                    if !c.repo.is_empty() && !want.is_empty() && !want.starts_with(VERSION) && !VERSION.starts_with(want.as_str()) && want != tried {
-                        tried = want.clone();
-                        if let Err(e) = update(&c, node.package) { eprintln!("update to {want}: {e}"); }
+                    let again = tried.0 != want || tried.1.elapsed() > Duration::from_secs(600);
+                    if !want.is_empty() && !want.starts_with(VERSION) && !VERSION.starts_with(want.as_str()) && again {
+                        tried = (want.clone(), Instant::now());
+                        let done = if c.repo.is_empty() { download(node.package, &want) } else { update(&c, node.package) };
+                        if let Err(e) = done { eprintln!("update to {want}: {e}"); }
                     }
                 }
                 Ok((st, v)) => { eprintln!("hello: {st} {v}"); std::thread::sleep(Duration::from_secs(10)); continue; }
@@ -139,6 +144,32 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
     #[cfg(windows)]
     { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).ok(); }
     run(&["cargo", "build", "--release", "-p", package])?;
+    restart(exe)
+}
+
+/// A downloaded node: fetch GitHub's build of the server's version and swap it in for this program.
+fn download(package: &str, want: &str) -> Result<(), String> {
+    let name = match std::env::consts::OS { "macos" => format!("{package}-macos"), "windows" => format!("{package}-windows.exe"), os => return Err(format!("no downloads for {os}")) };
+    let r = ureq::get(&format!("{RELEASES}/{name}")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let new = exe.with_extension(if cfg!(windows) { "new.exe" } else { "new" });
+    std::fs::write(&new, bytes).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).ok(); }
+    let got = std::process::Command::new(&new).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if got.is_empty() || !(got.starts_with(want) || want.starts_with(got.as_str())) {
+        std::fs::remove_file(&new).ok();
+        return Err(format!("GitHub's build is {got:?}, not {want} yet; trying again in 10 minutes"));
+    }
+    #[cfg(windows)]
+    { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).map_err(|e| e.to_string())?; }
+    std::fs::rename(&new, &exe).map_err(|e| e.to_string())?;
+    restart(exe)
+}
+
+fn restart(exe: PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
