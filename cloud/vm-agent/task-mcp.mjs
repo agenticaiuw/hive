@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { transferProbed, transferProbeSucceeded } from './task-catalog.mjs';
+import { STARTUP_PROBE } from './task-runtime.mjs';
 
 export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now } = {}) {
   const until = now() + timeoutMs;
@@ -19,10 +20,21 @@ export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => ne
   } while (true);
 }
 
-export async function forward(message, catalog, send, reply) {
+export async function forward(message, catalog, send, reply, server = '') {
   let verdict;
   if (message.method === 'tools/call') {
     try {
+      // The repair launcher has not submitted a model turn yet. Its one fixed probe
+      // can check the Mac route, but cannot copy a file or unlock any other call.
+      let startup;
+      try { startup = JSON.parse(readFileSync(`${catalog}.startup`, 'utf8')); } catch {}
+      const args = message.params?.arguments;
+      if (startup?.thread_id && server === 'mac' && message.params?.name === 'transfer_file'
+        && args && Object.keys(args).length === Object.keys(STARTUP_PROBE).length
+        && Object.entries(STARTUP_PROBE).every(([key, value]) => args[key] === value)) {
+        send(message);
+        return;
+      }
       verdict = await waitForCatalog(catalog);
       if (verdict.probe_required && !transferProbed(catalog, verdict.thread_id)
         && !(message.params?.name === 'transfer_file' && message.params?.arguments?.check_only === true)) {
@@ -69,7 +81,8 @@ export function transferProbeObserver(catalog, server) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [catalog, script] = process.argv.slice(2);
   const server = spawn(process.execPath, [script], { stdio: ['pipe', 'pipe', 'inherit'] });
-  const probe = transferProbeObserver(catalog, basename(script).replace(/-mcp\.mjs$/, ''));
+  const name = basename(script).replace(/-mcp\.mjs$/, '');
+  const probe = transferProbeObserver(catalog, name);
   createInterface({ input: server.stdout }).on('line', line => {
     let message;
     try { message = JSON.parse(line); } catch {} // preserve the server's protocol output
@@ -89,7 +102,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     try { message = JSON.parse(line); } catch { return; }
     const dispatch = () => forward(message, catalog,
       (value, verdict) => { probe.sent(value, verdict); server.stdin.write(`${JSON.stringify(value)}\n`); },
-      value => process.stdout.write(`${JSON.stringify(value)}\n`));
+      value => process.stdout.write(`${JSON.stringify(value)}\n`), name);
     // Calls retain arrival order while the verdict is pending. Discovery and protocol
     // notifications still pass immediately, so startup cannot wait on its own audit.
     const call = message.method === 'tools/call' ? (calls = calls.then(dispatch)) : dispatch();

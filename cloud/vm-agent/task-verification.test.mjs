@@ -8,7 +8,11 @@ import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 import { readTaskCatalog, transferProbeRequired, transferProbeSucceeded } from './task-catalog.mjs';
 
-const tools = [{ type: 'function', name: 'mcp__desktop__transfer_file', parameters: TRANSFER_TOOL.inputSchema }];
+const tools = [
+  { type: 'function', name: 'mcp__desktop__transfer_file', parameters: TRANSFER_TOOL.inputSchema },
+  { type: 'function', name: 'mcp__mac__transfer_file', parameters: TRANSFER_TOOL.inputSchema },
+  { type: 'function', name: 'mcp__mac__run_command', parameters: { type: 'object' } },
+];
 const brief = "Continue the unfinished draft.\n\nHive just changed itself for this task, because it couldn't make a Mac-to-VM transfer callable:\nfixture on main\nCarry on from where the last run stopped, with the change.";
 const probe = {
   type: 'item.completed', item: { type: 'mcp_tool_call', server: 'desktop', tool: 'transfer_file', status: 'completed',

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 
-for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'probe', 'no-probe', 'stale-probe', 'code']) {
+for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'probe', 'no-probe', 'stale-probe', 'missing-mac', 'startup-failed', 'code']) {
   test(`owner task completion checks its own runtime catalog: ${evidence}`, { timeout: 10000 }, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hive-task-runtime-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -36,17 +36,30 @@ for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only',
     }));
     writeFileSync(join(dir, 'event.json'), JSON.stringify({ thread_id: evidence === 'other-thread' ? 'old' : 'current',
       payload: { type: 'inference_started', request_payload: { path: 'payloads/1.json' } } }));
-    const repaired = ['probe', 'no-probe', 'stale-probe'].includes(evidence);
+    const repaired = ['probe', 'no-probe', 'stale-probe', 'missing-mac', 'startup-failed'].includes(evidence);
+    if (repaired && evidence !== 'missing-mac') {
+      const request = JSON.parse(readFileSync(join(dir, 'request.json'), 'utf8'));
+      request.tools.push({ type: 'namespace', name: 'mcp__mac', tools: [
+        { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema },
+        { type: 'function', name: 'run_command', parameters: { type: 'object' } },
+      ] });
+      writeFileSync(join(dir, 'request.json'), JSON.stringify(request));
+    }
     writeFileSync(join(bin, 'sudo'), `#!/bin/sh
 if [ "$2" = rm ]; then shift; exec "$@"; fi
 case "$3" in */task-catalog.mjs) shift; exec "$@" ;; esac
 [ "$2" = env ] || exit 2
+printf '%s\\n' "$@" > '${dir}/args'
 for arg do
   case "$arg" in CODEX_ROLLOUT_TRACE_ROOT=*) trace="\${arg#*=}" ;; esac
 done
 [ -n "$trace" ] || [ '${evidence}' = code ] || exit 2
 cat >/dev/null
 printf '%s\\n' '{"type":"thread.started","thread_id":"current"}'
+if [ '${evidence}' = startup-failed ]; then
+  printf '%s\\n' '{"type":"error","message":"The live transfer_file probe failed: fixture Mac offline."}'
+  exit 1
+fi
 if [ '${evidence}' != no-trace ] && [ '${evidence}' != code ]; then
   mkdir -p "$trace/trace-one/payloads"
   cp '${dir}/request.json' "$trace/trace-one/payloads/1.json"
@@ -87,6 +100,9 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     assert.match(catalog.sources['task-mcp.mjs'], /^[a-f0-9]{64}$/);
     assert.match(catalog.sources['transfer-mcp.mjs'], /^[a-f0-9]{64}$/);
     assert.equal(catalog.probe_required, repaired);
+    if (evidence === 'startup-failed') assert.equal(catalog.why, 'The live transfer_file probe failed: fixture Mac offline.');
+    assert.equal(readFileSync(join(dir, 'args'), 'utf8').includes('/task-runtime.mjs'), repaired,
+      'repair retries must use the runtime preflight launcher');
     assert.equal(existsSync(join(work, 'catalog-read.json')), false);
     assert.equal(existsSync(join(work, 'runtime-trace')), false);
     if (verified) assert.match(output, /Callable transfer catalog verified[\s\S]*✅ Done/);
