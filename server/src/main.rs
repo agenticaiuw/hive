@@ -1,6 +1,8 @@
-//! hive-server: Hive's one brain, on the VM. `hive-server` runs it; `hive-server code` prints a pairing code.
+//! hive-server: Hive's one brain, on the VM. `hive-server` runs it; `hive-server code` prints a pairing code;
+//! `hive-server cred` manages the VM's saved logins (the `hive-cred` command).
 mod api;
 mod codex;
+mod cred;
 mod tls;
 mod db;
 mod hive;
@@ -14,6 +16,11 @@ use std::sync::Arc;
 fn env(k: &str, d: &str) -> String { std::env::var(k).unwrap_or_else(|_| d.to_string()) }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("cred") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        if let Err(e) = cred::main(&args) { eprintln!("hive-cred: {e}"); std::process::exit(1); }
+        return;
+    }
     let state = PathBuf::from(env("HIVE_STATE", "/var/lib/hive"));
     std::fs::create_dir_all(&state).expect("state folder");
     let db = db::Db::open(&state.join("hive.db").to_string_lossy());
