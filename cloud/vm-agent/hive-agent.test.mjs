@@ -189,7 +189,7 @@ test('the VM screen batches actions, checks every step first and stops at the fi
 });
 
 test('Codex runs on its own home with its five tool servers, as the VM user, read-only', () => {
-  const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu' });
+  const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', tasksConfig: '' });
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
   const config = args.filter((_, i) => args[i - 1] === '-c');
@@ -215,6 +215,7 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_FILES_DIR=/f', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/mac-mcp.mjs']);
   assert.equal(mac.find(arg => arg.startsWith('HIVE_FILES_DIR=')), desktop.find(arg => arg.startsWith('HIVE_FILES_DIR=')),
     'Mac transfers land where the desktop tools look for files');
+  assert.ok(config.includes('mcp_servers.mac.required=true'), 'a failed Mac server cannot silently disappear');
   for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
@@ -244,6 +245,18 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.match(GUIDE, /never spend calls adjusting them/);
   assert.match(GUIDE, /Stacks for chords, Rhythm for\s+drums/);
   assert.doesNotMatch(GUIDE, /Look at the screenshot every action\s+returns before the next action/);
+});
+
+test('a task carries its board config through sudo to the Mac server, including after a repair', () => {
+  const options = { model: 'm', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f',
+    stepsFile: '/w/steps.log', label: 'R42-1', tasksConfig: '/config/board.json' };
+  for (const improveFile of ['', '/w/improve.json']) {
+    const args = codexArgs({ ...options, improveFile });
+    const mac = JSON.parse(args.find(c => c.startsWith('mcp_servers.mac.args=')).slice('mcp_servers.mac.args='.length));
+    assert.ok(mac.indexOf('HIVE_TASKS_CONFIG=/config/board.json') > mac.indexOf('env'));
+    assert.ok(mac.includes('HIVE_TASK_LABEL=R42-1'));
+  }
+  assert.throws(() => codexArgs({ ...options, tasksConfig: '/bad\npath' }), /unsupported/);
 });
 
 test('Codex events become one line each for the owner', () => {

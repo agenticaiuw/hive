@@ -62,7 +62,7 @@ test("a task can call only the tools the Mac listed, never Hive's own change job
 test("with no Mac connected transfer stays discoverable and a call says why; a failed call says what failed", async () => {
   const none = server({ board: fakeBoard({ macs: [] }).board, label: 'R1-1' });
   assert.equal((await none({ id: 1, method: 'initialize', params: {} })).result.instructions, OFFLINE);
-  assert.deepEqual((await none({ id: 2, method: 'tools/list' })).result.tools.map(t => t.name), ['transfer_file']);
+  assert.deepEqual((await none({ id: 2, method: 'tools/list' })).result.tools.map(t => t.name), ['run_command', 'transfer_file']);
   const refused = await none({ id: 3, method: 'tools/call', params: { name: 'click', arguments: {} } });
   assert.equal(refused.result.isError, true);
   assert.match(refused.result.content[0].text, /Hive isn't running there/);
@@ -91,8 +91,9 @@ test('a transfer listed while discovery is unavailable works in the same task on
     files: { uuid: () => 'copy-id', fetch: async key => `/files/${key}` } });
     await answer({ id: 1, method: 'initialize', params: {} });
     const listed = (await answer({ id: 2, method: 'tools/list' })).result.tools;
-    assert.deepEqual(listed.map(t => t.name), ['transfer_file']);
-    assert.equal(listed[0].inputSchema.properties.direction.enum[0], 'to_vm');
+    assert.deepEqual(listed.map(t => t.name), ['run_command', 'transfer_file']);
+    assert.deepEqual(listed[0].inputSchema.required, ['command', 'irreversible', 'step']);
+    assert.equal(listed[1].inputSchema.properties.direction.enum[0], 'to_vm');
     const request = { id: 3, method: 'tools/call', params: { name: 'transfer_file', arguments: {
       direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.',
     } } };
@@ -106,15 +107,22 @@ test('a transfer listed while discovery is unavailable works in the same task on
     assert.deepEqual(turns, ['take']);
     assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 2);
     assert.ok(calls.filter(c => c.path === '/v1/mac/calls').every(c => c.body.name === 'run_command' && c.body.request === 42));
+    const command = await answer({ id: 5, method: 'tools/call', params: { name: 'run_command', arguments: {
+      command: 'pwd', irreversible: false, step: 'Checking the Mac folder.',
+    } } });
+    assert.deepEqual(command.result, sourceInfo, 'the command learned at startup works after reconnection too');
   }
 });
 
 test('without board credentials no transfer is advertised or attempted', async () => {
   const answer = server({ board: null, turn: { use: () => assert.fail('must not take the Mac') } });
+  const init = await answer({ id: 0, method: 'initialize', params: {} });
+  assert.equal(init.error.code, -32603, 'configuration failure must fail the MCP handshake');
+  assert.match(init.error.message, /board configuration/);
   assert.deepEqual((await answer({ id: 1, method: 'tools/list' })).result.tools, []);
   const out = await answer({ id: 2, method: 'tools/call', params: { name: 'transfer_file', arguments: {} } });
   assert.equal(out.result.isError, true);
-  assert.match(out.result.content[0].text, /doesn't have the board's key/);
+  assert.match(out.result.content[0].text, /couldn't read the board configuration/);
 });
 
 test('a lost command reply keeps its call id when known and never submits the command again', async () => {
