@@ -41,10 +41,11 @@ fn sh(cmd: &str, dir: &Path) -> (bool, String) {
     }
 }
 
-/// Take in GitHub's changes (keeping this checkout's own commits on top), build, and restart Hive's server and the VM's
-/// devices; the restart comes after this answer is sent.
+/// Take in the changes the Mac pushed over SSH to the branch `incoming` (keeping this checkout's own commits on top), build,
+/// and restart Hive's server and the VM's devices; the restart comes after this answer is sent. (Not from GitHub until the
+/// org move: fetches there count as clones.)
 pub fn reinstall(repo: &Path) -> Result<Value, String> {
-    let (ok, out) = sh("(git pull --rebase --autostash -q || git rebase --abort); CARGO_TARGET_DIR=target cargo build --release -p hive-server -p hive-phone 2>&1 | tail -30", repo);
+    let (ok, out) = sh("(! git rev-parse -q --verify incoming >/dev/null || git rebase --autostash -q incoming || git rebase --abort); CARGO_TARGET_DIR=target cargo build --release -p hive-server -p hive-phone 2>&1 | tail -30", repo);
     let tail: String = out.chars().rev().take(4000).collect::<String>().chars().rev().collect();
     if !ok || tail.contains("error[") || tail.contains("error:") { return Err(format!("The build failed:\n{tail}")); }
     std::thread::spawn(|| {
