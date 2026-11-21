@@ -1,0 +1,6 @@
+# Lets the VM's Chromium use its own sandbox: Ubuntu blocks unprivileged user namespaces unless a profile allows them.
+abi <abi/4.0>,
+include <tunables/global>
+profile vm-chrome /opt/chromium/chrome flags=(unconfined) {
+  userns,
+}

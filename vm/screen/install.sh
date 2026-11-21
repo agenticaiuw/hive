@@ -27,6 +27,8 @@ fi
 rc_before=$(cat "$home/.config/openbox/rc.xml" 2>/dev/null || true)
 
 install -m 755 "$here/vm-xvfb" "$here/vm-desktop" "$here/vm-chrome" "$here/vm-screen-share" "$here/vm-shot" /usr/local/bin/
+install -m 644 "$here/vm-chrome.apparmor" /etc/apparmor.d/vm-chrome
+apparmor_parser -r /etc/apparmor.d/vm-chrome
 install -m 644 "$here/vm-xvfb.service" "$here/vm-desktop.service" "$here/vm-screen-share.service" /etc/systemd/system/
 
 as_user mkdir -p "$home/.config/tint2" "$home/.config/openbox" "$home/.local/share/applications" "$home/.vnc"
