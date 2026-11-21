@@ -12,7 +12,7 @@ import path from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const ROOT = path.resolve(import.meta.dirname, '../..')
+const ROOT = path.resolve(import.meta.dirname, '..')
 const SKIP = /(^|\/)(third_party|node_modules|vendor)\//
 
 const WORKERS_SUBDOMAINS = new Set(['your-subdomain', 'example'])
