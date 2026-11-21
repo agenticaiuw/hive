@@ -35,7 +35,7 @@ pub fn type_password(site: &str, username: &str) -> Result<String, String> {
 }
 
 fn sh(cmd: &str, dir: &Path) -> (bool, String) {
-    match Command::new("bash").args(["-lc", cmd]).current_dir(dir).output() {
+    match Command::new("bash").args(["-c", cmd]).current_dir(dir).output() {
         Ok(o) => (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
         Err(e) => (false, e.to_string()),
     }
