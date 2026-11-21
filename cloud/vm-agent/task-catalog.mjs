@@ -1,7 +1,7 @@
 // tools/list proves that an MCP server registered tools, not that the owner task's model
 // received them on the surface it uses. Inspect every request from that very exec thread,
 // including Responses Lite's additional_tools and code-mode declarations. Keep only names
-// and the verdict in the task's report; the agent must still probe before copying a file.
+// and the verdict in the task's report; a repaired transfer also needs its own live probe.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -23,16 +23,33 @@ export function requestCatalog(request, threadId) {
   for (const match of (exec?.description ?? '').matchAll(/declare const tools: \{ (\w+)\(args: \{([\s\S]*?)\}\): Promise<[^;]+>; \};/g)) {
     codeTools.set(match[1].replace(/^(mcp__[^_]+)__(.+)$/, '$1.$2'), match[2].replace(/^\s*\/\/.*$/gm, ''));
   }
-  const transfer = tools.get('mcp__desktop.transfer_file');
-  const schema = transfer?.parameters ?? transfer?.inputSchema;
-  const declaration = codeTools.get('mcp__desktop.transfer_file') ?? '';
   // When exec is present, a direct-only schema cannot prove the route the task uses.
-  const ok = exec ? /^\s*check_only\??: boolean;$/m.test(declaration)
-    && /^\s*direction: (?:"[^"]+"\s*\|\s*)*"to_vm"(?:\s*\|\s*"[^"]+")*;$/m.test(declaration)
-    : schema?.properties?.check_only?.type === 'boolean' && schema?.properties?.direction?.enum?.includes('to_vm');
+  // The stable desktop fallback remains callable alongside the dedicated server.
+  const ok = ['mcp__hivefiles.transfer_file', 'mcp__desktop.transfer_file'].some(name => {
+    const transfer = tools.get(name);
+    const schema = transfer?.parameters ?? transfer?.inputSchema;
+    const declaration = codeTools.get(name) ?? '';
+    return exec ? /^\s*check_only\??: boolean;$/m.test(declaration)
+      && /^\s*direction: (?:"[^"]+"\s*\|\s*)*"to_vm"(?:\s*\|\s*"[^"]+")*;$/m.test(declaration)
+      : schema?.properties?.check_only?.type === 'boolean' && schema?.properties?.direction?.enum?.includes('to_vm');
+  });
   return { thread_id: threadId, model: request.model, tools: [...tools.keys()].sort(),
     code_tools: [...codeTools.keys()].sort(), ok: Boolean(ok),
-    ...(!ok ? { why: `The owner task model did not receive desktop.transfer_file with the Mac-to-VM probe schema${exec ? ' inside functions.exec' : ''}.` } : {}) };
+    ...(!ok ? { why: `The owner task model did not receive hivefiles.transfer_file or desktop.transfer_file with the Mac-to-VM probe schema${exec ? ' inside functions.exec' : ''}.` } : {}) };
+}
+
+// againBrief appends this paragraph when a repair lands. Only a transfer repair
+// requires the Mac before the task can act; ordinary VM tasks may run without it.
+export function needsTransferProbe(text) {
+  return [...text.matchAll(/Hive just changed itself for this task, because it couldn't ([^\n]+):\n/g)]
+    .some(([, need]) => /transfer|mac.{0,30}file/i.test(need));
+}
+
+export function transferProbed(path, threadId) {
+  try {
+    const probe = JSON.parse(readFileSync(`${path}.probe`, 'utf8'));
+    return Boolean(threadId && probe.thread_id === threadId && probe.ready === true);
+  } catch { return false; }
 }
 
 // againBrief appends this line when a repair returns to the owner task, including when the
@@ -46,7 +63,7 @@ export function transferProbeRequired(brief) {
 export function transferProbeSucceeded(event) {
   const call = event.item;
   if (event.type !== 'item.completed' || call?.type !== 'mcp_tool_call' || call.status !== 'completed'
-    || !['desktop', 'mac'].includes(call.server) || call.tool !== 'transfer_file'
+    || !['hivefiles', 'desktop', 'mac'].includes(call.server) || call.tool !== 'transfer_file'
     || call.arguments?.check_only !== true || call.arguments?.direction !== 'to_vm'
     || call.result?.isError || call.error) return false;
   return (call.result?.content ?? []).some(part => {

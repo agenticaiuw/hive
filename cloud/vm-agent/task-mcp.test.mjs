@@ -38,3 +38,24 @@ test('absent, partial and unidentified verdicts time out without allowing a call
       sleep: async ms => { now += ms; } }), /No verified transfer catalog/);
   }
 });
+
+test('a transfer repair allows probes but cannot act on a schema check or another thread probe', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hive-probe-gate-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'runtime-catalog.json');
+  writeFileSync(path, JSON.stringify({ ok: true, thread_id: 'current', probe_required: true }));
+  const sent = [], replies = [];
+  const action = { id: 1, method: 'tools/call', params: { name: 'click' } };
+  const probe = { id: 2, method: 'tools/call', params: { name: 'transfer_file', arguments: { check_only: true } } };
+  const call = message => forward(message, path, v => sent.push(v), v => replies.push(v));
+  await call(action);
+  await call(probe);
+  writeFileSync(`${path}.probe`, JSON.stringify({ ready: true, thread_id: 'old' }));
+  await call(action);
+  assert.deepEqual(sent, [probe]);
+  assert.equal(replies.length, 2);
+  assert.ok(replies.every(r => r.result.isError));
+  writeFileSync(`${path}.probe`, JSON.stringify({ ready: true, thread_id: 'current' }));
+  await call(action);
+  assert.deepEqual(sent, [probe, action]);
+});

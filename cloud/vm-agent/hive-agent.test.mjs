@@ -188,7 +188,7 @@ test('the VM screen batches actions, checks every step first and stops at the fi
   assert.equal(ran.length, 0, 'a bad batch does nothing at all');
 });
 
-test('Codex runs on its own home with its five tool servers, as the VM user, read-only', () => {
+test('Codex runs on its own home with its six tool servers, as the VM user, read-only', () => {
   const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', tasksConfig: '' });
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
@@ -218,7 +218,7 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.equal(mac.find(arg => arg.startsWith('HIVE_FILES_DIR=')), desktop.find(arg => arg.startsWith('HIVE_FILES_DIR=')),
     'Mac transfers land where the desktop tools look for files');
   assert.ok(config.includes('mcp_servers.mac.required=true'), 'a failed Mac server cannot silently disappear');
-  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
+  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac', 'hivefiles']) assert.ok(config.includes(`mcp_servers.${name}.default_tools_approval_mode="approve"`), `${name} tools run without asking`);
   assert.throws(() => codexArgs({ model: 'x; rm -rf /', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s' }), /unsupported/);
   assert.match(GUIDE, /exact words, once/);
   assert.match(GUIDE, /authenticate/);
@@ -251,16 +251,20 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.doesNotMatch(GUIDE, /Look at the screenshot every action\s+returns before the next action/);
 });
 
-test('a task carries its board config through sudo to both transfer servers, including after a repair', () => {
+test('a task carries its board config through sudo to every transfer server, including after a repair', () => {
   const options = { model: 'm', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f',
     stepsFile: '/w/steps.log', label: 'R42-1', tasksConfig: '/config/board.json' };
   for (const improveFile of ['', '/w/improve.json']) {
     const args = codexArgs({ ...options, improveFile });
-    for (const namespace of ['mac', 'desktop']) {
+    for (const namespace of ['mac', 'desktop', 'hivefiles']) {
       const prefix = `mcp_servers.${namespace}.args=`;
       const server = JSON.parse(args.find(c => c.startsWith(prefix)).slice(prefix.length));
       assert.ok(server.indexOf('HIVE_TASKS_CONFIG=/config/board.json') > server.indexOf('env'));
       assert.ok(server.includes('HIVE_TASK_LABEL=R42-1'));
+      if (namespace === 'hivefiles') {
+        assert.ok(server.includes('HIVE_TASK_CATALOG=/w/runtime-catalog.json'));
+        assert.equal(server.at(-1), '/a/transfer-mcp.mjs');
+      }
     }
   }
   assert.throws(() => codexArgs({ ...options, tasksConfig: '/bad\npath' }), /unsupported/);

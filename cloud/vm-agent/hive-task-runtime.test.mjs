@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 
-for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'code']) {
+for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'probe', 'no-probe', 'stale-probe', 'code']) {
   test(`owner task completion checks its own runtime catalog: ${evidence}`, { timeout: 10000 }, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hive-task-runtime-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -16,14 +16,14 @@ for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only',
     // Emulate the task's sudo commands: Codex, the privileged catalog reader and cleanup.
     // The model's success message is deliberately untrustworthy unless its catalog agrees.
     const tools = evidence === 'missing-tool' ? [] : [
-      { type: 'namespace', name: 'mcp__desktop', tools: [
+      { type: 'namespace', name: 'mcp__hivefiles', tools: [
         { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema },
       ] },
     ];
     if (['code-mode', 'code-mode-lite', 'direct-only'].includes(evidence)) {
       if (evidence !== 'direct-only') tools.length = 0;
       tools.push({ type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec',
-        description: evidence === 'direct-only' ? '' : `declare const tools: { mcp__desktop__transfer_file(args: {
+        description: evidence === 'direct-only' ? '' : `declare const tools: { mcp__hivefiles__transfer_file(args: {
           check_only?: boolean;
           direction: "to_vm" | "to_mac";
           mac_path: string;
@@ -36,6 +36,7 @@ for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only',
     }));
     writeFileSync(join(dir, 'event.json'), JSON.stringify({ thread_id: evidence === 'other-thread' ? 'old' : 'current',
       payload: { type: 'inference_started', request_payload: { path: 'payloads/1.json' } } }));
+    const repaired = ['probe', 'no-probe', 'stale-probe'].includes(evidence);
     writeFileSync(join(bin, 'sudo'), `#!/bin/sh
 if [ "$2" = rm ]; then shift; exec "$@"; fi
 case "$3" in */task-catalog.mjs) shift; exec "$@" ;; esac
@@ -51,11 +52,16 @@ if [ '${evidence}' != no-trace ] && [ '${evidence}' != code ]; then
   cp '${dir}/request.json' "$trace/trace-one/payloads/1.json"
   cp '${dir}/event.json' "$trace/trace-one/trace.jsonl"
 fi
+if [ '${evidence}' = probe ] || [ '${evidence}' = stale-probe ]; then
+  printf '%s\\n' '{"ready":true,"thread_id":"${evidence === 'probe' ? 'current' : 'old'}"}' > "$trace/../runtime-catalog.json.probe"
+fi
 printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Finished."}}'
 `, { mode: 0o755 });
     const state = join(dir, 'state');
     // File-backed stdio also runs in the repair sandbox, which denies Node's pipe setup.
-    writeFileSync(join(dir, 'input'), 'Check the fixture task.');
+    writeFileSync(join(dir, 'input'), repaired
+      ? "Hive just changed itself for this task, because it couldn't expose a Mac-to-VM transfer tool:\nfixture\nCarry on."
+      : 'Check the fixture task.');
     const fds = [openSync(join(dir, 'input'), 'r'), openSync(join(dir, 'output'), 'w'), openSync(join(dir, 'errors'), 'w')];
     const child = spawn(process.execPath, [join(import.meta.dirname, 'hive-task.mjs'), ...(evidence === 'code' ? ['--code', dir] : [])], {
       env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, USER: 'test', HIVE_RUN_SENT: '1',
@@ -65,7 +71,7 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     for (const fd of fds) closeSync(fd);
     const output = readFileSync(join(dir, 'output'), 'utf8');
     const errors = readFileSync(join(dir, 'errors'), 'utf8');
-    const verified = ['current', 'code-mode', 'code-mode-lite'].includes(evidence);
+    const verified = ['current', 'code-mode', 'code-mode-lite', 'probe'].includes(evidence);
     assert.equal(code, verified || evidence === 'code' ? 0 : 1, `${output}\n${errors}`);
     const work = join(state, 'tasks', readdirSync(join(state, 'tasks'))[0]);
     if (evidence === 'code') {
@@ -79,6 +85,8 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     assert.equal(catalog.thread_id, 'current');
     assert.match(catalog.sources['hive-task.mjs'], /^[a-f0-9]{64}$/);
     assert.match(catalog.sources['task-mcp.mjs'], /^[a-f0-9]{64}$/);
+    assert.match(catalog.sources['transfer-mcp.mjs'], /^[a-f0-9]{64}$/);
+    assert.equal(catalog.probe_required, repaired);
     assert.equal(existsSync(join(work, 'catalog-read.json')), false);
     assert.equal(existsSync(join(work, 'runtime-trace')), false);
     if (verified) assert.match(output, /Callable transfer catalog verified[\s\S]*✅ Done/);
@@ -88,5 +96,7 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
       assert.match(events.at(-1).item.text, /catalog|transfer_file/);
       assert.notEqual(events.at(-1).item.text, 'Finished.');
     }
+    if (evidence === 'probe') assert.match(output, /Live transfer probe verified/);
+    else assert.doesNotMatch(output, /Live transfer probe verified/);
   });
 }

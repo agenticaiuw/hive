@@ -1,16 +1,17 @@
 // Let Codex discover the servers before its first model request, but do not let that
-// request act until Hive has checked its transfer schema. This is the owner task's
-// verdict, not a release test or another thread's catalog.
+// request act until Hive has checked its transfer schema. A transfer repair also
+// needs a live probe in this thread, not a release test or another task's evidence.
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { transferProbed } from './task-catalog.mjs';
 
 export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now } = {}) {
   const until = now() + timeoutMs;
   do {
     let catalog;
     try { catalog = JSON.parse(readFileSync(path, 'utf8')); } catch {} // the verdict may still be being written
-    if (catalog?.ok === true && catalog.thread_id) return;
+    if (catalog?.ok === true && catalog.thread_id) return catalog;
     if (catalog?.ok === false) throw new Error(catalog.why || 'The task transfer catalog failed verification.');
     if (now() >= until) throw new Error('No verified transfer catalog for this task; no tool call was forwarded.');
     await sleep(50);
@@ -19,7 +20,13 @@ export async function waitForCatalog(path, { timeoutMs = 15000, sleep = ms => ne
 
 export async function forward(message, catalog, send, reply) {
   if (message.method === 'tools/call') {
-    try { await waitForCatalog(catalog); }
+    try {
+      const verdict = await waitForCatalog(catalog);
+      if (verdict.probe_required && !transferProbed(catalog, verdict.thread_id)
+        && !(message.params?.name === 'transfer_file' && message.params?.arguments?.check_only === true)) {
+        throw new Error('Before continuing this repaired task, discover hivefiles.transfer_file in ALL_TOOLS, check that tools[name] is a function, and call it with check_only=true and the intended paths. Require ready=true.');
+      }
+    }
     catch (error) {
       reply({ jsonrpc: '2.0', id: message.id, result: {
         isError: true, content: [{ type: 'text', text: error.message }],

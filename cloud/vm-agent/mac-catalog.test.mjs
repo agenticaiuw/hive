@@ -16,11 +16,11 @@ const options = dir => ({ model: 'fixture', effort: 'low', workDir: dir, appDir:
   stateDir: dir, filesDir: join(dir, 'files'), stepsFile: join(dir, 'steps'), user: 'test', label: 'R42-1',
   tasksConfig: join(dir, 'board.json') });
 
-test('new and repaired tasks require both transfer catalogs and a probe in the current execution', () => {
+test('new and repaired tasks require the dedicated transfer catalog and a probe in the current execution', () => {
   for (const improveFile of ['', '/tmp/repair.json']) {
     const args = codexArgs({ ...options('/tmp/task'), improveFile });
     assert.ok(args.includes('features.code_mode_only_strict_3p_tools=false'));
-    for (const name of ['mac', 'desktop']) {
+    for (const name of ['mac', 'desktop', 'hivefiles']) {
       assert.ok(args.includes(`mcp_servers.${name}.required=true`));
       assert.ok(args.includes(`mcp_servers.${name}.startup_readiness="catalog"`));
       assert.ok(args.includes(`mcp_servers.${name}.omit_tools_from=["deferred"]`));
@@ -144,7 +144,7 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
     // Use every generated server setting. The empty home is the equivalent of exec's
     // --ignore-user-config; thread/start carries its cwd, sandbox, model and ephemeral flag.
     const config = args.filter((_, i) => args[i - 1] === '-c');
-    for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) {
+    for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac', 'hivefiles']) {
       config.push(`mcp_servers.${name}.env.NODE_OPTIONS=${JSON.stringify(`--import=${preload}`)}`,
         `mcp_servers.${name}.env.HIVE_TASKS_CONFIG=${JSON.stringify(join(dir, 'board.json'))}`);
     }
@@ -158,7 +158,7 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
       approvalPolicy: 'never', sandbox: 'read-only' });
     assert.ok(existsSync(join(dir, 'desktop-listed')), 'thread/start must wait for the desktop catalog');
     const threadId = started.thread.id;
-    for (const namespace of macEnabled ? ['mac', 'desktop'] : ['desktop']) {
+    for (const namespace of macEnabled ? ['mac', 'desktop', 'hivefiles'] : ['desktop', 'hivefiles']) {
       rmSync(join(dir, 'connected'), { force: true });
       const catalog = await rpc.request('mcpServerStatus/list', { threadId, serverName: namespace });
       const server = catalog.data.find(s => s.name === namespace);
@@ -175,7 +175,9 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
       const probe = await call({ ...transfer, check_only: true });
       assert.ok(!probe.isError, JSON.stringify(probe));
       assert.deepEqual(JSON.parse(probe.content[0].text), { ready: true, copied: false, direction: 'to_vm', mac_path: '/Desktop/clip.mov' });
-      assert.equal(existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '', before);
+      const after = readFileSync(join(dir, 'calls'), 'utf8');
+      const probeCall = JSON.parse(after.slice(before.length).trim());
+      assert.equal(probeCall.arguments.command, '/usr/bin/true');
       const result = await call(transfer);
       assert.ok(!result.isError, JSON.stringify(result));
       const copied = JSON.parse(result.content[0].text);
@@ -187,7 +189,7 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
     await rpc.close();
   }
   const calls = readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(calls.length, 10);
+  assert.equal(calls.length, 24);
   assert.ok(calls.every(c => c.request === 42 && c.name === 'run_command'));
   assert.deepEqual(readFileSync(source), bytes);
 });
@@ -214,7 +216,7 @@ for (const exposure of ['deferred', 'direct-only', 'code-mode']) test(`owner exe
     // settings that keep transfers available without deferred discovery.
     for (const setting of [
       'features.code_mode_only_strict_3p_tools=false',
-      ...['desktop', 'mac'].map(name => `mcp_servers.${name}.omit_tools_from=["deferred"]`),
+      ...['desktop', 'mac', 'hivefiles'].map(name => `mcp_servers.${name}.omit_tools_from=["deferred"]`),
     ]) {
       const at = args.indexOf(setting);
       assert.ok(at > 0 && args[at - 1] === '-c', `Missing exposure setting: ${setting}`);
@@ -224,7 +226,7 @@ for (const exposure of ['deferred', 'direct-only', 'code-mode']) test(`owner exe
   if (exposure === 'direct-only') {
     // Earlier repairs passed the direct catalog check while removing these methods
     // from ALL_TOOLS and the tools object. That must fail this task's runtime audit.
-    args.splice(-1, 0, '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]');
+    args.splice(-1, 0, '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac","mcp__hivefiles"]');
     for (let i = 0; i < args.length; i++) {
       args[i] = args[i].replace('omit_tools_from=["deferred"]', 'omit_tools_from=["code_mode","deferred"]');
     }
@@ -232,7 +234,7 @@ for (const exposure of ['deferred', 'direct-only', 'code-mode']) test(`owner exe
   const config = [`model_catalog_json=${JSON.stringify(models)}`, 'model_provider="fixture"',
     'model_providers.fixture.name="Offline fixture"', 'model_providers.fixture.base_url="http://127.0.0.1:1"',
     'model_providers.fixture.wire_api="responses"'];
-  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) {
+  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac', 'hivefiles']) {
     config.push(`mcp_servers.${name}.env.NODE_OPTIONS=${JSON.stringify(`--import=${preload}`)}`,
       `mcp_servers.${name}.env.HIVE_TASKS_CONFIG=${JSON.stringify(join(dir, 'board.json'))}`);
   }

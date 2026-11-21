@@ -253,7 +253,8 @@ test('a Mac without command support cannot offer or attempt a transfer', async (
 
 test('the live transfer probe requires Mac command support but takes no lease and copies nothing', async () => {
   for (const tools of [null, TOOLS, [{ name: 'run_command' }]]) {
-    const { board, calls } = fakeBoard({ macs: tools ? [{ name: 'test-mac', tools }] : [] });
+    const { board, calls } = fakeBoard({ macs: tools ? [{ name: 'test-mac', tools }] : [],
+      answer: { result: { content: [{ type: 'text', text: '{"exit_code":0}' }] } } });
     const unused = () => assert.fail('a probe must not take the Mac or copy a file');
     const answer = server({ board, label: 'R42-1', turn: { use: unused }, files: { fetch: unused, put: unused, uuid: unused } });
     const out = await answer({ id: 1, method: 'tools/call', params: { name: 'transfer_file', arguments: {
@@ -263,6 +264,8 @@ test('the live transfer probe requires Mac command support but takes no lease an
       assert.equal(JSON.parse(out.result.content[0].text).ready, true);
       assert.equal(JSON.parse(out.result.content[0].text).copied, false);
     } else assert.equal(out.result.isError, true);
-    assert.ok(!calls.some(c => c.path === '/v1/mac/calls'));
+    const commands = calls.filter(c => c.path === '/v1/mac/calls');
+    assert.equal(commands.length, tools?.some(t => t.name === 'run_command') ? 1 : 0);
+    if (commands.length) assert.equal(commands[0].body.arguments.command, '/usr/bin/true');
   }
 });
