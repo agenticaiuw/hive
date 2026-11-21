@@ -3,7 +3,7 @@
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use hive_protocol::Conf;
-use tao::event::{Event, StartCause, WindowEvent};
+use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::WindowBuilder;
 
@@ -46,7 +46,7 @@ pub fn run(conf: Option<Conf>, connect: fn(&str) -> Result<Conf, String>, serve:
         let show = || { window.set_visible(true); window.set_minimized(false); window.set_focus(); };
         match event {
             #[cfg(target_os = "macos")]
-            Event::NewEvents(StartCause::Init) => menu.init_for_nsapp(),
+            Event::NewEvents(tao::event::StartCause::Init) => menu.init_for_nsapp(),
             Event::UserEvent(Msg::Key) => if window.is_visible() && window.is_focused() {
                 #[cfg(target_os = "macos")]
                 { use tao::platform::macos::EventLoopWindowTargetExtMacOS; _target.hide_application(); }

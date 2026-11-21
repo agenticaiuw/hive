@@ -113,11 +113,20 @@ pub fn screenshot() -> Result<Value, String> {
 static HELPER: Mutex<Option<BufReader<UnixStream>>> = Mutex::new(None);
 static PPC: Mutex<f64> = Mutex::new(1.0);
 
+/// The helper chimes when it takes or gives back the keyboard unless its sound switch says off; the owner wants no tone.
+fn quiet() {
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support");
+    std::fs::create_dir_all(dir.join("Hive")).ok(); // "Personal Agent" links to it on Macs set up before
+    std::fs::create_dir_all(dir.join("Personal Agent")).ok();
+    std::fs::write(dir.join("Personal Agent/speak-aloud"), "off\n").ok();
+}
+
 fn request(line: &str) -> Result<String, String> {
     let mut slot = HELPER.lock().unwrap();
     for attempt in 0..2 {
         if slot.is_none() {
             let st = UnixStream::connect("/tmp/agent-vhid.sock").map_err(|_| "The Mac's input helper isn't running.".to_string())?;
+            quiet();
             st.set_read_timeout(Some(Duration::from_secs(30))).ok();
             *slot = Some(BufReader::new(st));
         }
