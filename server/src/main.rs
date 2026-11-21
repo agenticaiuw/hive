@@ -30,7 +30,7 @@ fn main() {
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).ok(); }
     let repo = PathBuf::from(env("HIVE_REPO", "/opt/hive"));
-    let version = std::process::Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--short", "HEAD"]).output().ok()
+    let version = std::process::Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--short=12", "HEAD"]).output().ok()
         .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "dev".into());
 
     // Hive's own Codex home: the owner's Codex login, none of their other Codex settings.

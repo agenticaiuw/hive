@@ -89,7 +89,7 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
                 Ok((200, v)) => {
                     last_hello = Instant::now();
                     let want = v["version"].as_str().unwrap_or("").to_string();
-                    if !c.repo.is_empty() && !want.is_empty() && want != VERSION && want != tried {
+                    if !c.repo.is_empty() && !want.is_empty() && !want.starts_with(VERSION) && !VERSION.starts_with(want.as_str()) && want != tried {
                         tried = want.clone();
                         if let Err(e) = update(&c, node.package) { eprintln!("update to {want}: {e}"); }
                     }
