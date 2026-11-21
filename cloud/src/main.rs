@@ -1,11 +1,9 @@
 //! hive-server: Hive's one brain, on the VM. `hive-server` runs it; `hive-server code` prints a pairing code.
 mod api;
-mod b64;
 mod codex;
 mod db;
 mod hive;
 mod http;
-mod phone;
 mod tools;
 mod vm;
 

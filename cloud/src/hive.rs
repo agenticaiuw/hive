@@ -1,9 +1,10 @@
-//! Hive's brain: every request is planned into tasks and rules, each task gets an agent (a Codex thread),
-//! agents' tool calls reach the nodes, and only one agent at a time drives the Mac's input or the phone.
+//! Hive's brain: every request is planned into tasks and rules, each task gets an agent (a Codex thread), agents' tool
+//! calls reach the devices that declared those tools, and tools that share a lock are used by one agent at a time.
 use crate::args;
 use crate::codex::{tool_result, Codex, Event};
 use crate::db::{now, Db};
-use crate::{phone, tools};
+use crate::tools;
+use hive_node::b64;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -27,7 +28,6 @@ pub struct Hive {
     last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
     changed: (Mutex<u64>, Condvar),
-    pub phone: phone::Phone,
 }
 
 pub const LEVELS: [(&str, &str, &str); 4] = [
@@ -38,6 +38,10 @@ const PLANNER_MODEL: (&str, &str) = ("gpt-6.1-terra", "low");
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
 fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
+fn list_values(v: &Value) -> Vec<Value> {
+    let parsed: Value = match v { Value::String(t) => serde_json::from_str(t).unwrap_or(Value::Null), o => o.clone() };
+    parsed.as_array().cloned().unwrap_or_default()
+}
 pub fn list(v: &Value) -> Vec<String> {
     let parsed: Value = match v { Value::String(t) => serde_json::from_str(t).unwrap_or(Value::Null), o => o.clone() };
     parsed.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
@@ -45,9 +49,8 @@ pub fn list(v: &Value) -> Vec<String> {
 
 impl Hive {
     pub fn new(db: Db, state: PathBuf, repo: PathBuf, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String) -> Arc<Hive> {
-        let phone = phone::Phone::new(state.clone());
         Arc::new(Hive {
-            db, state, repo, codex_cmd, codex_env, owner_key, version, phone,
+            db, state, repo, codex_cmd, codex_env, owner_key, version,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
@@ -175,10 +178,11 @@ impl Hive {
         for r in self.db.all("select id, text, scope from rules where active=1 order by id", &[]) {
             t += &format!("R{} [{}] {}\n", r["id"], s(&r["scope"]), s(&r["text"]));
         }
-        t += "\nNodes online: ";
-        let online: Vec<String> = self.db.all("select kind, name from nodes where seen > ?", args!(now() - 90_000))
-            .iter().map(|n| format!("{} ({})", s(&n["kind"]), s(&n["name"]))).collect();
-        t += &if online.is_empty() { "vm only".to_string() } else { format!("vm, {}", online.join(", ")) };
+        t += "\nNodes: vm (the VM's shell and its own Chrome; always there), hive (changing Hive's own code)";
+        for n in self.db.all("select kind, name, notes, seen from nodes order by kind", &[]) {
+            let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline now" };
+            t += &format!(", {} ({}, {on}: {})", s(&n["kind"]), s(&n["name"]), s(&n["notes"]));
+        }
         t
     }
 
@@ -194,7 +198,7 @@ impl Hive {
         self.watchers.lock().unwrap().insert(thread.clone(), tx);
         let result = (|| {
             codex.request("turn/start", json!({ "threadId": thread, "effort": PLANNER_MODEL.1,
-                "input": [{ "type": "text", "text": self.planner_input(req) }], "outputSchema": plan_schema() }), 60)?;
+                "input": [{ "type": "text", "text": self.planner_input(req) }], "outputSchema": plan_schema(&self.kinds()) }), 60)?;
             let mut last = String::new();
             loop {
                 let (method, params) = rx.recv_timeout(Duration::from_secs(240)).map_err(|_| "the planner took too long".to_string())?;
@@ -268,14 +272,12 @@ impl Hive {
         }
         t += "\nWhere you work:\n";
         t += VM_NOTES;
-        for n in &nodes {
-            match n.as_str() {
-                "mac" => t += "\n- The owner's Mac: mac_* tools (screenshot, click, type, keys, shell). One agent at a time drives its keyboard and mouse; the shell runs alongside.",
-                "browser" => t += "\n- The owner's own Chrome, signed in to their accounts: browser_* tools. Use browser_js for anything a page script can do. If one way fails, write different code; never give up on the first error. save_page_rule changes how a site looks for good.",
-                "phone" => t += "\n- The owner's iPhone: phone_* tools. One agent at a time touches it.",
-                "hive" => t += &format!("\n- Hive's own code: the git checkout at {} (Rust server in server/, Mac node and CLI in node/, Chrome extension in extension/, dashboard in server/dashboard.html). Keep it lean. Commit with a clear message, push to origin main, then call reinstall.", self.repo.display()),
-                _ => {}
-            }
+        if nodes.iter().any(|n| n == "hive") {
+            t += &format!("\n- Hive's own code: the git checkout at {}; README.md says which club team's folder holds what. Keep it lean. \
+                Commit with a clear message, then call reinstall; devices with a checkout of Hive pick the commit up from here.", self.repo.display());
+        }
+        for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
+            if nodes.contains(&s(&n["kind"])) && !s(&n["notes"]).is_empty() { t += &format!("\n- {}", s(&n["notes"])); }
         }
         t
     }
@@ -294,7 +296,7 @@ impl Hive {
             let codex = self.codex()?;
             let r = codex.request("thread/start", json!({
                 "model": model, "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": self.instructions(&task), "dynamicTools": tools::for_nodes(&nodes),
+                "developerInstructions": self.instructions(&task), "dynamicTools": self.tools_for(&nodes),
             }), 60)?;
             let thread = s(&r["thread"]["id"]);
             if thread.is_empty() { return Err("Codex gave no thread".to_string()); }
@@ -412,18 +414,7 @@ impl Hive {
             return;
         }
         match end {
-            Some(e) if e["done"] == true => {
-                self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&e["outcome"]), now(), task));
-                self.db.run("update agents set status='done', updated=? where id=?", args!(now(), agent));
-                self.log(agent, task, 0, "done", &s(&e["outcome"]));
-                self.nudges.lock().unwrap().remove(&agent);
-            }
-            Some(e) if !s(&e["why"]).trim().is_empty() && !s(&e["need"]).trim().is_empty() => {
-                self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&e["why"]), s(&e["need"]), now(), task));
-                self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
-                self.log(agent, task, 0, "needs you", &format!("{} Needs: {}", s(&e["why"]), s(&e["need"])));
-                self.nudges.lock().unwrap().remove(&agent);
-            }
+            Some(e) if self.finish(agent, task, &e) => {}
             _ => {
                 let n = { let mut m = self.nudges.lock().unwrap(); let e = m.entry(agent).or_insert(0); *e += 1; *e };
                 if n <= 2 {
@@ -443,7 +434,31 @@ impl Hive {
         self.bump();
     }
 
-    // ---- locks: one agent at a time on the Mac's input and the phone's screen ----
+    /// A task ended: done with the outcome, or needs the owner (exact why and need). False if it says neither.
+    fn finish(&self, agent: i64, task: i64, e: &Value) -> bool {
+        if e["done"] == true {
+            self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&e["outcome"]), now(), task));
+            self.db.run("update agents set status=case when kind='claude' then status else 'done' end, updated=? where id=?", args!(now(), agent));
+            self.log(agent, task, 0, "done", &s(&e["outcome"]));
+        } else if !s(&e["why"]).trim().is_empty() && !s(&e["need"]).trim().is_empty() {
+            self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&e["why"]), s(&e["need"]), now(), task));
+            self.db.run("update agents set status=case when kind='claude' then status else 'idle' end, updated=? where id=?", args!(now(), agent));
+            self.log(agent, task, 0, "needs you", &format!("{} Needs: {}", s(&e["why"]), s(&e["need"])));
+        } else {
+            return false;
+        }
+        self.nudges.lock().unwrap().remove(&agent);
+        self.bump();
+        true
+    }
+
+    /// A Claude Code session says how its task ended.
+    pub fn end_task(&self, task: i64, e: &Value) -> Result<(), String> {
+        let agent = self.db.get("select agent_id from tasks where id=?", args!(task)).and_then(|r| r["agent_id"].as_i64()).ok_or(format!("there's no task #{task} with an agent"))?;
+        if self.finish(agent, task, e) { Ok(()) } else { Err("Say done with the outcome, or needs with exactly why and what the owner must do.".into()) }
+    }
+
+    // ---- locks: tools that share a lock are used by one agent at a time ----
 
     fn take_lock(&self, name: &str, agent: i64) -> Result<(), String> {
         let got = self.wait_until(120_000, || {
@@ -470,22 +485,49 @@ impl Hive {
         json!(self.locks.lock().unwrap().iter().map(|(k, v)| json!({ "lock": k, "agent": v.0, "since": v.1 })).collect::<Vec<_>>())
     }
 
-    // ---- nodes: tool calls wait in the calls table until the node takes and answers them ----
+    // ---- devices: each declares its tools; calls wait in the calls table until the device takes and answers them ----
 
-    pub fn call_node(&self, kind: &str, tool: &str, args: &Value, agent: i64, secs: u64) -> Result<Value, String> {
-        let node = self.db.get("select id from nodes where kind=? and seen > ? order by seen desc limit 1", args!(kind, now() - 90_000))
-            .map(|r| s(&r["id"]))
-            .ok_or_else(|| format!("The owner's {kind} isn't connected to Hive right now, so this tool can't run. Do the task another way, \
-                or end saying the {kind} needs to be online (for the Mac: Hive running; for Chrome: the Hive extension)."))?;
-        let id = self.db.run("insert into calls(node, tool, args, agent_id, at) values(?,?,?,?,?)", args!(node, tool, args.clone(), agent, now()));
+    /// The device kinds Hive knows, for the planner.
+    fn kinds(&self) -> Vec<String> {
+        let mut k = vec!["vm".to_string(), "hive".to_string()];
+        k.extend(self.db.all("select distinct kind from nodes order by kind", &[]).iter().map(|r| s(&r["kind"])));
+        k
+    }
+
+    /// Every tool a task on these devices gets: the cloud's, then each device's (the most recently seen device of a kind wins).
+    fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
+        let mut out: Vec<Value> = tools::cloud(kinds);
+        let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
+        for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
+            if !kinds.contains(&s(&n["kind"])) { continue; }
+            for t in list_values(&n["tools"]) {
+                if names.insert(s(&t["name"])) { out.push(t); }
+            }
+        }
+        out.iter().map(tools::for_codex).collect()
+    }
+
+    /// The device that declared this tool (the most recently seen one), and its declaration.
+    fn device_for(&self, tool: &str) -> Option<(Value, Value)> {
+        self.db.all("select id, kind, name, seen, tools from nodes order by seen desc", &[]).into_iter()
+            .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == tool).map(|t| (n.clone(), t)))
+    }
+
+    pub fn call_node(&self, node: &Value, tool: &str, args: &Value, agent: i64, secs: u64) -> Result<Value, String> {
+        let (id, kind) = (s(&node["id"]), s(&node["kind"]));
+        if node["seen"].as_i64().unwrap_or(0) < now() - 90_000 {
+            return Err(format!("The owner's {kind} ({}) isn't connected to Hive right now, so {tool} can't run. Do the task another way, \
+                or end saying it needs to be online.", s(&node["name"])));
+        }
+        let call = self.db.run("insert into calls(node, tool, args, agent_id, at) values(?,?,?,?,?)", args!(id, tool, args.clone(), agent, now()));
         self.bump();
         let done = self.wait_until(secs * 1000, || {
-            self.db.get("select result from calls where id=? and status='done'", args!(id)).map(|r| s(&r["result"]))
+            self.db.get("select result from calls where id=? and status='done'", args!(call)).map(|r| s(&r["result"]))
         });
         match done {
             Some(r) => Ok(serde_json::from_str(&r).unwrap_or(json!({ "text": r }))),
             None => {
-                self.db.run("update calls set status='timeout' where id=?", args!(id));
+                self.db.run("update calls set status='timeout' where id=?", args!(call));
                 Err(format!("The {kind} didn't answer {tool} within {secs}s."))
             }
         }
@@ -499,28 +541,22 @@ impl Hive {
         let agent_row = self.db.get("select * from agents where thread=?", args!(s(&params["threadId"]))).unwrap_or(json!({}));
         let (agent, task) = (agent_row["id"].as_i64().unwrap_or(0), agent_row["task_id"].as_i64().unwrap_or(0));
         self.log(agent, task, 0, "tool", &format!("{name} {}", short(&a.to_string(), 300)));
-        let r = self.tool_inner(&name, a, agent, task);
-        match r {
-            Ok(v) => {
+        match self.tool_inner(&name, a, agent, task) {
+            Ok(v) if v["error"].is_null() => {
                 let images: Vec<String> = v["images"].as_array().map(|i| i.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-                let text = if v["text"].is_string() { s(&v["text"]) } else if v.is_string() { s(&v) } else { v.to_string() };
-                tool_result(v["error"].is_null(), if v["error"].is_null() { &text } else { v["error"].as_str().unwrap_or("failed") }, &images)
+                tool_result(true, &if v.is_string() { s(&v) } else { s(&v["text"]) }, &images)
             }
+            Ok(v) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {}", s(&v["error"]))); tool_result(false, &s(&v["error"]), &[]) }
             Err(e) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {e}")); tool_result(false, &e, &[]) }
         }
     }
 
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
-        if let Some(lock) = tools::lock_for(name) { self.take_lock(lock, agent)?; }
         match name {
             "message_agent" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;
                 self.message_task(to, &s(&a["text"]), &format!("task #{task}'s agent"))?;
-                Ok(json!(format!("Sent to task #{to}'s agent.")))
-            }
-            "list_tasks" => {
-                let rows = self.db.all("select id, title, status, nodes, project from tasks where status in ('open','working','needs') order by id", &[]);
-                Ok(json!(rows.iter().map(|t| format!("#{} [{}] {} (nodes {})", t["id"], s(&t["status"]), s(&t["title"]), s(&t["nodes"]))).collect::<Vec<_>>().join("\n")))
+                return Ok(json!(format!("Sent to task #{to}'s agent.")));
             }
             "info" => {
                 let (key, value) = (s(&a["key"]), s(&a["value"]));
@@ -529,37 +565,27 @@ impl Hive {
                     return Ok(json!("Saved."));
                 }
                 let rows = if key.is_empty() { self.db.all("select key, value from info order by key", &[]) } else { self.db.all("select key, value from info where key=?", args!(key)) };
-                Ok(json!(rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")))
+                return Ok(json!(rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")));
             }
-            "save_page_rule" => {
-                let site = s(&a["site"]).trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("").to_string();
-                if site.is_empty() { return Err("give the site's host".into()); }
-                let code = json!({ "css": s(&a["css"]), "js": s(&a["js"]) }).to_string();
-                self.db.run("update rules set active=0 where scope=? and text=? and code is not null", args!(format!("site:{site}"), s(&a["text"])));
-                let id = self.db.run("insert into rules(text, quote, scope, code, at) values(?,?,?,?,?)", args!(s(&a["text"]), "", format!("site:{site}"), code, now()));
-                Ok(json!(format!("Saved as rule R{id}; the extension applies it on {site} from the next page load.")))
-            }
-            "vm_type_password" => crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
-            "reinstall" => crate::vm::reinstall(&self.repo),
-            "mac_get_file" => {
-                let r = self.call_node("mac", name, a, agent, 600)?;
-                let data = crate::b64::decode(&s(&r["data"])).ok_or("the Mac sent no file")?;
-                let fname = std::path::Path::new(&s(&a["path"])).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or("file".into());
-                let path = self.save_file(&fname, &data, "mac");
-                Ok(json!(format!("Saved on the VM at {}", path.display())))
-            }
-            "mac_put_file" => {
-                let data = std::fs::read(s(&a["vm_path"])).map_err(|e| format!("couldn't read {}: {e}", s(&a["vm_path"])))?;
-                self.call_node("mac", name, &json!({ "path": s(&a["path"]), "data": crate::b64::encode(&data) }), agent, 600)
-            }
-            n if n.starts_with("mac_") => {
-                let secs = if n == "mac_shell" { a["timeout"].as_u64().unwrap_or(120).clamp(5, 1800) + 15 } else { 90 };
-                self.call_node("mac", n, a, agent, secs)
-            }
-            n if n.starts_with("browser_") => self.call_node("browser", n, a, agent, 120),
-            n if n.starts_with("phone_") => self.phone.call(n, a),
-            _ => Err(format!("Hive has no tool called {name}")),
+            "vm_type_password" => return crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
+            "reinstall" => return crate::vm::reinstall(&self.repo),
+            _ => {}
         }
+        let (node, decl) = self.device_for(name).ok_or(format!("Hive has no tool called {name}"))?;
+        if let Some(lock) = decl["lock"].as_str() { self.take_lock(&format!("{} {lock}", s(&node["name"])), agent)?; }
+        // Files cross with the call: vm_path's bytes go to the device, and a file the device sends back lands in Hive's files.
+        let mut args = a.clone();
+        if let Some(p) = a["vm_path"].as_str() {
+            args["data"] = json!(b64::encode(&std::fs::read(p).map_err(|e| format!("couldn't read {p}: {e}"))?));
+        }
+        let secs = a["timeout"].as_u64().map(|t| t.clamp(1, 1800) + 15).or(decl["timeout"].as_u64()).unwrap_or(120);
+        let mut r = self.call_node(&node, name, &args, agent, secs)?;
+        if let (Some(data), Some(fname)) = (r["data"].as_str(), r["name"].as_str()) {
+            let bytes = b64::decode(data).ok_or("the device sent a broken file")?;
+            let path = self.save_file(fname, &bytes, &s(&node["kind"]));
+            r = json!({ "text": format!("{}Saved on the VM at {}", r["text"].as_str().map(|t| format!("{t}\n")).unwrap_or_default(), path.display()) });
+        }
+        Ok(r)
     }
 
     pub fn save_file(&self, name: &str, data: &[u8], node: &str) -> PathBuf {
@@ -585,7 +611,7 @@ fn ended(text: &str) -> Option<Value> {
     serde_json::from_str::<Value>(text).ok().filter(|v| v["done"].is_boolean())
 }
 
-fn plan_schema() -> Value {
+fn plan_schema(kinds: &[String]) -> Value {
     let st = json!({ "type": "string" });
     json!({
         "type": "object", "additionalProperties": false, "required": ["reply", "rules", "tasks", "messages"],
@@ -596,7 +622,7 @@ fn plan_schema() -> Value {
             "tasks": { "type": "array", "items": { "type": "object", "additionalProperties": false,
                 "required": ["title", "quote", "nodes", "level", "project"],
                 "properties": { "title": st, "quote": st, "project": st,
-                    "nodes": { "type": "array", "items": { "type": "string", "enum": ["vm", "mac", "browser", "phone", "hive"] } },
+                    "nodes": { "type": "array", "items": { "type": "string", "enum": kinds } },
                     "level": { "type": "string", "enum": ["easy", "normal", "hard", "hardest"] } } } },
             "messages": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["task", "text"],
                 "properties": { "task": { "type": "integer" }, "text": st } } },
@@ -604,15 +630,13 @@ fn plan_schema() -> Value {
     })
 }
 
-const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from their Mac, their Chrome, their iPhone, \
-the dashboard, or a Claude Code session) comes to you first. Turn it into:
+const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
+Claude Code session) comes to you first. Turn it into:
 - rules: standing instructions for the future (\"always…\", \"never…\", \"from now on…\", preferences). text = the rule, short; \
-quote = the owner's exact words; scope = '' for everywhere, or node:mac|browser|phone|vm|hive, site:<host>, app:<name>, \
+quote = the owner's exact words; scope = '' for everywhere, or node:<one of the nodes below>, site:<host>, app:<name>, \
 folder:<path> when it's only about that.
-- tasks: work to do now. title = short imperative; quote = the owner's exact words for it; nodes = where the work happens: \
-vm (the VM's shell and its own Chrome; always available), mac (the owner's Mac screen, keyboard, mouse and shell), browser (the \
-owner's own Chrome, signed in to their accounts), phone (their iPhone), hive (changing Hive's own code); level = easy|normal|hard|hardest; \
-project = a short project name, the same as an open task's when related.
+- tasks: work to do now. title = short imperative; quote = the owner's exact words for it; nodes = where the work happens (the \
+nodes listed below); level = easy|normal|hard|hardest; project = a short project name, the same as an open task's when related.
 - messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent \
 instead of making a new task: task = its id, text = the owner's words.
 - reply: one short sentence to the owner saying what happens next.
@@ -621,7 +645,7 @@ independent. A question is a task too (vm, easy) unless the answer is right here
 session become tasks that session does itself.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
-server runs on this VM (where you run, as root) and reaches the owner's Mac, their Chrome and their iPhone. Work until the task is \
+server runs on this VM (where you run, as root) and reaches the owner's devices. Work until the task is \
 done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
 what you need from the owner. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
 keep going. Never send a message \

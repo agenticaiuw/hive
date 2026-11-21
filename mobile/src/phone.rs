@@ -1,11 +1,9 @@
-//! The owner's iPhone through its relay in the cloud (WebDriverAgent behind it). Nothing goes through the Mac.
+//! The iPhone through its relay (WebDriverAgent on the phone behind it).
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 pub struct Phone {
-    state: PathBuf,
     sid: Mutex<Option<String>>,
     scale: Mutex<Option<f64>>,
 }
@@ -13,12 +11,12 @@ pub struct Phone {
 const DOWN: &str = "The iPhone isn't connected to its relay: Hive Phone has to be open on it. The owner needs to open Hive Phone on the iPhone.";
 
 impl Phone {
-    pub fn new(state: PathBuf) -> Phone {
-        Phone { state, sid: Mutex::new(None), scale: Mutex::new(None) }
+    pub fn new() -> Phone {
+        Phone { sid: Mutex::new(None), scale: Mutex::new(None) }
     }
 
     fn config(&self) -> Result<(String, String), String> {
-        let own = [self.state.join("phone-relay.json"), "/home/ubuntu/hive-vm-agent/state/phone-relay.json".into()].iter()
+        let own = [hive_node::conf_path("phone-relay"), "/home/ubuntu/hive-vm-agent/state/phone-relay.json".into()].iter()
             .find_map(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(c) = own {
             return Ok((c["url"].as_str().unwrap_or("").trim_end_matches('/').to_string(), c["token"].as_str().unwrap_or("").to_string()));
@@ -83,7 +81,7 @@ impl Phone {
     fn screenshot(&self) -> Result<String, String> {
         let v = self.wda("/screenshot", "GET", None, 45)?;
         let b64 = v["value"].as_str().filter(|s| !s.is_empty()).ok_or("the phone returned no screenshot")?.to_string();
-        if let Some(head) = crate::b64::decode(&b64[..b64.len().min(44)]) {
+        if let Some(head) = hive_node::b64::decode(&b64[..b64.len().min(44)]) {
             if head.len() >= 24 {
                 let width = u32::from_be_bytes([head[16], head[17], head[18], head[19]]) as f64;
                 if let Ok(w) = self.in_session("/window/size", "GET", None, 30) {
@@ -119,7 +117,7 @@ impl Phone {
             "phone_unlock" => {
                 let (st, v) = self.raw("/agent/unlock-now", "POST", Some(json!({})), 150)?;
                 *self.sid.lock().unwrap() = None;
-                if v["unlocked"].as_bool() == Some(true) { return Ok(json!("The iPhone is unlocked.")); }
+                if v["unlocked"].as_bool() == Some(true) { return Ok(json!({ "text": "The iPhone is unlocked." })); }
                 Err(format!("The phone didn't unlock ({}). Don't retry; stop using the phone and say why.", v["error"].as_str().map(String::from).unwrap_or(format!("relay said {st}"))))
             }
             "phone_screenshot" => Ok(json!({ "text": "The iPhone's screen.", "images": [self.screenshot()?] })),
@@ -136,18 +134,6 @@ impl Phone {
                     json!({ "type": "pointerMove", "duration": 300, "x": bx, "y": by }), json!({ "type": "pointerUp", "button": 0 })])?;
                 shot("Swiped.")
             }
-            "phone_tap_element" => {
-                let label = a["label"].as_str().unwrap_or("");
-                let lit = serde_json::to_string(label).unwrap();
-                let found = self.in_session("/element", "POST", Some(json!({ "using": "accessibility id", "value": label })), 30)
-                    .or_else(|_| self.in_session("/element", "POST", Some(json!({ "using": "predicate string",
-                        "value": format!("visible == 1 AND (name == {lit} OR label == {lit} OR label CONTAINS[c] {lit})") })), 30))
-                    .map_err(|_| format!("Nothing called {lit} on screen."))?;
-                let v = &found["value"];
-                let id = v["ELEMENT"].as_str().or(v["element-6066-11e4-a52e-4f735466cecf"].as_str()).ok_or(format!("Nothing called {lit} on screen."))?;
-                self.in_session(&format!("/element/{id}/click"), "POST", Some(json!({})), 30)?;
-                shot("Tapped.")
-            }
             "phone_type" => {
                 let chars: Vec<String> = a["text"].as_str().unwrap_or("").chars().map(String::from).collect();
                 self.in_session("/wda/keys", "POST", Some(json!({ "value": chars })), 60)?;
@@ -163,49 +149,7 @@ impl Phone {
                 self.in_session("/wda/apps/activate", "POST", Some(json!({ "bundleId": a["bundle_id"] })), 30)?;
                 shot("Opened.")
             }
-            "phone_elements" => {
-                let src = self.in_session("/source", "GET", None, 45)?;
-                if self.scale.lock().unwrap().is_none() { self.screenshot()?; }
-                let s = self.scale.lock().unwrap().unwrap_or(1.0);
-                Ok(json!(elements(src["value"].as_str().unwrap_or(""), s).join("\n")))
-            }
             _ => Err(format!("no phone tool {tool}")),
         }
-    }
-}
-
-fn attr(tag: &str, name: &str) -> Option<String> {
-    let key = format!(" {name}=\"");
-    let start = tag.find(&key)? + key.len();
-    let end = tag[start..].find('"')? + start;
-    Some(tag[start..end].replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
-}
-
-/// The visible, named things in WebDriverAgent's page source, as `(x, y) Button "Send"` (centers in screenshot pixels).
-pub fn elements(xml: &str, scale: f64) -> Vec<String> {
-    const NAMED: [&str; 14] = ["Button", "StaticText", "TextField", "SecureTextField", "SearchField", "Link", "Cell", "Switch", "Icon",
-        "Image", "Key", "TextView", "Tab", "Alert"];
-    let mut out = Vec::new();
-    for chunk in xml.split("<XCUIElementType").skip(1) {
-        let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
-        let kind: String = tag.chars().take_while(|c| c.is_alphanumeric()).collect();
-        if !NAMED.contains(&kind.as_str()) || attr(tag, "visible").as_deref() != Some("true") { continue; }
-        let num = |k: &str| attr(tag, k).and_then(|v| v.parse::<f64>().ok());
-        let (Some(x), Some(y), Some(w), Some(h)) = (num("x"), num("y"), num("width"), num("height")) else { continue };
-        let label = attr(tag, "label").or(attr(tag, "name")).unwrap_or_default();
-        if label.trim().is_empty() || w <= 0.0 || h <= 0.0 { continue; }
-        let line = format!("({}, {}) {kind} {:?}", ((x + w / 2.0) * scale).round(), ((y + h / 2.0) * scale).round(), label.chars().take(80).collect::<String>());
-        if !out.contains(&line) { out.push(line); }
-        if out.len() >= 300 { break; }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn finds_elements() {
-        let xml = r#"<XCUIElementTypeApplication><XCUIElementTypeButton type="XCUIElementTypeButton" name="Send" label="Send" visible="true" x="10" y="20" width="40" height="20"/><XCUIElementTypeOther visible="true"/>"#;
-        assert_eq!(super::elements(xml, 3.0), vec!["(90, 90) Button \"Send\""]);
     }
 }

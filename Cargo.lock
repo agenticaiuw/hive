@@ -181,6 +181,23 @@ dependencies = [
 name = "hive"
 version = "0.1.0"
 dependencies = [
+ "hive-node",
+ "serde_json",
+]
+
+[[package]]
+name = "hive-node"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "hive-phone"
+version = "0.1.0"
+dependencies = [
+ "hive-node",
  "serde_json",
  "ureq",
 ]
@@ -189,10 +206,10 @@ dependencies = [
 name = "hive-server"
 version = "0.1.0"
 dependencies = [
+ "hive-node",
  "rusqlite",
  "serde_json",
  "sha2",
- "ureq",
 ]
 
 [[package]]
