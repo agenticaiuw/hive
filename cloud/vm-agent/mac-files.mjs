@@ -13,10 +13,12 @@ export const TRANSFER_TOOL = {
     + 'Paths must be absolute. The destination folder on the Mac must exist and the file must not exist. '
     + 'Mac-to-VM copies are verified by size and SHA-256. After an upload error, checks the cloud copy before one bounded retry. '
     + 'Use recovery_key from a failed to_vm call to fetch and verify that copy without uploading again. '
+    + 'check_only=true validates this call without reading or copying a file; the Mac server also checks command support. '
     + 'Sources and the cloud copy are kept. Uses the Mac\'s cf login; does not send or publish to anyone else.',
   inputSchema: { type: 'object', properties: {
     direction: { type: 'string', enum: ['to_vm', 'to_mac'] },
     mac_path: { type: 'string' }, vm_path: { type: 'string', description: 'Required for to_mac' },
+    check_only: { type: 'boolean', description: 'Probe this execution before retrying a repaired task; no file is copied' },
     recovery_key: { type: 'string', description: 'Cloud key from a previous to_vm call for this source file' },
     step: { type: 'string', description: 'What file you are copying and why' },
   }, required: ['direction', 'mac_path', 'step'], additionalProperties: false },
@@ -66,6 +68,12 @@ export async function transferFile(args, command, { fetch = (key, expected) => f
   if (args.recovery_key !== undefined && (direction !== 'to_vm' || !checkKey(args.recovery_key).startsWith('transfers/'))) {
     throw new Error('recovery_key must be a transfers/ key from a previous to_vm call');
   }
+  if (args.check_only !== undefined && typeof args.check_only !== 'boolean') throw new Error('check_only must be a boolean');
+  // The caller checks that this Mac supports commands. A probe proves dispatch and argument
+  // validation only; it must never be mistaken for a copied or even an existing source file.
+  if (args.check_only === true) return { content: [{ type: 'text', text: JSON.stringify({
+    ready: true, copied: false, direction, mac_path: macPath,
+  }) }] };
   const key = args.recovery_key ?? checkKey(`transfers/${uuid()}/${posix.basename(direction === 'to_vm' ? macPath : vmPath)}`);
   const run = script => command({ command: `set -e\numask 077\n${CF}${script}`, irreversible: false, step, timeout_seconds: 240 });
   let script;

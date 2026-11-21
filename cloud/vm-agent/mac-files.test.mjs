@@ -249,3 +249,15 @@ fi
     assert.equal((await stat(source)).size, size, 'the source survives every transfer');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('a transfer probe validates arguments without touching files or running commands', async () => {
+  const unused = () => assert.fail('a probe has no file effects');
+  const result = await transferFile({ ...args, check_only: true }, unused, { uuid: unused, fetch: unused, put: unused });
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    ready: true, copied: false, direction: 'to_vm', mac_path: args.mac_path,
+  });
+  for (const invalid of [{ mac_path: 'relative' }, { check_only: 'true' }, { direction: 'to_mac' }]) {
+    await assert.rejects(transferFile({ ...args, check_only: true, ...invalid }, unused));
+  }
+});
