@@ -6,9 +6,20 @@ import { chownSync, existsSync, copyFileSync, mkdirSync, rmSync, statSync, symli
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { transferProbeSucceeded } from './task-catalog.mjs';
+import { TRANSFER_TOOL } from './mac-files.mjs';
 
 export const STARTUP_PROBE = { direction: 'to_vm', mac_path: '/.hive-transfer-probe', check_only: true,
   step: 'Checking the Mac transfer route before resuming the task.' };
+
+// Bind the transfer to the thread itself. Use a flat function: the runtime accepts
+// dynamic namespaces but omits their tools from the functions.exec catalog.
+export const TRANSFER_TOOLS = [{ type: 'function', ...TRANSFER_TOOL,
+  name: 'hivefiles__transfer_file', deferLoading: false }];
+export const CATALOG_PROBE = `Verify this thread's callable file transfer before the owner task is submitted.
+In functions.exec, find hivefiles__transfer_file in ALL_TOOLS, require typeof tools[name] === "function",
+and call it with exactly ${JSON.stringify(STARTUP_PROBE)}. If exec is unavailable, call the directly
+exposed hivefiles__transfer_file with those arguments. Require ready=true and copied=false, then stop.
+Do not call any other tool or carry out the owner task. A missing tool is a failed check.`;
 
 function receipt(workDir, path, value) {
   writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
@@ -17,10 +28,10 @@ function receipt(workDir, path, value) {
   chownSync(path, uid, gid);
 }
 
-export async function startTask(request, { model, effort, workDir, prompt, emit }) {
+export async function startTask(request, { model, effort, workDir, emit }) {
   await request('initialize', { clientInfo: { name: 'hive-task', version: '1' }, capabilities: { experimentalApi: true } });
   const { thread } = await request('thread/start', { model, cwd: workDir, ephemeral: true,
-    approvalPolicy: 'never', sandbox: 'read-only' });
+    approvalPolicy: 'never', sandbox: 'read-only', dynamicTools: TRANSFER_TOOLS });
   if (!thread?.id) throw new Error('The task runtime did not return a thread ID.');
   emit({ type: 'thread.started', thread_id: thread.id });
   const { data } = await request('mcpServerStatus/list', { threadId: thread.id, serverName: 'mac' });
@@ -45,11 +56,10 @@ export async function startTask(request, { model, effort, workDir, prompt, emit 
     const why = result?.content?.filter(part => part.type === 'text').map(part => part.text).join(' ') || 'No successful reply.';
     throw new Error(`The task's live Mac transfer probe failed; the task was not resumed. ${why}`);
   }
-  receipt(workDir, `${catalog}.probe`, { thread_id: thread.id, ready: true });
   emit(probe);
-  // The ordinary catalog audit still checks the model's own functions.exec declarations.
-  // It never treats this startup check as evidence of model-visible tool exposure.
-  await request('turn/start', { threadId: thread.id, effort, input: [{ type: 'text', text: prompt }] });
+  // A dispatcher probe alone says nothing about ALL_TOOLS. The model must now invoke
+  // the thread-bound tool; only then may the runtime submit the owner's prompt.
+  await request('turn/start', { threadId: thread.id, effort, input: [{ type: 'text', text: CATALOG_PROBE }] });
   return thread.id;
 }
 
@@ -68,10 +78,10 @@ export function taskEvent(method, params) {
 
 export async function runRuntime({ command, args, env, model, effort, workDir, prompt, emit, spawnProcess = spawn }) {
   const child = spawnProcess(command, args, { env, stdio: ['pipe', 'pipe', 'inherit'], detached: true });
-  let serial = 0, threadId = '', usage, finish;
+  let serial = 0, threadId = '', usage, finish, callable = false, resumed = false;
   const pending = new Map();
   const closed = new Promise(resolve => child.on('close', resolve));
-  const done = new Promise(resolve => { finish = resolve; });
+  let done = new Promise(resolve => { finish = resolve; });
   const failed = error => {
     for (const call of pending.values()) { clearTimeout(call.timer); call.reject(error); }
     pending.clear();
@@ -81,7 +91,7 @@ export async function runRuntime({ command, args, env, model, effort, workDir, p
     const id = ++serial;
     const timer = setTimeout(() => {
       pending.delete(id); reject(new Error(`${method} timed out; the task runtime stopped.`));
-    }, method === 'mcpServer/tool/call' ? 7 * 60_000 : 90_000);
+    }, method === 'mcpServer/tool/call' ? (params.arguments?.check_only ? 7 * 60_000 : 3700_000) : 90_000);
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
   });
@@ -99,15 +109,41 @@ export async function runRuntime({ command, args, env, model, effort, workDir, p
       else call.resolve(message.result);
       return;
     }
-    // There is nobody to answer an interactive server request in an unattended task.
+    // Dynamic tools are host requests. Forward only our thread's transfer to the same
+    // MCP dispatcher checked above; never treat arbitrary server requests as tools.
     if (message.id != null) {
+      if (message.method === 'item/tool/call') {
+        const params = message.params ?? {};
+        const respond = result => child.stdin.write(`${JSON.stringify({ id: message.id, result })}\n`);
+        const call = async () => {
+          if (!threadId || params.threadId !== threadId || params.namespace != null || params.tool !== 'hivefiles__transfer_file') {
+            throw new Error('Unknown task transfer tool.');
+          }
+          const args = params.arguments;
+          if (!resumed && (!args || Object.keys(args).length !== Object.keys(STARTUP_PROBE).length
+            || !Object.entries(STARTUP_PROBE).every(([key, value]) => args[key] === value))) {
+            throw new Error('Only the fixed read-only transfer probe may run before the task resumes.');
+          }
+          // This model call goes through the normal catalog gate. The startup
+          // allowance was only for the dispatcher's earlier connectivity check.
+          const result = await request('mcpServer/tool/call', { threadId, server: 'mac', tool: 'transfer_file', arguments: args });
+          const event = { type: 'item.completed', item: { type: 'mcp_tool_call', server: 'mac',
+            tool: 'transfer_file', status: 'completed', arguments: args, result } };
+          if (!resumed && transferProbeSucceeded(event)) callable = true;
+          respond({ success: !result?.isError, contentItems: (result?.content ?? [])
+            .filter(part => part.type === 'text').map(part => ({ type: 'inputText', text: part.text })) });
+        };
+        call().catch(error => respond({ success: false, contentItems: [{ type: 'inputText', text: error.message }] }));
+        return;
+      }
+      // There is nobody to answer interactive requests in an unattended task.
       child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: 'Hive tasks cannot answer interactive requests.' } })}\n`);
       return;
     }
     const params = message.params ?? {};
     if (!threadId || params.threadId !== threadId) return;
     const event = taskEvent(message.method, params);
-    if (event) emit(event);
+    if (event && resumed) emit(event);
     if (message.method === 'thread/tokenUsage/updated') usage = params.tokenUsage?.total;
     if (message.method === 'turn/completed') finish({ status: params.turn?.status });
   });
@@ -120,10 +156,20 @@ export async function runRuntime({ command, args, env, model, effort, workDir, p
   const interrupted = () => { failed(new Error('The task runtime was stopped.')); stop(); };
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, interrupted);
   try {
-    await startTask(request, { model, effort, workDir, prompt, emit: event => {
+    await startTask(request, { model, effort, workDir, emit: event => {
       if (event.type === 'thread.started') threadId = event.thread_id;
-      emit(event);
+      // A dispatcher call must not create the model-call receipt in hive-task.
+      if (event.type === 'thread.started') emit(event);
     } });
+    const checked = await done;
+    if (checked.error) throw checked.error;
+    if (checked.status !== 'completed' || !callable) {
+      throw new Error('The active task catalog did not complete its callable transfer_file probe; the owner task was not resumed.');
+    }
+    receipt(workDir, `${join(workDir, 'runtime-catalog.json')}.probe`, { thread_id: threadId, ready: true });
+    done = new Promise(resolve => { finish = resolve; });
+    resumed = true;
+    await request('turn/start', { threadId, effort, input: [{ type: 'text', text: prompt }] });
     const outcome = await done;
     if (outcome.error) throw outcome.error;
     if (outcome.status !== 'completed') return 1;

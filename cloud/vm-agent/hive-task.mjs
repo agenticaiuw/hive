@@ -95,8 +95,9 @@ or otherwise cannot be undone, and use the same One-way: step quoting the owner'
 partial effects: inspect before retrying, especially a send. Use hivefiles.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
 Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
-Search ALL_TOOLS for transfer_file. Prefer mcp__hivefiles__transfer_file, Hive's dedicated transfer tool.
-In functions.exec, find mcp__hivefiles__transfer_file, mcp__mac__transfer_file or
+Search ALL_TOOLS for transfer_file. Prefer hivefiles__transfer_file when present: it is bound directly to this
+task's thread and calls the Mac transfer route. Otherwise use mcp__hivefiles__transfer_file, Hive's dedicated transfer tool.
+In functions.exec, find hivefiles__transfer_file, mcp__hivefiles__transfer_file, mcp__mac__transfer_file or
 mcp__desktop__transfer_file in ALL_TOOLS and check that the matching tools property is a function.
 Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
 mac.transfer_file and desktop.transfer_file also provide the file transfer route.
@@ -361,8 +362,8 @@ async function main(argv) {
         if (catalog?.ok && probeRequired) {
           const exposed = catalog.tools?.includes('functions.exec') || catalog.tools?.includes('exec')
             ? catalog.code_tools : catalog.tools;
-          if (!['mcp__mac.transfer_file', 'mcp__mac.run_command'].every(name => exposed?.includes(name))) {
-            catalog = { ...catalog, ok: false, why: 'The repaired task model did not receive mac.transfer_file and mac.run_command in its callable catalog; the task cannot continue.' };
+          if (!exposed?.includes('hivefiles.transfer_file')) {
+            catalog = { ...catalog, ok: false, why: 'The repaired task model did not receive the thread-bound hivefiles.transfer_file in its callable catalog; the task cannot continue.' };
           }
         }
         if (catalog) {
