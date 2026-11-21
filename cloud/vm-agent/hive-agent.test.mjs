@@ -188,13 +188,21 @@ test('the VM screen batches actions, checks every step first and stops at the fi
   assert.equal(ran.length, 0, 'a bad batch does nothing at all');
 });
 
-test('Codex runs on its own home with its six tool servers, as the VM user, read-only', () => {
+test('Codex runs on its own home with its tool servers, as the VM user, read-only', () => {
   const args = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', tasksConfig: '' });
   assert.deepEqual(args.slice(0, 7), ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only']);
   assert.equal(args.at(-1), '-');
   const config = args.filter((_, i) => args[i - 1] === '-c');
   assert.ok(!config.some(c => c.includes('direct_only_tool_namespaces')));
   assert.ok(config.includes('mcp_servers.desktop.omit_tools_from=["deferred"]'));
+  const gmail = JSON.parse(config.find(c => c.startsWith('mcp_servers.gmail_review.args=')).split('=').slice(1).join('='));
+  assert.deepEqual(gmail, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node',
+    '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/gmail-review-mcp.mjs']);
+  for (const setting of ['enabled=true', 'required=true', 'startup_readiness="catalog"', 'omit_tools_from=["deferred"]',
+    'default_tools_approval_mode="approve"', 'tool_timeout_sec=600']) assert.ok(config.includes(`mcp_servers.gmail_review.${setting}`));
+  assert.match(GUIDE, /review_message.*saves evidence/);
+  assert.match(GUIDE, /Never open unread messages in the browser/);
+  assert.match(GUIDE, /Only complete=true/);
   const desktop = JSON.parse(config.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);
