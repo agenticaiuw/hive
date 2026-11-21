@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { changedFiles, inFlight, needsRestart, orchestratorHealthy, releaseSource, update, workerFiles } from './updater.mjs';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { appVersion, bundleVersion, nodeHeaders, pack, unpack, PROTOCOL } from './version.mjs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const file = (path, text, mode = 0o644) => ({ path, mode, data: Buffer.from(text) });
 const RELEASE = [
@@ -215,6 +215,12 @@ test('what needs a restart: the orchestrator and what it imports, old or new; th
   assert.equal(needsRestart(appDir, next, ['agent.mjs']), true, "the worker's");
   assert.equal(needsRestart(appDir, next, ['hive-update.timer']), true);
   assert.equal(needsRestart(appDir, next, ['hive-task.mjs', 'desktop-mcp.mjs', 'updater.mjs']), false);
+});
+
+test('the real task transfer helpers can update without restarting the orchestrator', () => {
+  const appDir = fileURLToPath(new URL('.', import.meta.url));
+  assert.equal(needsRestart(appDir, appDir, ['mac-files.mjs', 'files.mjs']), false);
+  assert.equal(needsRestart(appDir, appDir, ['mac-mcp.mjs']), true, 'the orchestrator still uses the Mac call transport');
 });
 
 test("a club member's VM takes the club's releases with the member's key; anyone else's, its own board's", () => {

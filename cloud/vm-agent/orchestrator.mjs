@@ -1173,7 +1173,8 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         note("Hive Phone didn't publish: no Mac is connected to build it on");
       }
     }
-    // A successful build is not a deployment: both the board and website must have accepted it.
+    // Do not retry with old tools: the VM must have activated its release, and the board and
+    // website must have accepted theirs. A release awaiting idle cannot fix this run yet.
     const missing = missingDeployments(parts, live);
     if (missing.length) {
       return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but ${missing.join(' and ')} didn't deploy.`, ...notes].join('\n\n'), { commit, files, live });

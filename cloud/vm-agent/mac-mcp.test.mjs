@@ -145,6 +145,27 @@ test('a lost transfer reply returns both the Mac call id and the cloud key for r
   assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 2);
 });
 
+test('a task can recover a cloud copy before listing tools, and lists the recovery schema', async () => {
+  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }], answer: { result: sourceInfo } });
+  const key = 'transfers/earlier/clip.mov';
+  const answer = server({ board, files: {
+    uuid: () => assert.fail('recovery must keep the old key'),
+    fetch: async (actual, expected) => {
+      assert.equal(actual, key);
+      assert.deepEqual(expected, { size: 1024, sha256: 'a'.repeat(64) });
+      return '/files/clip.mov';
+    },
+  } });
+  const out = await answer({ id: 1, method: 'tools/call', params: { name: 'transfer_file', arguments: {
+    direction: 'to_vm', mac_path: '/Desktop/clip.mov', recovery_key: key, step: 'Recovering the clip.',
+  } } });
+  assert.equal(out.result.isError, undefined);
+  assert.equal(JSON.parse(out.result.content[0].text).recovered, true);
+  assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 1, 'only source metadata, no upload');
+  const list = (await answer({ id: 2, method: 'tools/list' })).result.tools;
+  assert.equal(list.find(t => t.name === 'transfer_file').inputSchema.properties.recovery_key.type, 'string');
+});
+
 test('commands and transfers use the same Mac lease and board-supplied request words', async () => {
   const tools = [...TOOLS, { name: 'run_command', inputSchema: { type: 'object' } }];
   const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools }], answer: { result: sourceInfo } });

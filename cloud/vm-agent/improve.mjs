@@ -122,9 +122,9 @@ export async function existingRelease(git, text, base, test) {
   return { commit: base, files: paths, tests: gate.tests };
 }
 
-/** A built Mac app does not mean the dashboard website deployed successfully. */
+/** Publishing a release is not enough: the task must run with the change where it needs it. */
 export function missingDeployments(parts, live) {
-  return [['board', 'the board'], ['site', 'the dashboard website']]
+  return [['vm', 'the VM'], ['board', 'the board'], ['site', 'the dashboard website']]
     .filter(([part, name]) => parts[part] && !live.includes(name)).map(([, name]) => name);
 }
 
