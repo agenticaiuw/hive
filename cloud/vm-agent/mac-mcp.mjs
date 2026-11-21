@@ -18,10 +18,26 @@ import { boardClient, boardConfig } from './orchestrator.mjs';
 
 export const OFFLINE = "The owner's Mac isn't connected: Hive isn't running there or the Mac is offline, so the mac tools "
   + "are unavailable. Use the VM's screen, or say the task needs the Mac.";
-const NO_BOARD = "The owner's Mac can't be reached: this VM doesn't have the board's key (/root/.config/hive/tasks.json).";
+const NO_BOARD = "The owner's Mac can't be reached: this VM couldn't read the board configuration "
+  + '(HIVE_TASKS_CONFIG or /root/.config/hive/tasks.json).';
 // The board answers a held call every 25 s; a call ends within the Mac's own limit (mac.js RUN_MS).
 const WAIT_S = 25;
 const MOST_MS = 6 * 60_000;
+
+// The command contract is hive-mac's tools.rs. Keep it available when the Mac is asleep at
+// startup: Codex does not learn a newly connected Mac's tools halfway through a task.
+const COMMAND_TOOL = {
+  name: 'run_command',
+  description: "Run a shell command on the owner's Mac without opening Terminal. Returns exit_code, stdout, stderr, "
+    + 'truncated and timed_out. Set irreversible=true for deleting, sending or publishing; its step must start '
+    + 'One-way: and quote the owner\'s exact words. Inspect an uncertain result before retrying.',
+  inputSchema: { type: 'object', properties: {
+    command: { type: 'string', maxLength: 32000 },
+    cwd: { type: 'string', description: 'Absolute working directory on the Mac; defaults to home' },
+    timeout_seconds: { type: 'integer', minimum: 1, maximum: 240, default: 120 },
+    irreversible: { type: 'boolean' }, step: { type: 'string' },
+  }, required: ['command', 'irreversible', 'step'], additionalProperties: false },
+};
 
 /** The request a task label is for: "R12-1" → 12. */
 export const requestOf = label => Number(/^R(\d+)-\d+$/.exec(label ?? '')?.[1]) || null;
@@ -84,21 +100,24 @@ export function server({ board, label = '', turn = null, files = undefined, disc
     const reply = result => ({ jsonrpc: '2.0', id: message.id, result });
     switch (message.method) {
       case 'initialize': {
+        // A missing board config is a server setup failure, not an offline Mac. Accepting
+        // startup with an empty catalog hid the failure from the task and its startup logs.
+        if (!board) return { jsonrpc: '2.0', id: message.id, error: { code: -32603, message: NO_BOARD } };
         const found = await find();
         return reply({ protocolVersion: message.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} },
           serverInfo: { name: 'mac', version: '1.0' },
-          instructions: !board ? NO_BOARD : found
+          instructions: found
             ? `${found.about || "The owner's Mac"} (${found.name}), reached through the cloud: their own computer, which they may be using.`
             : OFFLINE });
       }
       case 'tools/list': {
         const found = await find();
-        const tools = found?.tools ?? [];
+        const tools = found?.tools ?? (board ? [COMMAND_TOOL] : []);
         // The orchestrator uses this module's Mac calls, but never serves task tools. Load
         // transfers only in the task process so their updates need no orchestrator restart.
         const { TRANSFER_TOOL } = await import('./mac-files.mjs');
-        // Codex learns tools at startup. Keep the VM's transfer tool discoverable while
-        // the Mac is offline, so this same task can copy a file once it reconnects.
+        // Keep both file tools discoverable while the Mac is offline, so this same task
+        // can inspect and copy a file once it reconnects. Calls still check Mac support.
         const transfer = board && (!found || tools.some(t => t.name === 'run_command'));
         return reply({ tools: transfer ? [...tools, TRANSFER_TOOL] : tools });
       }

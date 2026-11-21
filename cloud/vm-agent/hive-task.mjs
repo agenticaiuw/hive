@@ -145,8 +145,9 @@ export function codeArgs({ model, effort, codeDir, writable = [], env = [] }) {
  * screen or the phone (devices.mjs); `keepOpen` leaves the browser open after it.
  */
 export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label = 'vm-task', keepOpen = false,
-  improveFile = '', node = process.execPath, user = process.env.USER ?? 'ubuntu' }) {
-  for (const value of [model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label, node, user, ...(improveFile ? [improveFile] : [])]) {
+  improveFile = '', tasksConfig = process.env.HIVE_TASKS_CONFIG ?? '', node = process.execPath, user = process.env.USER ?? 'ubuntu' }) {
+  for (const value of [model, effort, workDir, appDir, stateDir, filesDir, stepsFile, label, node, user,
+    ...[improveFile, tasksConfig].filter(Boolean)]) {
     if (!SAFE.test(value)) throw new Error(`unsupported characters in "${value}"`);
   }
   const toml = value => JSON.stringify(value); // TOML basic strings and arrays of them read like JSON
@@ -158,8 +159,10 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, `HIVE_TASK_LABEL=${label}`,
     ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), node, join(appDir, 'knowledge-mcp.mjs')];
   // Mac transfers must land in the same folder the desktop tools list and attach files from.
+  // sudo drops the task's environment. Carry the board config path explicitly, or a task
+  // using another config silently loses its Mac tools when the default config isn't readable.
   const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`,
-    `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'mac-mcp.mjs')];
+    `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), node, join(appDir, 'mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
@@ -173,6 +176,9 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     '-c', 'mcp_servers.knowledge.command="sudo"', '-c', `mcp_servers.knowledge.args=${toml(knowledge)}`,
     '-c', 'mcp_servers.knowledge.startup_timeout_sec=30', '-c', 'mcp_servers.knowledge.tool_timeout_sec=60',
     '-c', 'mcp_servers.mac.command="sudo"', '-c', `mcp_servers.mac.args=${toml(mac)}`,
+    // A broken server must fail startup with its reason, not let the task repeatedly ask
+    // Hive to repair tools that Codex never registered. An offline Mac still starts normally.
+    '-c', 'mcp_servers.mac.required=true',
     // A first Mac call may wait for its turn at the Mac, then up to 6 minutes for the Mac (mac-mcp.mjs).
     '-c', 'mcp_servers.mac.startup_timeout_sec=30', '-c', 'mcp_servers.mac.tool_timeout_sec=3700',
     // Codex asks before running an MCP tool, and with no one to ask (exec) that ask is a refusal, so
