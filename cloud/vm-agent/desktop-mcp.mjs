@@ -11,11 +11,11 @@
 // Several of Hive's tasks can run at once, but the screen is one: the first tool call that needs it
 // waits for this task's turn (devices.mjs, served by the orchestrator) and the turn lasts until this
 // server ends, when it closes the browser it opened (unless HIVE_KEEP_OPEN=1) before the next task
-// gets the screen. Listing and fetching files need no turn.
+// gets the screen. Listing, fetching and transferring files need no screen turn.
 //
 // Env: HIVE_VM_STATE (the worker's state folder), HIVE_FILES_DIR (where fetched files land),
 // HIVE_TASK_STEPS (the task's steps.log), HIVE_TASK_LABEL (the task, as the orchestrator knows it),
-// HIVE_KEEP_OPEN.
+// HIVE_KEEP_OPEN, HIVE_TASKS_CONFIG (the board configuration for Mac file transfers).
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -26,6 +26,7 @@ import { call } from './ctl.mjs';
 import { encodePng, untypable, Vnc } from './vnc.mjs';
 import { fetchFile, filesDir, listRemote } from './files.mjs';
 import { Lease } from './devices.mjs';
+import { TRANSFER_TOOL } from './mac-files.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const stateDir = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
@@ -38,7 +39,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const turn = new Lease(join(stateDir, 'devices.sock'), 'screen', process.env.HIVE_TASK_LABEL || 'a task started by hand', {
   onWait: m => record('wait for the screen', { step: `${m.holder} is using the VM's screen; waiting for it` }),
 });
-const OFF_SCREEN = new Set(['list_files', 'fetch_file']);
+const OFF_SCREEN = new Set(['list_files', 'fetch_file', 'transfer_file']);
+let macFiles;
 let usedScreen = false;
 const mark = name => { if (stepLog) try { writeFileSync(join(dirname(stepLog), name), ''); } catch {} };
 
@@ -196,6 +198,9 @@ export const TOOLS = [
   tool('fetch_file', 'Bring a file from Hive\'s cloud storage onto the VM, so a file picker can open it. Returns its path on the VM.', {
     key: { type: 'string', description: 'The file\'s key in Hive\'s cloud storage, as list_files shows it' },
   }, ['key']),
+  // Static, even when Mac discovery is unavailable at startup. The task already uses this
+  // server to find and attach files; it must also be able to bring a file here from the Mac.
+  TRANSFER_TOOL,
   tool('batch', 'Do several actions in a row and get one screenshot at the end. Use it whenever you already know the next steps '
     + '(a form\'s fields, a run of clicks and keys you can see the places for): each separate call costs the owner seconds. Each step is '
     + `{"tool": name, ...that tool's arguments}, the tool being one of ${BATCHABLE.join(', ')}. For example: `
@@ -289,6 +294,16 @@ async function act(name, args) {
       return [{ type: 'text', text: `On the VM (open these in a file picker by path):\n${local.join('\n') || '(none)'}\n\nIn Hive's cloud storage (fetch_file brings one here):\n${remote.join('\n') || '(none)'}` }];
     }
     case 'fetch_file': { const path = await fetchFile(String(args.key)); return [{ type: 'text', text: `It is on the VM at ${path}` }]; }
+    case 'transfer_file': {
+      if (!macFiles) {
+        const { boardClient, boardConfig } = await import('./orchestrator.mjs');
+        const { server } = await import('./mac-mcp.mjs');
+        // File copies drive neither screen. Taking another Mac lease here could wait on
+        // this task's own mac server. The Mac still checks every command through the board.
+        macFiles = server({ board: boardClient(boardConfig()), label: process.env.HIVE_TASK_LABEL });
+      }
+      return (await macFiles({ id: 1, method: 'tools/call', params: { name, arguments: args } })).result;
+    }
     default: throw new Error(`no tool called ${name}`);
   }
 }

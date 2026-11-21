@@ -230,6 +230,7 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.match(GUIDE, /mac tools are the owner's own Mac/);
   assert.match(GUIDE, /mac.run_command/);
   assert.match(GUIDE, /mac.transfer_file/);
+  assert.match(GUIDE, /desktop.transfer_file/);
   assert.match(GUIDE, /irreversible=true/);
   assert.match(GUIDE, /never overwrite a Mac file/);
   assert.match(GUIDE, /"One-way:" and quotes the\s+owner's exact words/);
@@ -248,14 +249,17 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.doesNotMatch(GUIDE, /Look at the screenshot every action\s+returns before the next action/);
 });
 
-test('a task carries its board config through sudo to the Mac server, including after a repair', () => {
+test('a task carries its board config through sudo to both transfer servers, including after a repair', () => {
   const options = { model: 'm', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f',
     stepsFile: '/w/steps.log', label: 'R42-1', tasksConfig: '/config/board.json' };
   for (const improveFile of ['', '/w/improve.json']) {
     const args = codexArgs({ ...options, improveFile });
-    const mac = JSON.parse(args.find(c => c.startsWith('mcp_servers.mac.args=')).slice('mcp_servers.mac.args='.length));
-    assert.ok(mac.indexOf('HIVE_TASKS_CONFIG=/config/board.json') > mac.indexOf('env'));
-    assert.ok(mac.includes('HIVE_TASK_LABEL=R42-1'));
+    for (const namespace of ['mac', 'desktop']) {
+      const prefix = `mcp_servers.${namespace}.args=`;
+      const server = JSON.parse(args.find(c => c.startsWith(prefix)).slice(prefix.length));
+      assert.ok(server.indexOf('HIVE_TASKS_CONFIG=/config/board.json') > server.indexOf('env'));
+      assert.ok(server.includes('HIVE_TASK_LABEL=R42-1'));
+    }
   }
   assert.throws(() => codexArgs({ ...options, tasksConfig: '/bad\npath' }), /unsupported/);
 });
