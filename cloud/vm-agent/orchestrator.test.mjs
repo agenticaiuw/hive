@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MODELS, Slots, branchOf, handle, labelOf, limitsRow, outcomeOf, parsePlan, pick, planWords, readEvents, runSender, scopeOf, taskBrief, turnStep } from './orchestrator.mjs';
 
+/** The planner's answer for a page look asked from the browser extension: one page task. */
+const pagePlan = { plan: async () => JSON.stringify({ project: '', tasks: [{ title: 'Change the page', quote: '', kind: 'page', difficulty: 'normal' }] }), now: () => 1000, stepEvery: 1 };
+
 test('each task gets the model for its rating, and code never less than the coding workhorse', () => {
   assert.deepEqual(pick({ difficulty: 'easy', kind: 'answer' }), { rating: 'easy', ...MODELS.easy });
   assert.deepEqual(pick({ difficulty: 'hardest', kind: 'screen' }), { rating: 'hardest', ...MODELS.hardest });
@@ -266,7 +269,7 @@ test('a request asked on a web page becomes that page\'s rule', async () => {
       '"keep":[{"items":".ic-DashboardCard","text":["CS 400","MATH 341"]}],"css":"","extra":1}';
   };
   await handle({ id: 9, text: 'just my 5 courses', page: { url: 'https://canvas.wisc.edu/', title: 'Dashboard', outline: 'div.ic-DashboardCard "CS 400"' } },
-    { board, ask, plan: () => { throw new Error('no plan for a page'); } });
+    { board, ask, ...pagePlan });
   const saved = calls.find(([path]) => path === '/v1/page-rules')[1];
   assert.equal(saved.host, 'canvas.wisc.edu');
   assert.equal(saved.path, '/');
@@ -405,7 +408,7 @@ test('a page request sees the rules already on for the site, so a follow-up adds
   };
   const css = '#doc_preview { filter: invert(1) hue-rotate(180deg); } #doc_preview iframe:fullscreen { filter: invert(1) hue-rotate(180deg); }';
   await handle({ id: 17, text: 'Make sure it works when I put the file in full screen as well.', page: { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Lab 5', outline: 'div#doc_preview' } },
-    { board, ask: async p => (assert.match(p, /rule 7/), JSON.stringify({ title: 'Dark documents, in full screen too', path: '', css })) });
+    { board, ask: async p => (assert.match(p, /rule 7/), JSON.stringify({ title: 'Dark documents, in full screen too', path: '', css })), ...pagePlan });
   assert.ok(calls.some(([p]) => p === '/v1/page-rules?host=canvas.wisc.edu'));
   assert.equal(calls.find(([p]) => p === '/v1/page-rules')[1].rule.css, css);
 });
@@ -429,7 +432,7 @@ test('a page rule can style inside the page\'s frames, and the guide says how, f
   const calls = [];
   const board = async (path, body) => { calls.push([path, body]); return path === '/v1/page-rules' ? { id: 9 } : { rules: [] }; };
   await handle({ id: 18, text: 'truly dark mode, full screen too', page: { url: 'https://canvas.wisc.edu/courses/1/files/2', title: 'Syllabus', outline } },
-    { board, ask: async () => JSON.stringify({ title: 'Truly dark, viewer and full screen', path: '', css: 'iframe:fullscreen { filter: none !important; }', frames }) });
+    { board, ask: async () => JSON.stringify({ title: 'Truly dark, viewer and full screen', path: '', css: 'iframe:fullscreen { filter: none !important; }', frames }), ...pagePlan });
   const saved = calls.find(([p]) => p === '/v1/page-rules')[1];
   assert.equal(saved.rule.frames, frames);
   assert.equal(calls.at(-1)[1].status, 'done');
@@ -443,7 +446,7 @@ test('an answer that changes nothing is asked once more', async () => {
     const calls = [];
     const board = async (path, body) => { calls.push([path, body]); return path === '/v1/page-rules' ? { id: 9 } : { rules: [] }; };
     asked = 0;
-    await handle({ id: 19, text: 'remove these shorts from my subscriptions page', page }, { board, ask: async prompt => answers[asked++](prompt) });
+    await handle({ id: 19, text: 'remove these shorts from my subscriptions page', page }, { board, ask: async prompt => answers[asked++](prompt), ...pagePlan });
     return calls.filter(([p]) => p === '/v1/requests/update').at(-1)[1];
   };
   const fixed = await run([
@@ -456,34 +459,38 @@ test('an answer that changes nothing is asked once more', async () => {
 
 });
 
-test("anything asked on a page that isn't a page rule goes to Hive's agent in that browser, never a red \"couldn't\"", async () => {
-  // The owner, 2026-11-21, on Gmail in Safari: "the extension agent cannot read emails when my gmail is open right here".
+test("a request from the extension goes to the orchestrator's plan; only a page look is a page task, and its \"can't\" goes to an agent", async () => {
+  // The owner, 2026-11-21, on Gmail in Safari: "the extension agent cannot read emails when my gmail is open right here";
+  // and: "every request from any node and any portal goes to the main orchestrator first".
   const { handle } = await import('./orchestrator.mjs');
   const page = { url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox (15,8xx)', outline: 'div.ae4' };
-  const run = async answer => {
-    const calls = [], planned = [], briefs = [];
+  const run = async (kind, answer) => {
+    const calls = [], planned = [], briefs = [], asked = [];
     const board = async (path, body) => { calls.push([path, body]); return path.startsWith('/v1/page-rules') ? { rules: [] } : path.startsWith('/v1/runs?') ? { steps: [] } : {}; };
     await handle({ id: 126, text: 'check every single unread email one by one', from: 'safari', page }, {
-      board, ask: async () => answer, now: () => 1000, stepEvery: 1,
-      plan: async words => (planned.push(words), JSON.stringify({ project: '', tasks: [{ title: 'Check the unread emails', quote: 'check every single unread email one by one', kind: 'screen', difficulty: 'normal' }] })),
+      board, ask: async prompt => (asked.push(prompt), answer), now: () => 1000, stepEvery: 1,
+      plan: async words => (planned.push(words), JSON.stringify({ project: '', tasks: [{ title: 'Check the unread emails', quote: 'check every single unread email one by one', kind, difficulty: 'normal' }] })),
       run: async brief => (briefs.push(brief), { ok: true, report: 'Three worth reading.', seconds: 1 }),
     });
-    return { calls, planned, briefs, last: calls.filter(([p]) => p === '/v1/requests/update').at(-1)[1] };
+    return { calls, planned, briefs, asked, last: calls.filter(([p]) => p === '/v1/requests/update').at(-1)[1] };
   };
-  const asked = await run('{"task": true}');
-  assert.match(asked.planned[0], /^\(Sent from the Hive extension in the owner's Safari, on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox\.\) check every/);
-  assert.match(asked.briefs[0], /from the Hive extension in their Safari, while on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox \("Inbox \(15,8xx\)"\)/);
-  assert.match(asked.briefs[0], /do it there with the browser tools/);
-  assert.match(asked.briefs[0], /change Hive so it can \(improve_hive\)/);
-  assert.equal(asked.calls.some(([p]) => p === '/v1/page-rules'), false);
-  assert.equal(asked.last.status, 'done');
-  // A look the writer can't do as a rule goes to the agent too, with the writer's reason.
-  const cannot = await run('{"cannot": "The video player draws inside a frame from another site, which a page rule can\'t reach."}');
+  const read = await run('screen');
+  assert.match(read.planned[0], /^\(Sent from the Hive extension in the owner's Safari, on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox\.\) check every/);
+  assert.equal(read.asked.length, 0, 'the page writer only gets page tasks');
+  assert.match(read.briefs[0], /from the Hive extension in their Safari, while on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox \("Inbox \(15,8xx\)"\)/);
+  assert.match(read.briefs[0], /do it there with the browser tools/);
+  assert.match(read.briefs[0], /change Hive so it can \(improve_hive\)/);
+  assert.equal(read.last.status, 'done');
+  assert.equal(read.last.outcome, 'Three worth reading.');
+  // A page task the writer says isn't a look, can't do as a rule, or can't answer goes to the agent, never a red "couldn't".
+  const notLook = await run('page', '{"task": true}');
+  assert.equal(notLook.briefs.length, 1);
+  const cannot = await run('page', '{"cannot": "The video player draws inside a frame from another site, which a page rule can\'t reach."}');
   assert.match(cannot.briefs[0], /page-change writer couldn't do this as a page rule: The video player draws inside a frame/);
-  assert.equal(cannot.calls.some(([, b]) => /^Couldn't change the page/.test(b?.outcome ?? '')), false);
-  // So does one whose writer answered nothing usable twice.
-  const broken = await run('no json');
+  assert.equal(cannot.calls.some(([, b]) => /Couldn't change the page/.test(JSON.stringify(b ?? ''))), false);
+  const broken = await run('page', 'no json');
   assert.match(broken.briefs[0], /couldn't write a rule for this \(the answer had no JSON\)/);
+  for (const r of [notLook, cannot, broken]) assert.equal(r.last.status, 'done');
 });
 
 test('a page ask can send the page on and add a link, with a rule per path (YouTube: Subscriptions, Watch later)', async () => {
@@ -506,14 +513,14 @@ test('a page ask can send the page on and add a link, with a rule per path (YouT
   const updates = [];
   const wrapped = async (path, body) => { if (path === '/v1/requests/update') updates.push(body); return board(path, body); };
   await handle({ id: 30, text: 'open on subscriptions, no home, watch later under subscriptions', page: { url: 'https://www.youtube.com/', title: 'YouTube', outline: '' } },
-    { board: wrapped, ask, plan: () => { throw new Error('no plan for a page'); } });
+    { board: wrapped, ask, ...pagePlan });
   assert.equal(saves.length, 2);
   assert.deepEqual(saves[0].rule.add, [{ after: 'ytd-mini-guide-entry-renderer:has(a[href="/feed/subscriptions"])', text: 'Watch later', href: '/playlist?list=WL' }]);
   assert.equal(saves[0].path, '');
   assert.equal(saves[1].rule.go, '/feed/subscriptions');
   assert.equal(saves[1].path, '/');
   assert.equal(updates.at(-1).status, 'done');
-  assert.match(updates.at(-1).outcome, /Sidebar: no Home, Watch later: on youtube\.com \(every page\) from now on \(page rule 21\)\. Open on Subscriptions: on youtube\.com\/ from now on \(page rule 22\)\./);
+  assert.match(updates.at(-1).outcome, /^Page changes on youtube\.com:\nSidebar: no Home, Watch later: on youtube\.com \(every page\) from now on \(page rule 21\)\.\nOpen on Subscriptions: on youtube\.com\/ from now on \(page rule 22\)\.$/);
 });
 
 test("a task's needs are earlier tasks only, renumbered when the planner's empty ones are dropped", () => {
