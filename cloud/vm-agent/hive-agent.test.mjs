@@ -205,9 +205,9 @@ test('Codex runs on its own home with its six tool servers, as the VM user, read
   assert.ok(keptDesktop.includes('HIVE_TASK_LABEL=R40-1') && keptDesktop.includes('HIVE_KEEP_OPEN=1'));
   assert.throws(() => codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s', label: 'R1 && x' }), /unsupported/);
   const browser = JSON.parse(config.find(c => c.startsWith('mcp_servers.browser.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/browser-mcp.mjs']);
+  assert.deepEqual(browser, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/browser-mcp.mjs']);
   const knowledge = JSON.parse(config.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/knowledge-mcp.mjs'], 'its name, for the team tools');
+  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/knowledge-mcp.mjs'], 'its name, for the team tools');
   const improving = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', improveFile: '/s/r7/improve-1.json' });
   const improvingKnowledge = JSON.parse(improving.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
   assert.ok(improvingKnowledge.includes('HIVE_IMPROVE_FILE=/s/r7/improve-1.json'), 'the orchestrator\'s file reaches improve_hive');

@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { nodeHeaders } from './version.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 export const OFFLINE = "The owner's browser isn't reachable: this VM doesn't have the board's key "
   + '(/root/.config/hive/tasks.json), so the browser tools are unavailable.';
@@ -259,7 +260,7 @@ function serve(handle) {
     let message; try { message = JSON.parse(line); } catch { return; }
     // One browser, one command at a time: calls run in order.
     chain = chain.then(async () => {
-      const out = await handle(message);
+      const out = withHeard(await handle(message));
       if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
     });
   });

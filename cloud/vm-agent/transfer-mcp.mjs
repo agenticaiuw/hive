@@ -5,6 +5,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 import { server as macServer } from './mac-mcp.mjs';
 import { boardClient, boardConfig } from './orchestrator.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 export function server({ catalogFile, ...options }) {
   const mac = macServer(options);
@@ -60,7 +61,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const answer = server({ board, label: process.env.HIVE_TASK_LABEL, catalogFile: process.env.HIVE_TASK_CATALOG });
   createInterface({ input: process.stdin }).on('line', async line => {
     let message; try { message = JSON.parse(line); } catch { return; }
-    const out = await answer(message);
+    const out = withHeard(await answer(message));
     if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
   });
 }

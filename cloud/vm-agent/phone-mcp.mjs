@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { endWithTask, Lease } from './devices.mjs';
 import { boardConfig } from './browser-mcp.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 const STATE = process.env.HIVE_VM_STATE ?? join(homedir(), 'hive-vm-agent', 'state');
 const CONFIG = join(STATE, 'phone-relay.json');
@@ -366,7 +367,7 @@ function serve(handle) {
     let message; try { message = JSON.parse(line); } catch { return; }
     // One phone, one finger: calls run in order.
     chain = chain.then(async () => {
-      const out = await handle(message);
+      const out = withHeard(await handle(message));
       if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
     });
   });

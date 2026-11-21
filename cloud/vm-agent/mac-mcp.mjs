@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { endWithTask, Lease } from './devices.mjs';
 import { boardClient, boardConfig } from './orchestrator.mjs';
+import { withHeard } from './meanwhile.mjs';
 
 export const OFFLINE = "The owner's Mac isn't connected: Hive isn't running there or the Mac is offline, so the mac tools "
   + "are unavailable. Use the VM's screen, or say the task needs the Mac.";
@@ -158,7 +159,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const answer = server({ board, label, turn });
   createInterface({ input: process.stdin }).on('line', async line => {
     let message; try { message = JSON.parse(line); } catch { return; }
-    const out = await answer(message);
+    const out = withHeard(await answer(message));
     if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
   });
 }
