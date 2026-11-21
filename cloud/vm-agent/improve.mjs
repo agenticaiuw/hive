@@ -18,6 +18,8 @@
 //   4. runs the task again with the change (againBrief), at most MOST_ROUNDS changes a task.
 // A code task in Hive's own repository goes the same way (askedBrief, orchestrator.mjs changeHive): Hive
 // builds Hive, so what someone asks Hive to change in itself lands and goes live like a change it needed.
+// If the code is already on main, the agent names its commits (existingBrief). Hive verifies them and
+// resumes the release (existingRelease); it does not need another source edit to finish putting it live.
 // The pure parts are here, with their tests (improve.test.mjs); the git, test and deploy steps are the
 // orchestrator's (orchestrator.mjs improveOnVm).
 import { readFileSync, rmSync } from 'node:fs';
@@ -85,6 +87,45 @@ export function askedBrief(need, { brief = '' } = {}) {
     `In the asker's words: ${need.why}`,
     brief && `The task's brief:\n${brief.slice(0, 4000)}`,
   ].filter(Boolean).join('\n\n');
+}
+
+/** A continuation can finish a release without manufacturing another source change. */
+export function existingBrief(file) {
+  return `If the requested behavior is already implemented, verify it and identify the commits that implement it with read-only Git commands. `
+    + `To finish putting those changes live, write ${file} as JSON: {"commits":["<full 40-character commit id>"]}. `
+    + `Include only commits needed by this request, and explain your verification in your report. `
+    + `Hive checks that those commits are on main, derives their affected files, tests and deploys main. `
+    + `This handoff is used only when you made no source edits. Do not make an empty or cosmetic change to trigger a release.`;
+}
+
+/** Verify an already-landed change before resuming its release. Git supplies the files, never the
+ * agent's prose. Release the worktree's main revision, not an older commit that would undo later work.
+ * Main has already passed the landing gates; repeat its VM tests and let each release build run. */
+export async function existingRelease(git, text, base, test) {
+  let commits;
+  try { ({ commits } = JSON.parse(text)); } catch {}
+  if (!Array.isArray(commits) || !commits.length || commits.length > 50
+    || !commits.every(c => typeof c === 'string' && /^[a-f0-9]{40}$/.test(c))) {
+    throw new Error('The existing-release handoff needs 1 to 50 full commit ids.');
+  }
+  const files = new Set();
+  for (const commit of new Set(commits)) {
+    try { await git('merge-base', '--is-ancestor', commit, base); }
+    catch { throw new Error(`The existing change ${commit} is not on the worktree's main revision.`); }
+    const names = await git('diff-tree', '--root', '-m', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z', commit);
+    for (const file of names.split('\0').filter(Boolean)) files.add(file);
+  }
+  if (!files.size) throw new Error('The existing commits have no changed files to release.');
+  const paths = [...files].sort();
+  const gate = await test(paths);
+  if (!gate.ok) throw new Error(`The existing change failed its tests:\n${gate.failures}`);
+  return { commit: base, files: paths, tests: gate.tests };
+}
+
+/** A built Mac app does not mean the dashboard website deployed successfully. */
+export function missingDeployments(parts, live) {
+  return [['board', 'the board'], ['site', 'the dashboard website']]
+    .filter(([part, name]) => parts[part] && !live.includes(name)).map(([, name]) => name);
 }
 
 /** The same agent again, with what the tests said. */

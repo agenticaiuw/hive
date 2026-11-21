@@ -34,9 +34,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { serveDevices } from './devices.mjs';
 import {
-  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, failuresOf, fixBrief, gateTests, improveBrief, landedLine, landOnMain, leaksIn,
+  againBrief, askedBrief, blockers, conflictBrief, CONFLICT_MARKER, existingBrief, existingRelease, failuresOf, fixBrief, gateTests, improveBrief, landedLine, landOnMain, leaksIn,
   macFailures, macRunning, MOST_CONFLICTS, MOST_FIXES, MOST_LEASE_WAIT_MS, MOST_ROUNDS, onTheMac, othersHold, partsOf, readNeed,
-  secretValues, SELF_GUIDE,
+  secretValues, SELF_GUIDE, missingDeployments,
 } from './improve.mjs';
 import { callMac, connectedMac } from './mac-mcp.mjs';
 import { nodeHeaders } from './version.mjs';
@@ -929,6 +929,8 @@ const MAC_INSTALL_MS = 7 * 3600_000;
  * macOS, so a change to it is also built and tested on the owner's Mac (hive_self check, on the change's
  * branch) before it lands, and after it lands the Mac publishes a release of it and puts it in once Hive
  * there is idle (hive_self install). With no Mac connected, the change waits on its branch instead.
+ * If a continuation finds the change already on main, it verifies the named commits and resumes the
+ * release from the worktree's main revision without committing the same change again.
  */
 async function improveOnVm(need, { title, brief, report, request, key, round = 0, label = '', signal = null, board = null, asked = false }, onStep) {
   const repo = join(CODE_ROOT, 'hive');
@@ -993,15 +995,33 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
     // Secrets on this VM, which a change never carries into the public repository (improve.mjs leaksIn).
     const secrets = await secretsOnVm();
     const held = othersHold(await claims(), label);
-    let result = await agent([SELF_GUIDE, asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report }), held].filter(Boolean).join('\n\n'));
+    const existingFile = join(tmp, 'existing-release.json');
+    let result = await agent([SELF_GUIDE, asked ? askedBrief(need, { brief }) : improveBrief(need, { title, brief, report }),
+      existingBrief(existingFile), held].filter(Boolean).join('\n\n'));
     let files = [];
     let commit;
-    for (let conflicts = 0; ; conflicts++) {
+    change: for (let conflicts = 0; ; conflicts++) {
     for (let tries = 1; ; tries++) {
       if (signal?.aborted) return end(false, 'Stopped by the owner before the change landed.');
       if (!result.ok) return end(false, `The code agent stopped before it finished: ${outcomeOf(result.report, 'no report')}`);
       files = await changed();
-      if (!files.length) return end(false, `The code agent changed nothing: ${outcomeOf(result.report, 'no report')}`);
+      if (!files.length) {
+        // A release can have stopped after landing. The continuation verifies the existing code
+        // and names its commits instead of changing it again just to reach the deploy steps.
+        const handoff = await asRoot(['cat', existingFile]).catch(() => '');
+        if (!handoff) return end(false, `The code agent changed nothing and supplied no existing-release handoff: ${outcomeOf(result.report, 'no report')}`);
+        try {
+          onStep(`$ Verifying and testing Hive's already-landed change`);
+          const existing = await existingRelease((...args) => git('-C', dir, ...args), handoff, base,
+            paths => gateOnVm(dir, paths, tmp));
+          files = existing.files;
+          commit = existing.commit;
+          onStep(`✅ ${existing.tests.length} test files passed; continuing the release from main`);
+          break change;
+        } catch (error) {
+          return end(false, `Couldn't resume the existing release: ${error.message}`);
+        }
+      }
       if (leaksIn(await git('-C', dir, 'diff', '--cached', base), secrets)) {
         return end(false, "The change held a secret from the VM (a key or token), so Hive threw it away: nothing of it was pushed.");
       }
@@ -1153,9 +1173,10 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
         note("Hive Phone didn't publish: no Mac is connected to build it on");
       }
     }
-    // The task runs again only where its change is live: a board without it would answer the task as before.
-    if (parts.board && !live.includes('the board')) {
-      return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but the board isn't running it.`, ...notes].join('\n\n'), { commit, files, live });
+    // A successful build is not a deployment: both the board and website must have accepted it.
+    const missing = missingDeployments(parts, live);
+    if (missing.length) {
+      return end(false, [`The change landed on main as ${commit.slice(0, 10)}, but ${missing.join(' and ')} didn't deploy.`, ...notes].join('\n\n'), { commit, files, live });
     }
     if (parts.mac) {
       // The Mac publishes a release of main as it now is and puts it in once Hive there is idle; the task
@@ -1163,6 +1184,8 @@ async function improveOnVm(need, { title, brief, report, request, key, round = 0
       onStep(`$ Publishing Hive for the Mac and putting it in on the owner's Mac once Hive there is idle`);
       let job;
       try {
+        mac ??= board ? await connectedMac(board).catch(() => null) : null;
+        if (!mac) throw new Error('no Mac is connected to install the release');
         job = await onTheMac(onMac, { action: 'install', commit, notes: need.what.slice(0, 200) }, { wait: MAC_INSTALL_MS });
       } catch (error) {
         job = { state: 'failed', failures: error.message };

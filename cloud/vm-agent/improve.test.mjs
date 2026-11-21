@@ -6,7 +6,71 @@ import { test } from 'node:test';
 import {
   MOST_FIXES, MOST_ROUNDS, againBrief, askedBrief, failuresOf, fixBrief, gateTests, improveBrief, landedLine, macFailures, macRunning, onTheMac,
   partsOf, readNeed, SELF_GUIDE, blockers, othersHold, conflictBrief, CONFLICT_MARKER, landOnMain, leaksIn, secretValues,
+  existingBrief, existingRelease, missingDeployments,
 } from './improve.mjs';
+
+test('an already-landed command and dashboard change resumes at current main without another commit', async () => {
+  const command = 'a'.repeat(40), dashboard = 'b'.repeat(40), base = 'c'.repeat(40);
+  const calls = [];
+  const git = async (...args) => {
+    calls.push(args);
+    if (args[0] === 'merge-base') return '';
+    assert.equal(args[0], 'diff-tree', 'only read-only verification, no commit or push');
+    assert.deepEqual(args.slice(1, -1), ['--root', '-m', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z']);
+    return args.at(-1) === command
+      ? 'cloud/vm-agent/mac-files.mjs\0desktop/app/crates/hive/hive-mac/src/tools.rs\0'
+      : 'dashboard/src/lib/agents.js\0dashboard/src/lib/agents.js\0';
+  };
+  let tested;
+  const result = await existingRelease(git, JSON.stringify({ commits: [command, dashboard, command] }), base, async files => {
+    tested = files;
+    return { ok: true, tests: ['cloud/vm-agent/mac-files.test.mjs'] };
+  });
+  assert.equal(result.commit, base, 'publish current main, not the older feature commit');
+  assert.deepEqual(result.files, ['cloud/vm-agent/mac-files.mjs', 'dashboard/src/lib/agents.js',
+    'desktop/app/crates/hive/hive-mac/src/tools.rs']);
+  assert.deepEqual(tested, result.files);
+  assert.deepEqual(result.tests, ['cloud/vm-agent/mac-files.test.mjs']);
+  assert.deepEqual(calls.filter(args => args[0] === 'merge-base'), [
+    ['merge-base', '--is-ancestor', command, base], ['merge-base', '--is-ancestor', dashboard, base],
+  ]);
+  const parts = partsOf(result.files);
+  assert.equal(parts.vm, true);
+  assert.equal(parts.mac, true);
+  assert.equal(parts.site, true);
+  assert.equal(parts.board, false);
+  assert.match(existingBrief('/tmp/task/existing-release.json'), /write \/tmp\/task\/existing-release.json as JSON/);
+  assert.match(existingBrief('/tmp/task/existing-release.json'), /only when you made no source edits/);
+});
+
+test('a no-edit report alone or a malformed release handoff cannot authorize a release', async () => {
+  for (const handoff of ['', 'already done', 'null', '{}', '{"commits":[]}',
+    JSON.stringify({ commits: ['main'] }), JSON.stringify({ commits: ['a'.repeat(40) + '\n'] }),
+    JSON.stringify({ commits: Array(51).fill('a'.repeat(40)) })]) {
+    await assert.rejects(existingRelease(() => assert.fail('must not call git'), handoff, 'b'.repeat(40),
+      () => assert.fail('must not test')), /needs 1 to 50 full commit ids/);
+  }
+});
+
+test('unlanded commits, empty commits and failed tests stop an existing release', async () => {
+  const handoff = JSON.stringify({ commits: ['a'.repeat(40)] });
+  await assert.rejects(existingRelease(async () => { throw new Error('not an ancestor'); }, handoff, 'b'.repeat(40),
+    () => assert.fail('must not test')), /not on the worktree's main revision/);
+  await assert.rejects(existingRelease(async () => '', handoff, 'b'.repeat(40),
+    () => assert.fail('must not test')), /no changed files/);
+  await assert.rejects(existingRelease(async (...args) => args[0] === 'diff-tree' ? 'cloud/vm-agent/mac-files.mjs\0' : '',
+    handoff, 'b'.repeat(40), async () => ({ ok: false, failures: 'transfer regression' })),
+  /failed its tests:\ntransfer regression/);
+});
+
+test('a failed website deployment cannot be reported as live because the Mac installed', () => {
+  const parts = partsOf(['dashboard/src/lib/agents.js']);
+  assert.deepEqual(missingDeployments(parts, ['the Mac']), ['the dashboard website']);
+  assert.deepEqual(missingDeployments(parts, ['the dashboard website', 'the Mac']), []);
+  assert.deepEqual(missingDeployments(partsOf(['cloud/tasks/worker.js', 'dashboard/src/lib/agents.js']), []),
+    ['the board', 'the dashboard website']);
+  assert.deepEqual(missingDeployments(partsOf(['cloud/vm-agent/mac-files.mjs']), []), []);
+});
 
 test('a need is read once, and only with both what and why', () => {
   const dir = mkdtempSync(join(tmpdir(), 'hive-improve-'));
