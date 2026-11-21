@@ -1,0 +1,12 @@
+[Unit]
+Description=Hive's server, the one brain
+After=network-online.target
+
+[Service]
+Environment=HIVE_ADDR=127.0.0.1:8800 HIVE_STATE=/var/lib/hive HIVE_REPO=/opt/hive
+ExecStart=/opt/hive/target/release/hive-server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
