@@ -97,9 +97,22 @@ test('get_request preserves saved material and forwards the history page', async
   assert.equal(calls[1].path, '/v1/requests/context?id=7&offset=50');
 });
 
+test('get_request resolves cloud task IDs and checks the saved task without reinterpreting request IDs', async () => {
+  const material = { request: { id: 7, text: 'Original words' }, tasks: [{ key: 1, outcome: 'Already finished' }], next_offset: null };
+  const { board, calls } = fakeBoard({ '/v1/requests/context?id=R7&offset=50': material });
+  for (const id of ['T701', ' t701 ']) {
+    const text = await callTool(board, 'get_request', { id, offset: 50 });
+    assert.deepEqual(JSON.parse(text.split('\n')[1]), material);
+  }
+  assert.ok(calls.every(c => c.path === '/v1/requests/context?id=R7&offset=50'));
+  await assert.rejects(callTool(board, 'get_request', { id: 'T702', offset: 50 }), /T702 is not in R7's available task history/);
+  await callTool(board, 'get_request', { id: 701 });
+  assert.equal(calls.at(-1).path, '/v1/requests/context?id=701&offset=0');
+});
+
 test('get_request rejects bad IDs and offsets before calling the board and reports missing requests', async () => {
   const { board, calls } = fakeBoard({});
-  for (const id of ['', 0, -1, 'R0', 'R7&offset=1', '1.5', '9007199254740992']) {
+  for (const id of ['', 0, -1, 'R0', 'R7&offset=1', '1.5', '9007199254740992', 'T0', 'T99', 'T700', 'T701&offset=1', 'T9007199254740992']) {
     await assert.rejects(callTool(board, 'get_request', { id }), /which request/);
   }
   for (const offset of [-1, 0.5, '50', Infinity]) {
@@ -151,6 +164,8 @@ test('get_request reads an older board after a route 404, including run pages an
     return JSON.parse(text.slice(text.indexOf('\n') + 1));
   };
   const first = await retrieve(0);
+  const byTask = await callTool(board, 'get_request', { id: 'T701' });
+  assert.deepEqual(JSON.parse(byTask.split('\n')[1]), first);
   assert.deepEqual(first.request, { id: 7, text: words, follows: 6, status: 'done', outcome: 'Saved outcome' });
   assert.equal(first.tasks.length, 1);
   assert.equal(first.tasks[0].key, 1);

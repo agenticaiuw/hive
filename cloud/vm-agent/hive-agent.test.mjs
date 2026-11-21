@@ -224,6 +224,7 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   assert.match(GUIDE, /never take over\s+a tab they're on/);
   assert.match(GUIDE, /look it up there first/);
   assert.match(GUIDE, /knowledge.get_request/);
+  assert.match(GUIDE, /cloud task \(a T number\).*\npass that ID, including its prefix/);
   assert.match(GUIDE, /request.follows/);
   assert.match(GUIDE, /next_offset until it is null/);
   assert.match(GUIDE, /mac tools are the owner's own Mac/);
@@ -301,7 +302,10 @@ test('a code task gets Codex\'s own sandbox, its folders writable, the env for i
 // The owner (2026-11-17): "the cloud should be saving all of the logs and data and active processes".
 test('a job started on the VM by itself is its own run on the board, live, from what it was asked to how it ended', async () => {
   const posts = [];
-  const board = async (path, body) => { posts.push({ path, body }); return { ok: true }; };
+  const board = async (path, body) => {
+    if (path.startsWith('/v1/runs?')) throw new Error('No such run.');
+    posts.push({ path, body }); return { ok: true };
+  };
   const run = ownRun('2026-11-18T03-53-18-172Z', 'Post the thread on X\nwith both videos', { env: {}, connect: () => board });
   run.step('→ click: Compose');
   run.step('💬 Posted it.');

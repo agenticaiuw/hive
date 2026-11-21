@@ -386,6 +386,7 @@ export function runSender(board, { request, task, run: name, agent = 'cloud', ti
     : { machine: 'cloud', run: String(name), agent, title };
   let unsent = [];
   let count = 0;
+  let base = null;
   let status = null;
   let ended = false;
   let shown = false;
@@ -396,11 +397,27 @@ export function runSender(board, { request, task, run: name, agent = 'cloud', ti
     timer = null;
     sending = sending.then(async () => {
       if (shown && !unsent.length && (!status || ended)) return; // nothing new to say
+      // A continued task keeps its run name. Start after its saved steps, or the board's
+      // duplicate protection would silently discard this attempt's history. If the read
+      // fails, keep the queue and retry; guessing zero could lose completed work.
+      if (base === null) {
+        try {
+          const history = await board(`/v1/runs?${new URLSearchParams({ machine: run.machine, run: run.run, tail: '1' })}`);
+          base = history.steps.at(-1)?.n ?? 0;
+        } catch (error) {
+          if (error.message === 'No such run.') base = 0;
+          else {
+            log(`couldn't put ${request ? `R${request}` : run.run}'s steps on the board: ${error.message}`);
+            return;
+          }
+        }
+      }
       do {
         const steps = unsent.slice(0, 100);
         const last = status && unsent.length <= 100;
         try {
-          await board('/v1/runs', { ...run, ...(last ? { status } : {}), steps });
+          await board('/v1/runs', { ...run, ...(last ? { status } : !shown ? { status: 'working' } : {}),
+            steps: steps.map(step => ({ ...step, n: base + step.n })) });
         } catch (error) {
           log(`couldn't put ${request ? `R${request}` : run.run}'s steps on the board: ${error.message}`);
           return;
