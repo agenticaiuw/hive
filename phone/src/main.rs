@@ -4,7 +4,7 @@
 //!   hive-phone                        run it
 mod phone;
 
-use hive_node::{n, s, tool};
+use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 
 fn tools() -> Vec<Value> {
@@ -27,15 +27,15 @@ fn tools() -> Vec<Value> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
-        Some("pair") if args.len() == 3 => match hive_node::pair("phone", &args[1], &args[2], "phone", "iPhone", "") {
+        Some("pair") if args.len() == 3 => match hive_protocol::pair("phone", &args[1], &args[2], "phone", "iPhone", "") {
             Ok(_) => println!("The iPhone is connected to Hive."),
             Err(e) => { eprintln!("{e}"); std::process::exit(1) }
         },
-        Some("--version") => println!("{}", hive_node::VERSION),
+        Some("--version") => println!("{}", hive_protocol::VERSION),
         None => {
-            let Some(c) = hive_node::load("phone") else { eprintln!("Not connected: run `hive-phone pair <server> <code>`."); std::process::exit(1) };
+            let Some(c) = hive_protocol::load("phone") else { eprintln!("Not connected: run `hive-phone pair <server> <code>`."); std::process::exit(1) };
             let phone = phone::Phone::new();
-            hive_node::run(c, hive_node::Node { kind: "phone", name: "iPhone".into(), package: "hive-phone", tools: tools(),
+            hive_protocol::run(c, hive_protocol::Node { kind: "phone", name: "iPhone".into(), package: "hive-phone", tools: tools(),
                 notes: "The owner's iPhone: phone_* tools. One agent at a time touches it.".into() },
                 move |t, a| phone.call(t, a))
         }

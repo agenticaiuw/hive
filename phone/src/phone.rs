@@ -16,7 +16,7 @@ impl Phone {
     }
 
     fn config(&self) -> Result<(String, String), String> {
-        let own = [hive_node::conf_path("phone-relay"), "/home/ubuntu/hive-vm-agent/state/phone-relay.json".into()].iter()
+        let own = [hive_protocol::conf_path("phone-relay"), "/home/ubuntu/hive-vm-agent/state/phone-relay.json".into()].iter()
             .find_map(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(c) = own {
             return Ok((c["url"].as_str().unwrap_or("").trim_end_matches('/').to_string(), c["token"].as_str().unwrap_or("").to_string()));
@@ -81,7 +81,7 @@ impl Phone {
     fn screenshot(&self) -> Result<String, String> {
         let v = self.wda("/screenshot", "GET", None, 45)?;
         let b64 = v["value"].as_str().filter(|s| !s.is_empty()).ok_or("the phone returned no screenshot")?.to_string();
-        if let Some(head) = hive_node::b64::decode(&b64[..b64.len().min(44)]) {
+        if let Some(head) = hive_protocol::b64::decode(&b64[..b64.len().min(44)]) {
             if head.len() >= 24 {
                 let width = u32::from_be_bytes([head[16], head[17], head[18], head[19]]) as f64;
                 if let Ok(w) = self.in_session("/window/size", "GET", None, 30) {

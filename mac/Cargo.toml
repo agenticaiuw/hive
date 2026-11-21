@@ -1,9 +1,8 @@
 [package]
-name = "hive-phone"
+name = "hive"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-hive-node = { path = "../cloud/node" }
+hive-protocol = { path = "../protocol" }
 serde_json = "1"
-ureq = "2"

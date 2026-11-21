@@ -1,5 +1,5 @@
 [package]
-name = "hive-node"
+name = "hive-protocol"
 edition.workspace = true
 version.workspace = true
 

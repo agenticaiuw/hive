@@ -1,7 +1,7 @@
 //! The Mac's tools. Input goes through the owner's input helper (/tmp/agent-vhid.sock: a virtual keyboard and mouse that
 //! hands control back the moment the owner touches theirs); screenshots through screencapture; the shell through zsh.
 //! x/y everywhere are screen points, which are also the screenshot's pixels.
-use hive_node::{b64, n, s, tool};
+use hive_protocol::{b64, n, s, tool};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;

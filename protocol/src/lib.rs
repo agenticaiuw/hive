@@ -1,12 +1,5 @@
-//! The one contract between Hive's cloud and every device (desktop, phone, wearable, …). A device:
-//!   1. pairs once:        POST /api/pair {code, kind, name} -> {token}   (code from the dashboard's "Pair a device")
-//!   2. says hello often:  POST /api/node/hello {id, kind, name, version, notes, tools}
-//!      tools = [{name, description, inputSchema, lock?, timeout?}]: everything agents can do with this device.
-//!      lock = a name like "input": one agent at a time uses the tools that share it. timeout = seconds (default 120).
-//!   3. takes tool calls:  GET /api/node/next?id=  (long poll) -> {id, tool, args}
-//!      and answers:       POST /api/node/result {id, result}, result = {text, images?: [data URLs], data?, name?} or {error}
-//! Files: an argument named vm_path reaches the device with the file's base64 in `data`; a result with `data` (base64)
-//! and `name` is saved into Hive's files and the agent gets its VM path. The browser extension speaks this in JavaScript.
+//! The node side of the protocol (protocol/README.md), for nodes written in Rust: pair, say hello with your tools,
+//! take calls, answer them, and update yourself when the server's code changes.
 pub mod b64;
 
 use serde_json::{json, Value};
