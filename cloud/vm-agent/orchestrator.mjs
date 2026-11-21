@@ -110,7 +110,21 @@ export function planWords(request) {
       'hasn\'t asked for. The note\'s "register no tasks for it" is for an agent\'s own board, not for this plan.)\n' +
       request.text;
   }
+  if (request.page?.url) return `(Sent from the Hive extension in the owner's ${browserName(request.from)}, on ${request.page.url}.) ${request.text}`;
   return request.from === 'mac' ? `(Said to Hive on the owner's Mac.) ${request.text}` : request.text;
+}
+
+const browserName = from => ({ safari: 'Safari', chrome: 'Chrome' })[from] ?? 'browser';
+
+/** What a task asked from the browser extension is told about the browser and page it came from. */
+export function fromBrowser(request) {
+  const page = request.page;
+  return [`The owner sent this from the Hive extension in their ${browserName(request.from)}, while on ${page.url}` +
+    `${page.title ? ` ("${page.title}")` : ''}, where they are signed in. "This", "here", "my emails" and the like mean what's in ` +
+    "that browser: do it there with the browser tools, which act in that very browser through the cloud (read its pages, " +
+    "open and read tabs in it), not in the VM's own browser. Read what you need yourself, page by page; never ask the owner " +
+    'to copy it to you.', request.pageNote,
+    "If Hive can't do something this needs, change Hive so it can (improve_hive) instead of stopping."].filter(Boolean).join(' ');
 }
 
 /** The plan in the planner's answer: its JSON, checked, with at most MOST_TASKS tasks. */
@@ -165,7 +179,8 @@ export function taskBrief(task, request, folder, rules = []) {
     parts.push("The owner said this to Hive on their Mac, where they are now. For anything on their computer (its apps, " +
       'its files, what is on its screen; "this", "here" and "my screen" mean the Mac\'s) use the mac tools, which drive ' +
       "that Mac through the cloud; use the VM's screen only for web work the Mac isn't needed for.");
-  } else if (request.from && request.from !== 'web') parts.push(`The owner sent this from their ${request.from}.`);
+  } else if (request.page?.url) parts.push(fromBrowser(request));
+  else if (request.from && request.from !== 'web') parts.push(`The owner sent this from their ${request.from}.`);
   if (rules.length) {
     parts.push(`The owner's standing rules for this project; follow every one:\n${rules.map(r => {
       const paths = (() => { try { return JSON.parse(r.paths || '[]'); } catch { return []; } })();
@@ -275,8 +290,10 @@ When what they asked needs rules for different paths (a sidebar change on every 
 answer {"rules": [<rule>, <rule>]}, each in the shape above with its own title and path, one per path.
 The changes already on for this site are listed below. A new rule for the same path replaces the one there, so when the
 owner adds to or adjusts one of them, write the whole rule: what it already does plus the change.
-If the owner wants the page back the way it was, answer {"off": true} and nothing else. If you can't write a rule that
-does what they asked, answer {"cannot": "<the exact reason, in a sentence the owner understands>"} and nothing else.`;
+If the owner wants the page back the way it was, answer {"off": true} and nothing else. If what they said isn't about how
+the page looks (they ask Hive to do, read, check, find, write or send something, like going through their emails), answer
+{"task": true} and nothing else: Hive's agent does it in their browser. If it is about the look but you can't write a rule
+that does it, answer {"cannot": "<the exact reason, in a sentence the owner understands>"} and nothing else.`;
 
 /**
  * The rules in the model's answer, only the known fields, each the right type: {off}, {cannot}, or
@@ -288,6 +305,7 @@ export function parsePageRule(answer) {
   if (!match) throw new Error('the answer had no JSON');
   const value = JSON.parse(match[0]);
   if (value.off === true) return { off: true };
+  if (value.task === true) return { task: true };
   if (typeof value.cannot === 'string' && value.cannot.trim()) return { cannot: value.cannot.trim().slice(0, 500) };
   const rules = (Array.isArray(value.rules) ? value.rules.slice(0, 5) : [value]).map(ruleFrom);
   if (!rules.length) throw new Error('the rule changes nothing');
@@ -350,13 +368,11 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
       made = parsePageRule(answer);
     }
   } catch (error) {
-    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't write the page change: ${error.message}` });
-    return;
+    // No red "couldn't": Hive's agent takes it, and changes Hive itself if that's what it takes (owner, 2026-11-21).
+    return { agent: `Hive's page-change writer couldn't write a rule for this (${error.message}).` };
   }
-  if (made.cannot) {
-    await board('/v1/requests/update', { id: request.id, status: 'failed', outcome: `Couldn't change the page: ${made.cannot}` });
-    return;
-  }
+  if (made.task) return { agent: '' };
+  if (made.cannot) return { agent: `Hive's page-change writer couldn't do this as a page rule: ${made.cannot}` };
   if (made.off) {
     const { off } = await board('/v1/page-rules/off', { host: site });
     await board('/v1/requests/update', { id: request.id, status: 'done', outcome: `${site} is back to normal (${off} change${off === 1 ? '' : 's'} off).` });
@@ -523,7 +539,14 @@ export async function tellRunning(request, earlier, { board, stateDir, log = () 
 }
 
 export async function handle(request, deps) {
-  if (request.page?.url && deps.ask) return handlePage(request, deps);
+  if (request.page?.url && deps.ask) {
+    // Only a change to how the page looks stays a page rule; everything else asked on a page (the owner,
+    // 2026-11-21: "the extension agent cannot read emails when my gmail is open right here") goes to
+    // Hive's agent like any other request, told which page of which browser it came from.
+    const looked = await handlePage(request, deps);
+    if (!looked || !('agent' in looked)) return looked;
+    request = { ...request, pageNote: looked.agent };
+  }
   const stopping = watchStop(request, deps);
   try {
     return await handleWork(request, deps, stopping.signal);

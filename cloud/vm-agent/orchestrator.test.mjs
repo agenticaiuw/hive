@@ -435,7 +435,7 @@ test('a page rule can style inside the page\'s frames, and the guide says how, f
   assert.equal(calls.at(-1)[1].status, 'done');
 });
 
-test('an answer that changes nothing is asked once more, and one that cannot says exactly why', async () => {
+test('an answer that changes nothing is asked once more', async () => {
   const { handle } = await import('./orchestrator.mjs');
   const page = { url: 'https://www.youtube.com/feed/subscriptions', title: 'Subscriptions', outline: 'ytd-browse#browse' };
   let asked = 0;
@@ -454,10 +454,36 @@ test('an answer that changes nothing is asked once more, and one that cannot say
   assert.equal(fixed.status, 'done');
   assert.match(fixed.outcome, /^Hide Shorts: on youtube\.com\/feed\/subscriptions from now on \(page rule 9\)\.$/);
 
-  const cannot = await run([() => '{"cannot": "The video player draws inside a frame from another site, which a page rule can\'t reach."}']);
-  assert.equal(asked, 1);
-  assert.equal(cannot.status, 'failed');
-  assert.equal(cannot.outcome, "Couldn't change the page: The video player draws inside a frame from another site, which a page rule can't reach.");
+});
+
+test("anything asked on a page that isn't a page rule goes to Hive's agent in that browser, never a red \"couldn't\"", async () => {
+  // The owner, 2026-11-21, on Gmail in Safari: "the extension agent cannot read emails when my gmail is open right here".
+  const { handle } = await import('./orchestrator.mjs');
+  const page = { url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox (15,8xx)', outline: 'div.ae4' };
+  const run = async answer => {
+    const calls = [], planned = [], briefs = [];
+    const board = async (path, body) => { calls.push([path, body]); return path.startsWith('/v1/page-rules') ? { rules: [] } : path.startsWith('/v1/runs?') ? { steps: [] } : {}; };
+    await handle({ id: 126, text: 'check every single unread email one by one', from: 'safari', page }, {
+      board, ask: async () => answer, now: () => 1000, stepEvery: 1,
+      plan: async words => (planned.push(words), JSON.stringify({ project: '', tasks: [{ title: 'Check the unread emails', quote: 'check every single unread email one by one', kind: 'screen', difficulty: 'normal' }] })),
+      run: async brief => (briefs.push(brief), { ok: true, report: 'Three worth reading.', seconds: 1 }),
+    });
+    return { calls, planned, briefs, last: calls.filter(([p]) => p === '/v1/requests/update').at(-1)[1] };
+  };
+  const asked = await run('{"task": true}');
+  assert.match(asked.planned[0], /^\(Sent from the Hive extension in the owner's Safari, on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox\.\) check every/);
+  assert.match(asked.briefs[0], /from the Hive extension in their Safari, while on https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox \("Inbox \(15,8xx\)"\)/);
+  assert.match(asked.briefs[0], /do it there with the browser tools/);
+  assert.match(asked.briefs[0], /change Hive so it can \(improve_hive\)/);
+  assert.equal(asked.calls.some(([p]) => p === '/v1/page-rules'), false);
+  assert.equal(asked.last.status, 'done');
+  // A look the writer can't do as a rule goes to the agent too, with the writer's reason.
+  const cannot = await run('{"cannot": "The video player draws inside a frame from another site, which a page rule can\'t reach."}');
+  assert.match(cannot.briefs[0], /page-change writer couldn't do this as a page rule: The video player draws inside a frame/);
+  assert.equal(cannot.calls.some(([, b]) => /^Couldn't change the page/.test(b?.outcome ?? '')), false);
+  // So does one whose writer answered nothing usable twice.
+  const broken = await run('no json');
+  assert.match(broken.briefs[0], /couldn't write a rule for this \(the answer had no JSON\)/);
 });
 
 test('a page ask can send the page on and add a link, with a rule per path (YouTube: Subscriptions, Watch later)', async () => {
