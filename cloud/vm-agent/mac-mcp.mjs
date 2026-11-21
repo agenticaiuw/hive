@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { endWithTask, Lease } from './devices.mjs';
-import { TRANSFER_TOOL, transferFile } from './mac-files.mjs';
 import { boardClient, boardConfig } from './orchestrator.mjs';
 
 export const OFFLINE = "The owner's Mac isn't connected: Hive isn't running there or the Mac is offline, so the mac tools "
@@ -82,6 +81,9 @@ export function server({ board, label = '', turn = null, files = undefined }) {
       }
       case 'tools/list': {
         const tools = (await find())?.tools ?? [];
+        // The orchestrator uses this module's Mac calls, but never serves task tools. Load
+        // transfers only in the task process so their updates need no orchestrator restart.
+        const { TRANSFER_TOOL } = await import('./mac-files.mjs');
         return reply({ tools: tools.some(t => t.name === 'run_command') ? [...tools, TRANSFER_TOOL] : tools });
       }
       case 'ping': return reply({});
@@ -95,8 +97,8 @@ export function server({ board, label = '', turn = null, files = undefined }) {
           return reply({ content: [{ type: 'text', text: `Failed: the Mac has no tool ${message.params?.name ?? ''}.` }], isError: true });
         }
         const call = (name, args) => callMac(board, found, name, args, { request: requestOf(label) });
-        const run = () => transfer
-          ? transferFile(message.params?.arguments ?? {}, args => call('run_command', args), files)
+        const run = async () => transfer
+          ? (await import('./mac-files.mjs')).transferFile(message.params?.arguments ?? {}, args => call('run_command', args), files)
           : call(message.params?.name, message.params?.arguments ?? {});
         try {
           return reply(await (turn ? turn.use(run) : run()));

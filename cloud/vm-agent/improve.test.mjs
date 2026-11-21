@@ -69,7 +69,13 @@ test('a failed website deployment cannot be reported as live because the Mac ins
   assert.deepEqual(missingDeployments(parts, ['the dashboard website', 'the Mac']), []);
   assert.deepEqual(missingDeployments(partsOf(['cloud/tasks/worker.js', 'dashboard/src/lib/agents.js']), []),
     ['the board', 'the dashboard website']);
-  assert.deepEqual(missingDeployments(partsOf(['cloud/vm-agent/mac-files.mjs']), []), []);
+});
+
+test('a published VM repair cannot resume the task until its tools are live', () => {
+  const parts = partsOf(['cloud/vm-agent/mac-files.mjs', 'cloud/vm-agent/files.mjs']);
+  assert.deepEqual(missingDeployments(parts, []), ['the VM']);
+  assert.deepEqual(missingDeployments(parts, ['the Mac']), ['the VM']);
+  assert.deepEqual(missingDeployments(parts, ['the VM']), []);
 });
 
 test('a need is read once, and only with both what and why', () => {
