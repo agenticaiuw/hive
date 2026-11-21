@@ -2,6 +2,7 @@
 # Install or update Hive on the VM (as root, from the checkout in /opt/hive).
 set -euo pipefail
 cd /opt/hive
+export CARGO_TARGET_DIR=/opt/hive/target
 cargo build --release -p hive-server -p hive-phone
 install -m 644 cloud/vm/hive-server.service cloud/vm/hive-phone.service /etc/systemd/system/
 systemctl daemon-reload

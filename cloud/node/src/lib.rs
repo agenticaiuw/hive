@@ -132,7 +132,8 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
     let bundle = std::env::temp_dir().join(format!("hive-{}.bundle", std::process::id()));
     std::fs::write(&bundle, bytes).map_err(|e| e.to_string())?;
     let run = |args: &[&str]| -> Result<(), String> {
-        let o = std::process::Command::new(args[0]).args(&args[1..]).current_dir(&c.repo).output().map_err(|e| e.to_string())?;
+        let o = std::process::Command::new(args[0]).args(&args[1..]).current_dir(&c.repo).env("CARGO_TARGET_DIR", PathBuf::from(&c.repo).join("target"))
+            .output().map_err(|e| e.to_string())?;
         if o.status.success() { Ok(()) } else { Err(format!("{}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim())) }
     };
     let b = bundle.to_string_lossy().into_owned();
