@@ -13,7 +13,7 @@ as_user() { runuser -u "$user" -- "$@"; }
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
   openbox tint2 xfce4-terminal x11-xserver-utils x11vnc adwaita-icon-theme humanity-icon-theme python3 \
-  x11-apps xdotool xvfb xauth
+  x11-apps xdotool
 
 # Which services' files change with this install (checked before anything is replaced).
 differs() { ! cmp -s "$1" "$2"; }
