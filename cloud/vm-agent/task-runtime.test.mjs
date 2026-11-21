@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { TRANSFER_TOOL, transferFile } from './mac-files.mjs';
 import { CATALOG_PROBE, STARTUP_PROBE, TRANSFER_TOOLS, runRuntime, startTask, taskEvent } from './task-runtime.mjs';
 import { forward } from './task-mcp.mjs';
@@ -19,6 +20,81 @@ function fixture(t) {
   t.after(() => rmSync(workDir, { recursive: true, force: true }));
   return { workDir, catalog: join(workDir, 'runtime-catalog.json') };
 }
+
+test('ordinary tasks bind the transfer without contacting the Mac before the owner turn', async t => {
+  const { workDir } = fixture(t);
+  const methods = [];
+  const thread = await startTask(async (method, params) => {
+    methods.push(method);
+    if (method === 'initialize') return {};
+    assert.equal(method, 'thread/start');
+    assert.deepEqual(params.dynamicTools, TRANSFER_TOOLS);
+    return { thread: { id: 'current' } };
+  }, { workDir, emit: () => {} });
+  assert.equal(thread, 'current');
+  assert.deepEqual(methods, ['initialize', 'thread/start']);
+});
+
+test('a continuation without a repair note probes and copies through its bound transfer', async t => {
+  const { workDir } = fixture(t);
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.kill = () => { child.stdout.end(); child.emit('close', 0); };
+  const bytes = Buffer.from('Synthetic recording.');
+  const expected = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const destination = join(workDir, 'clip.mov');
+  const copy = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copy the recording for the continued task.' };
+  const prompt = 'Continue the blocked task using the video on the Mac. Check for duplicates before posting once.';
+  const commands = [], replies = [], prompts = [];
+  const send = value => child.stdout.write(`${JSON.stringify(value)}\n`);
+  const invoke = args => send({ id: `transfer-${replies.length}`, method: 'item/tool/call', params: {
+    threadId: 'current', tool: 'hivefiles__transfer_file', arguments: args,
+  } });
+  child.stdin = new Writable({ write(chunk, encoding, callback) {
+    const { id, method, params, result } = JSON.parse(chunk);
+    const handle = async () => {
+      if (!method) {
+        assert.equal(result.success, true);
+        replies.push(JSON.parse(result.contentItems[0].text));
+        if (replies.length === 1) invoke(copy);
+        else send({ method: 'turn/completed', params: { threadId: 'current', turn: { status: 'completed' } } });
+        return;
+      }
+      let out = {};
+      if (method === 'thread/start') {
+        assert.deepEqual(params.dynamicTools, TRANSFER_TOOLS);
+        out = { thread: { id: 'current' } };
+      } else if (method === 'mcpServer/tool/call') {
+        assert.equal(params.threadId, 'current');
+        assert.equal(params.server, 'mac');
+        assert.equal(params.tool, 'transfer_file');
+        out = await transferFile(params.arguments, async args => {
+          commands.push(args.command);
+          return { content: [{ type: 'text', text: JSON.stringify({ exit_code: 0, stdout: JSON.stringify(expected) }) }] };
+        }, { fetch: async (key, metadata) => {
+          assert.deepEqual(metadata, expected);
+          writeFileSync(destination, bytes);
+          return destination;
+        } });
+      } else assert.ok(['initialize', 'turn/start'].includes(method), `Unexpected preflight: ${method}`);
+      send({ id, result: out });
+      if (method === 'turn/start') {
+        prompts.push(params.input[0].text);
+        invoke({ ...copy, check_only: true });
+      }
+    };
+    handle().then(() => callback(), callback);
+  } });
+  assert.equal(await runRuntime({ spawnProcess: () => child, workDir, prompt, emit: () => {} }), 0);
+  assert.deepEqual(prompts, [prompt], 'preserve the continuation and its duplicate check without adding another task');
+  assert.equal(replies[0].ready, true);
+  assert.equal(replies[0].copied, false);
+  assert.equal(replies[1].vm_path, destination);
+  assert.equal(replies[1].sha256, expected.sha256);
+  assert.deepEqual(readFileSync(destination), bytes);
+  assert.equal(commands.length, 3, 'probe, source metadata, then one upload');
+  assert.equal(commands[0], '/usr/bin/true');
+});
 
 for (const scenario of ['ready', 'missing-mac', 'disconnected', 'missing-command', 'missing-transfer', 'bad-schema',
   'offline', 'bad-reply', 'wrong-path', 'rpc-error']) {
@@ -62,7 +138,7 @@ for (const scenario of ['ready', 'missing-mac', 'disconnected', 'missing-command
     };
     // Stale evidence cannot skip this thread's discovery or probe.
     writeFileSync(`${catalog}.probe`, JSON.stringify({ thread_id: 'old', ready: true }));
-    const run = startTask(request, { model: 'fixture', effort: 'low', workDir,
+    const run = startTask(request, { model: 'fixture', effort: 'low', workDir, probeRequired: true,
       prompt: 'Continue the unfinished task.', emit: event => events.push(event) });
     if (scenario === 'ready') {
       assert.equal(await run, 'current');
@@ -170,7 +246,7 @@ for (const scenario of ['ready', 'no-call', 'wrong-thread', 'wrong-tool', 'wrong
       callback();
     } });
     const events = [];
-    const run = runRuntime({ spawnProcess: () => child, model: 'fixture', effort: 'low', workDir,
+    const run = runRuntime({ spawnProcess: () => child, model: 'fixture', effort: 'low', workDir, probeRequired: true,
       prompt: 'Continue the unfinished task.', emit: event => events.push(event) });
     if (scenario === 'ready') {
       assert.equal(await run, 0);

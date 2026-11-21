@@ -3,7 +3,7 @@
 //
 // Codex here is the VM's existing install (the one Devhub runs, in root's home), with a Codex home of
 // its own signed in to the owner's ChatGPT account (HIVE_CODEX_HOME, default /root/.codex-hive). It
-// runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets six
+// runs with no user config, keeps no session files (ephemeral threads), and gets six
 // tool servers, run as this user: desktop-mcp.mjs, the VM's screen, mouse and keyboard, saved logins
 // and the files sent to Hive; phone-mcp.mjs, the owner's iPhone through its relay in the cloud (Duo, Siri
 // tasks); browser-mcp.mjs, the owner's own Safari or Chrome through the board in the cloud;
@@ -330,10 +330,12 @@ async function main(argv) {
   const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-runtime.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs', 'transfer-mcp.mjs']
     .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
   if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
-  // A transfer repair opens and probes its actual thread before submitting the owner's
-  // prompt. Keep the same server settings and retain the per-request model catalog audit.
-  const launch = probeRequired
+  // Every owner task gets the thread-bound transfer. A later board continuation can
+  // lose the repair paragraph; tool exposure must not depend on those words surviving.
+  // Only transfer repairs need a live Mac preflight before the owner's prompt.
+  const launch = !options.code
     ? [process.execPath, join(here, 'task-runtime.mjs'), workDir, options.model, options.effort,
+      ...(probeRequired ? ['--probe-transfer'] : []),
       ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])]
     : ['/root/.local/bin/codex', ...args];
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,
@@ -359,11 +361,11 @@ async function main(argv) {
         rmSync(output, { force: true });
         // An unfinished or unreadable request cannot reuse an earlier success.
         catalog = verdict?.thread_id === threadId ? { ...verdict, probe_required: probeRequired } : null;
-        if (catalog?.ok && probeRequired) {
+        if (catalog?.ok) {
           const exposed = catalog.tools?.includes('functions.exec') || catalog.tools?.includes('exec')
             ? catalog.code_tools : catalog.tools;
           if (!exposed?.includes('hivefiles.transfer_file')) {
-            catalog = { ...catalog, ok: false, why: 'The repaired task model did not receive the thread-bound hivefiles.transfer_file in its callable catalog; the task cannot continue.' };
+            catalog = { ...catalog, ok: false, why: 'The task model did not receive the thread-bound hivefiles.transfer_file in its callable catalog; the task cannot continue.' };
           }
         }
         if (catalog) {

@@ -1,4 +1,4 @@
-// A server's tools/list can pass while the agent still cannot see its tools. Exercise exec's
+// A server's tools/list can pass while the agent still cannot see its tools. Exercise the task's
 // model-facing catalog and dispatch, with a local model fixture and a synthetic board only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +17,7 @@ const releaseCheck = process.env.HIVE_UPDATE_CHECK === '1';
 // many test processes together; allow startup plus both fixture model turns.
 const execTimeout = 90000;
 
-test('exec exposes and invokes transfer before continuing a repaired task', {
+test('owner threads expose and invoke transfer with and without a repair paragraph', {
   skip: !releaseCheck && !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the agent-facing catalog', timeout: 3 * execTimeout + 15000,
 }, async t => {
   // This release test covers exposure and invocation in a fixture. The actual task
@@ -39,7 +39,7 @@ test('exec exposes and invokes transfer before continuing a repaired task', {
   const dir = mkdtempSync(join(tmpdir(), 'hive-mac-exec-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // Tool mode comes from model metadata, not the legacy feature flags. Provision
-  // the repaired task explicitly so an empty fixture home still exercises exec.
+  // every task explicitly so an empty fixture home still exercises exec.
   const models = join(dir, 'models.json');
   writeFileSync(models, JSON.stringify({ models: [{ slug: 'fixture', display_name: 'Fixture', description: 'Offline test',
     base_instructions: 'Use the tools to carry out the task.',
@@ -72,8 +72,7 @@ globalThis.fetch = async (url, options) => {
     rmSync(join(dir, 'runtime-catalog.json'), { force: true });
     rmSync(join(dir, 'runtime-catalog.json.probe'), { force: true });
     rmSync(join(dir, 'transfer-probe.json'), { force: true });
-    const namespace = 'hivefiles';
-    let requests = 0, failure, probed = false, codeMode = false, activeThread = 'fixture-model-request';
+    let requests = 0, failure, probed = false, activeThread = 'fixture-model-request';
     const respond = (res, item) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const events = [
@@ -108,39 +107,27 @@ globalThis.fetch = async (url, options) => {
             ? tool.tools.map(fn => ({ ...fn, namespace: tool.name })) : [tool]);
           const catalog = requestCatalog(body, activeThread);
           assert.equal(catalog.ok, true, JSON.stringify(catalog));
-          if (repaired) assert.ok(![...catalog.tools, ...catalog.code_tools]
+          assert.ok(![...catalog.tools, ...catalog.code_tools]
             .some(name => /^mcp__(mac|hivefiles|desktop)\./.test(name)), 'exercise the missing MCP catalog');
           writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify({ ...catalog, probe_required: repaired }));
           const probe = repaired && requests === 1 ? STARTUP_PROBE : { direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
             step: 'Checking transfer before continuing the fixture task.' };
           const exec = functions.find(tool => tool.namespace === 'functions' && tool.name === 'exec');
-          if (repaired) assert.ok(exec, 'the repaired task must exercise code mode');
-          if (exec) {
-            codeMode = true;
-            const name = repaired ? 'hivefiles__transfer_file' : `mcp__${namespace}__transfer_file`;
-            assert.ok(catalog.code_tools.includes(repaired ? 'hivefiles.transfer_file' : `mcp__${namespace}.transfer_file`));
-            assert.ok(exec.description.includes(`declare const tools: { ${name}(`));
-            respond(res, { id: `call-fixture-${requests}`, type: 'custom_tool_call', call_id: `transfer-${requests}`,
-              name: exec.name, namespace: exec.namespace,
-              input: `const name = ${JSON.stringify(name)};
-                if (!ALL_TOOLS.some(t => t.name === name) || typeof tools[name] !== 'function')
-                  throw new Error('Transfer is missing from this execution');
-                text(await tools[name](${JSON.stringify(probe)}));` });
-            return;
-          }
-          const transfer = functions.find(tool => tool.name === `mcp__${namespace}__transfer_file`
-            || (['mcp__' + namespace, namespace].includes(tool.namespace) && tool.name === 'transfer_file'));
-          assert.ok(transfer, `${namespace}.transfer_file must be in the agent's initial catalog`);
-          assert.ok(!transfer.defer_loading, 'the transfer must be callable without tool search');
-          assert.equal(transfer.parameters.properties.check_only.type, 'boolean');
-          respond(res, { id: 'call-fixture', type: 'function_call', call_id: 'transfer-probe', name: transfer.name,
-            ...(transfer.namespace ? { namespace: transfer.namespace } : {}),
-            arguments: JSON.stringify(probe) });
+          assert.ok(exec, 'the owner task must exercise code mode');
+          const name = 'hivefiles__transfer_file';
+          assert.ok(catalog.code_tools.includes('hivefiles.transfer_file'));
+          assert.ok(exec.description.includes(`declare const tools: { ${name}(`));
+          respond(res, { id: `call-fixture-${requests}`, type: 'custom_tool_call', call_id: `transfer-${requests}`,
+            name: exec.name, namespace: exec.namespace,
+            input: `const name = ${JSON.stringify(name)};
+              if (!ALL_TOOLS.some(t => t.name === name) || typeof tools[name] !== 'function')
+                throw new Error('Transfer is missing from this execution');
+              text(await tools[name](${JSON.stringify(probe)}));` });
           return;
         }
         assert.ok(requests === 2 || (repaired && requests === 4));
         const output = body.input.find(item => ['function_call_output', 'custom_tool_call_output'].includes(item.type)
-          && item.call_id === (codeMode ? `transfer-${requests - 1}` : 'transfer-probe'));
+          && item.call_id === `transfer-${requests - 1}`);
         assert.ok(output, 'the same agent turn must receive the probe result');
         assert.match(JSON.stringify(output.output), /ready[^a-z]+true/);
         assert.match(JSON.stringify(output.output), /copied[^a-z]+false/);
@@ -161,41 +148,34 @@ globalThis.fetch = async (url, options) => {
       '-c', `model_providers.fixture.base_url="http://127.0.0.1:${server.address().port}"`,
       '-c', 'model_providers.fixture.wire_api="responses"', '-c', 'model_providers.fixture.request_max_retries=0',
       '-c', 'model_providers.fixture.stream_max_retries=0');
-    if (repaired) {
-      args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
-      // Reproduce the reported runtime: MCP registration works but none of its Mac
-      // or transfer namespaces reach ALL_TOOLS. The thread-bound tool must still work.
-      for (const name of ['mac', 'hivefiles', 'desktop']) {
-        args.push('-c', `mcp_servers.${name}.omit_tools_from=["code_mode","deferred","direct"]`);
-      }
+    args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
+    // Reproduce the reported runtime: MCP registration works but none of its Mac
+    // or transfer namespaces reach ALL_TOOLS. Even without a repair paragraph the
+    // thread-bound tool must still work.
+    for (const name of ['mac', 'hivefiles', 'desktop']) {
+      args.push('-c', `mcp_servers.${name}.omit_tools_from=["code_mode","deferred","direct"]`);
     }
     if (!macEnabled) args.push('-c', 'mcp_servers.mac.enabled=false');
     args.push('-');
     let errors = '', events = '';
     const env = { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir, CODEX_HOME: dir };
-    const prompt = `${GUIDE}\n\n${repaired ? 'Continue after the repair.' : 'New task.'} Probe the fixture transfer before proceeding.`;
-    let child, runtime;
-    if (repaired) {
-      // Exercise the production repair path: the Mac probe and the model turn share
-      // the app-server thread. Do not replace this with a separate preflight process.
-      runtime = runRuntime({ command: codex,
-        args: ['app-server', ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])],
-        env, model: 'fixture', effort: 'low', workDir: dir, prompt,
-        emit: event => {
-          if (event.type === 'thread.started') activeThread = event.thread_id;
-          events += `${JSON.stringify(event)}\n`;
-        },
-        spawnProcess: (command, argv, options) => (child = spawn(command, argv, { ...options, cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] })),
-      });
-    } else child = spawn(codex, args, { cwd: dir, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stderr.on('data', b => { errors = (errors + b).slice(-8000); });
-    if (!repaired) child.stdout.on('data', b => { events += b; });
-    let ended = false, timedOut = false;
-    const closed = repaired ? runtime.then(code => { ended = true; return { code, signal: null }; },
-      error => { ended = true; return { code: 1, signal: null, error }; }) : new Promise((resolve, reject) => {
-      child.on('error', reject);
-      child.on('close', (code, signal) => { ended = true; resolve({ code, signal }); });
+    const prompt = `${GUIDE}\n\n${repaired ? 'Continue after the repair.' : 'Continue the blocked task.'} Probe the fixture transfer before proceeding.`;
+    let child;
+    // Exercise the production owner-task path in both cases. Only the repair retry
+    // needs a Mac preflight; both get the transfer bound to the same task thread.
+    const runtime = runRuntime({ command: codex,
+      args: ['app-server', ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])],
+      env, model: 'fixture', effort: 'low', workDir: dir, prompt, probeRequired: repaired,
+      emit: event => {
+        if (event.type === 'thread.started') activeThread = event.thread_id;
+        events += `${JSON.stringify(event)}\n`;
+      },
+      spawnProcess: (command, argv, options) => (child = spawn(command, argv, { ...options, cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] })),
     });
+    child.stderr.on('data', b => { errors = (errors + b).slice(-8000); });
+    let ended = false, timedOut = false;
+    const closed = runtime.then(code => { ended = true; return { code, signal: null }; },
+      error => { ended = true; return { code: 1, signal: null, error }; });
     const stop = () => {
       if (ended || !child.pid) return;
       // codex is a launcher: terminate its native child and MCP processes too,
@@ -205,7 +185,6 @@ globalThis.fetch = async (url, options) => {
     };
     t.after(async () => { stop(); await closed; });
     const timer = setTimeout(() => { timedOut = true; stop(); }, execTimeout);
-    if (!repaired) child.stdin.end(prompt);
     let status;
     try { status = await closed; }
     finally { clearTimeout(timer); server.off('request', handle); }
@@ -217,15 +196,13 @@ globalThis.fetch = async (url, options) => {
     }
     if (failure) throw failure;
     if (status.error) throw status.error;
-    assert.equal(status.code, 0, `${repaired ? 'repair retry' : 'new task'} (${namespace}): `
+    assert.equal(status.code, 0, `${repaired ? 'repair retry' : 'continuation'}: `
       + `${timedOut ? `timed out after ${execTimeout}ms` : `exited with ${status.code}`}; `
       + `signal=${status.signal}; model requests=${requests}; probe received=${probed}\n`
       + `stderr:\n${errors}\nstdout:\n${events.slice(-8000)}`);
     assert.ok(probed, 'exec must discover and invoke the transfer before continuing');
-    const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
-    if (!codeMode) assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
-    else assert.deepEqual(JSON.parse(readFileSync(join(dir, 'runtime-catalog.json.probe'), 'utf8')),
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'runtime-catalog.json.probe'), 'utf8')),
       { thread_id: activeThread, ready: true }, 'code mode must leave server evidence for task completion');
-    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${codeMode ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
+    t.diagnostic(`${repaired ? 'repair retry' : 'continuation'}: bound transfer found in ALL_TOOLS and invoked through functions.exec`);
   }
 });
