@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Hive",
+  "version": "2.0.0",
+  "description": "This browser as a Hive device: Hive's agents can use it, the owner's site rules apply on every page, and any page can ask Hive.",
+  "minimum_chrome_version": "135",
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
+  "permissions": ["alarms", "scripting", "storage", "tabs", "userScripts", "webNavigation"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "worker.js", "type": "module" },
+  "action": { "default_title": "Hive", "default_popup": "popup.html" }
+}

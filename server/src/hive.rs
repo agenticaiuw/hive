@@ -268,7 +268,7 @@ impl Hive {
         for r in self.db.all("select id, text, scope from rules where active=1 and (code is null or code='') order by id", &[]) {
             let scope = s(&r["scope"]);
             if scope.strip_prefix("node:").is_some_and(|k| !all_nodes.iter().any(|n| n == k)) { continue; }
-            t += &if scope.is_empty() { format!("- {}\n", s(&r["text"])) } else { format!("- [{scope}] {}\n", s(&r["text"])) };
+            t += &if scope.is_empty() { format!("- R{} {}\n", r["id"], s(&r["text"])) } else { format!("- R{} [{scope}] {}\n", r["id"], s(&r["text"])) };
         }
         t += "\nWhere you work:\n";
         t += VM_NOTES;
@@ -569,6 +569,14 @@ impl Hive {
             }
             "vm_type_password" => return crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
             "reinstall" => return crate::vm::reinstall(&self.repo),
+            "page_code" => {
+                let code = json!({ "css": s(&a["css"]), "js": s(&a["js"]) }).to_string();
+                let rule = a["rule"].as_i64().unwrap_or(0);
+                self.db.get("select id from rules where id=? and active=1 and scope like 'site:%'", args!(rule)).ok_or("give the id of an active site rule (R12 is 12)")?;
+                self.db.run("update rules set code=? where id=?", args!(code, rule));
+                self.bump();
+                return Ok(json!("Saved: the owner's browsers apply it on that site's pages from their next load."));
+            }
             _ => {}
         }
         let (node, decl) = self.device_for(name).ok_or(format!("Hive has no tool called {name}"))?;
@@ -641,7 +649,7 @@ nodes listed below); level = easy|normal|hard|hardest; project = a short project
 instead of making a new task: task = its id, text = the owner's words.
 - reply: one short sentence to the owner saying what happens next.
 Build exactly what the owner said: no extra variants or features. Don't split a request into many tasks unless the parts are truly \
-independent. A question is a task too (vm, easy) unless the answer is right here; then just reply. Requests from a Claude Code \
+independent. A site rule about what its pages show or do also needs a browser task that makes the pages follow it. A question is a task too (vm, easy) unless the answer is right here; then just reply. Requests from a Claude Code \
 session become tasks that session does itself.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
