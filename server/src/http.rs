@@ -1,7 +1,7 @@
 //! A small HTTP/1.1 server on std: one thread per connection, one request per connection.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,7 +103,7 @@ pub fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
 
 fn reason(status: u16) -> &'static str {
     match status {
-        200 => "OK", 204 => "No Content", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
+        200 => "OK", 204 => "No Content", 301 => "Moved Permanently", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
         404 => "Not Found", 409 => "Conflict", 413 => "Too Large", 500 => "Internal Server Error", _ => "Status",
     }
 }
@@ -122,13 +122,13 @@ pub fn serve(addr: &str, handler: Arc<dyn Fn(Req) -> Res + Send + Sync>) -> std:
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming().flatten() {
         let handler = handler.clone();
+        stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
         std::thread::spawn(move || handle(stream, &*handler));
     }
     Ok(())
 }
 
-fn handle(mut stream: TcpStream, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
-    stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
+pub fn handle(mut stream: impl Read + Write, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
     let res = match parse(&mut stream, 512 << 20) {
         Some(req) => handler(req),
         None => Res::err(400, "bad request"),

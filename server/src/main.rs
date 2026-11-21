@@ -1,6 +1,7 @@
 //! hive-server: Hive's one brain, on the VM. `hive-server` runs it; `hive-server code` prints a pairing code.
 mod api;
 mod codex;
+mod tls;
 mod db;
 mod hive;
 mod http;
@@ -45,10 +46,14 @@ fn main() {
 
     let hive = hive::Hive::new(db, state, repo, env("HIVE_CODEX", "/root/.local/bin/codex"), codex_env, owner_key, version);
     let h = hive.clone();
+    let handler: Arc<dyn Fn(http::Req) -> http::Res + Send + Sync> = Arc::new(move |req| api::handle(&h, req));
+    if let Ok(host) = std::fs::read_to_string(hive.state.join("host")) {
+        tls::start(host.trim().to_string(), hive.state.join("tls"), handler.clone());
+    }
     let addr = env("HIVE_ADDR", "127.0.0.1:8790");
     std::thread::spawn(move || {
         eprintln!("Hive listening on {addr}");
-        http::serve(&addr, Arc::new(move |req| api::handle(&h, req))).expect("listen");
+        http::serve(&addr, handler).expect("listen");
     });
     hive.run();
 }
