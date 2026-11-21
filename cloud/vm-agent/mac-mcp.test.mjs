@@ -4,6 +4,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OFFLINE, callMac, connectedMac, requestOf, server } from './mac-mcp.mjs';
 
+const sourceInfo = { content: [{ type: 'text', text: JSON.stringify({ exit_code: 0,
+  stdout: JSON.stringify({ size: 1024, sha256: 'a'.repeat(64) }),
+}) }] };
+
 const TOOLS = [{ name: 'screenshot', description: 'See the screen.', inputSchema: { type: 'object' } }];
 
 /** A board whose Mac answers each call after `polls` looks. */
@@ -127,23 +131,23 @@ test('confirmed cancellation before the Mac takes a timed out call removes the u
 });
 
 test('a lost transfer reply returns both the Mac call id and the cloud key for recovery', async () => {
-  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }] });
+  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }], answer: { result: sourceInfo } });
   const answer = server({ board: async (path, body) => {
-    if (path.startsWith('/v1/mac/calls?id=')) throw new Error('reply lost');
+    if (path.startsWith('/v1/mac/calls?id=') && calls.filter(c => c.path === '/v1/mac/calls').length > 1) throw new Error('reply lost');
     return board(path, body);
-  }, label: 'R42-1', files: { uuid: () => 'copy-id', fetch: () => assert.fail('must not fetch an uncertain copy') } });
+  }, label: 'R42-1', files: { uuid: () => 'copy-id', fetch: async () => { throw new Error('Object not found'); } } });
   const out = await answer({ id: 1, method: 'tools/call', params: { name: 'transfer_file', arguments: {
     direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.',
   } } });
   assert.equal(out.result.isError, true);
   assert.match(out.result.content[0].text, /call 5.*may still run or may already have run/);
   assert.match(out.result.content[1].text, /transfers\/copy-id\/clip.mov/);
-  assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 1);
+  assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 2);
 });
 
 test('commands and transfers use the same Mac lease and board-supplied request words', async () => {
   const tools = [...TOOLS, { name: 'run_command', inputSchema: { type: 'object' } }];
-  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools }], answer: { result: { content: [] } } });
+  const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools }], answer: { result: sourceInfo } });
   const turns = [];
   const answer = server({ board, label: 'R42-1', turn: { use: async fn => { turns.push('take'); return fn(); } },
     files: { uuid: () => 'copy-id', fetch: async key => `/files/${key}` } });

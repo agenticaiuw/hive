@@ -10,7 +10,8 @@
 //   node files.mjs put <path> <key>     → {"key"}
 //   node files.mjs list [prefix]        → {"files":[{key,size}]}
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 
@@ -37,26 +38,45 @@ const TYPES = { '.mov': 'video/quicktime', '.mp4': 'video/mp4', '.m4a': 'audio/m
   '.pdf': 'application/pdf', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown', '.zip': 'application/zip' };
 export const contentType = path => TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream';
 
+// Wrangler often ends stderr with a log-file notice. Keep the actual error before it, too,
+// without returning an unbounded log or execFile's message (which includes the shell script).
+export function cloudFailure(error, stdout, stderr) {
+  const bounded = value => {
+    const text = String(value ?? '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+    return text.length > 8000 ? `${text.slice(0, 4000)}\n… output truncated …\n${text.slice(-4000)}` : text;
+  };
+  return new Error(`Cloud file command failed (code=${error.code ?? 'unknown'}, signal=${error.signal ?? 'none'}, killed=${!!error.killed})`
+    + [bounded(stderr), bounded(stdout)].filter(Boolean).map(text => `\n${text}`).join(''));
+}
+
 function asCloud(script, args) {
   if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(BUCKET)) return Promise.reject(new Error('unsupported bucket name'));
   return new Promise((resolvePromise, reject) => {
     execFile('sudo', ['-n', '-H', 'bash', '-lc', script, 'hive-files', ...args], { maxBuffer: 32 * 1024 * 1024, timeout: 15 * 60_000 }, (error, stdout, stderr) => {
-      if (error) return reject(new Error(String(stderr).trim().split('\n').filter(Boolean).pop() ?? error.message));
+      if (error) return reject(cloudFailure(error, stdout, stderr));
       resolvePromise(String(stdout));
     });
   });
 }
 
 /** Cloud → this machine. Returns the local path. */
-export async function fetchFile(key, root = filesDir()) {
+export async function fetchFile(key, root = filesDir(), { expected, run = asCloud } = {}) {
   const path = localPath(key, root);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const part = `${path}.part`;
-  rmSync(part, { force: true });
+  const part = `${path}.${randomUUID()}.part`;
   try {
-    await asCloud('wrangler r2 object get "$1/$2" --remote --file "$3" >/dev/null && chown "$4" "$3"',
+    await run('wrangler r2 object get "$1/$2" --remote --file "$3" && chown "$4" "$3"',
       [BUCKET, key, part, `${process.getuid()}:${process.getgid()}`]);
+    if (expected) {
+      const size = statSync(part).size;
+      if (size !== expected.size) throw new Error(`Size mismatch: expected ${expected.size} bytes, received ${size}`);
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(part)) hash.update(chunk);
+      if (hash.digest('hex') !== expected.sha256) throw new Error('SHA-256 mismatch: the cloud copy differs from the Mac source');
+    }
     renameSync(part, path);
+  } catch (error) {
+    throw new Error(`Could not fetch cloud key ${key} to ${path}: ${error.message}`);
   } finally { rmSync(part, { force: true }); }
   return path;
 }
@@ -65,7 +85,7 @@ export async function fetchFile(key, root = filesDir()) {
 export async function putFile(path, key) {
   checkKey(key);
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`no file at ${path}`);
-  await asCloud('wrangler r2 object put "$1/$2" --remote --file "$3" --content-type "$4" >/dev/null', [BUCKET, key, resolve(path), contentType(path)]);
+  await asCloud('wrangler r2 object put "$1/$2" --remote --file "$3" --content-type "$4"', [BUCKET, key, resolve(path), contentType(path)]);
   return key;
 }
 
