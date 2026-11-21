@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { answer } from './desktop-mcp.mjs';
+import { answer, BATCHABLE, runBatch } from './desktop-mcp.mjs';
 
 test('the static desktop transfer stays callable after offline discovery and keeps the request identity', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hive-desktop-transfer-'));
@@ -55,4 +55,40 @@ test('the static desktop transfer stays callable after offline discovery and kee
   assert.equal(calls[0].body.request, 42);
   assert.equal(calls[0].body.arguments.irreversible, false);
   assert.equal(calls[0].body.arguments.step, message.params.arguments.step);
+});
+
+test('the callable batch schema includes each action argument', async () => {
+  const { result: { tools } } = await answer({ id: 1, method: 'tools/list' });
+  const item = tools.find(t => t.name === 'batch').inputSchema.properties.steps.items;
+  for (const action of tools.filter(t => BATCHABLE.includes(t.name))) {
+    for (const [name, schema] of Object.entries(action.inputSchema.properties)) {
+      if (name !== 'step') assert.deepEqual(item.properties[name], schema, `${action.name}.${name}`);
+    }
+  }
+  assert.equal(item.properties.text.type, 'string');
+  assert.equal(item.properties.keys.type, 'string');
+});
+
+test('a malformed batch fails before an earlier valid action can change the screen', async () => {
+  for (const bad of [
+    { tool: 'type_text' }, { tool: 'type_text', text: null },
+    { tool: 'press_key' }, { tool: 'press_key', keys: 'ctrl+unknown' },
+    { tool: 'click', x: 1 }, { tool: 'click', x: NaN, y: 2 },
+    { tool: 'click', x: 1, y: 2, button: 'unknown' },
+    { tool: 'drag', x: 1, y: 2, to_x: 3 },
+    { tool: 'scroll', x: 1, y: 2, amount: 'down' },
+    { tool: 'wait', seconds: Infinity },
+  ]) {
+    await assert.rejects(runBatch([{ tool: 'press_key', keys: 'ctrl+l' }, bad],
+      () => assert.fail('no action may run')), /step 2.*nothing was done/);
+  }
+  const actions = [
+    { tool: 'press_key', keys: 'ctrl+l' },
+    { tool: 'type_text', text: 'https://example.invalid/fixture' },
+    { tool: 'press_key', keys: 'Return' },
+    { tool: 'wait', seconds: 1 },
+  ];
+  const called = [];
+  await runBatch(actions, async (tool, args) => { called.push({ tool, ...args }); return 'sent'; });
+  assert.deepEqual(called, actions);
 });
