@@ -19,7 +19,7 @@
 //   node hive-task.mjs --code DIR [--writable DIR]... [--env K=V]... [--effort e] < task.txt
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -27,7 +27,6 @@ import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
 import { Lease } from './devices.mjs';
 import { boardClient, boardConfig, runSender } from './orchestrator.mjs';
-import { readTaskCatalog } from './task-catalog.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAFE = /^[\w@%+=:,./~-]+$/;
@@ -93,8 +92,10 @@ exit code and bounded stdout/stderr; check them. Give irreversible=true for any 
 or otherwise cannot be undone, and use the same One-way: step quoting the owner's exact words. A timeout can leave
 partial effects: inspect before retrying, especially a send. Use mac.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
-Tool discovery is local to this execution. In functions.exec, find mcp__mac__transfer_file or
+Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
+Search ALL_TOOLS for transfer_file. In functions.exec, find mcp__mac__transfer_file or
 mcp__desktop__transfer_file in ALL_TOOLS and check that the matching tools property is a function.
+Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
 If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
 When functions.exec is unavailable, use the directly exposed mac or desktop tool namespace.
 After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
@@ -163,24 +164,28 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     if (!SAFE.test(value)) throw new Error(`unsupported characters in "${value}"`);
   }
   const toml = value => JSON.stringify(value); // TOML basic strings and arrays of them read like JSON
+  // Discovery must run before the model request can be checked. Actual tool calls wait
+  // for that request's catalog verdict, so a repair cannot resume with missing tools.
+  const launch = script => [node, join(appDir, 'task-mcp.mjs'), join(workDir, 'runtime-catalog.json'), join(appDir, script)];
   const server = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`, `HIVE_TASK_STEPS=${stepsFile}`,
     `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []),
-    ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), node, join(appDir, 'desktop-mcp.mjs')];
-  const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, node, join(appDir, 'phone-mcp.mjs')];
-  const browser = ['-n', '-u', user, node, join(appDir, 'browser-mcp.mjs')];
+    ...(keepOpen ? ['HIVE_KEEP_OPEN=1'] : []), ...launch('desktop-mcp.mjs')];
+  const phone = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_TASK_LABEL=${label}`, ...launch('phone-mcp.mjs')];
+  const browser = ['-n', '-u', user, ...launch('browser-mcp.mjs')];
   // HIVE_IMPROVE_FILE (set by the orchestrator) gives the agent improve_hive: what it writes there has Hive change itself.
   const knowledge = ['-n', '-u', user, 'env', `HIVE_TASK_FILE=${join(workDir, 'task.txt')}`, `HIVE_TASK_LABEL=${label}`,
-    ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), node, join(appDir, 'knowledge-mcp.mjs')];
+    ...(improveFile ? [`HIVE_IMPROVE_FILE=${improveFile}`] : []), ...launch('knowledge-mcp.mjs')];
   // Mac transfers must land in the same folder the desktop tools list and attach files from.
   // sudo drops the task's environment. Carry the board config path explicitly, or a task
   // using another config silently loses its Mac tools when the default config isn't readable.
   const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`,
-    `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), node, join(appDir, 'mac-mcp.mjs')];
+    `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), ...launch('mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     // Owner tasks discover and call tools through functions.exec. Direct-only exposure
     // removes them from both ALL_TOOLS and the tools object, even when MCP startup succeeds.
     // Keep transfers in code mode and out of deferred search, including after a repair.
+    // Strict third-party deferral would ignore these servers' exposure settings.
     '-c', 'features.code_mode_only_strict_3p_tools=false',
     ...['desktop', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["deferred"]`]),
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
@@ -310,21 +315,40 @@ async function main(argv) {
   // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
   const traceDir = join(workDir, 'runtime-trace');
   const catalogFile = join(workDir, 'runtime-catalog.json');
-  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
+  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
     .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
   if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,
     ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), '/root/.local/bin/codex', ...args],
     { stdio: ['pipe', 'pipe', 'pipe'] });
-  let threadId = '', catalog = null;
+  let threadId = '', catalog = null, auditing = null;
   const audit = () => {
-    if (options.code || catalog) return;
-    catalog = readTaskCatalog(traceDir, threadId);
-    if (!catalog) return;
-    clearInterval(catalogTimer);
-    writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
-    say(catalog.ok ? `Callable transfer catalog verified for thread ${threadId}.` : `❌ ${catalog.why}`);
-    if (!catalog.ok) codex.kill('SIGTERM');
+    if (options.code || catalog || !threadId) return;
+    if (auditing) return auditing;
+    auditing = new Promise(resolve => {
+      // The trace is root's. Read it there instead of treating a permission error as
+      // an absent model request; only the compact verdict crosses back to this user.
+      const output = join(workDir, 'catalog-read.json');
+      const fd = openSync(output, 'w', 0o600);
+      const reader = spawn('sudo', ['-n', process.execPath, join(here, 'task-catalog.mjs'), traceDir, threadId],
+        { stdio: ['ignore', fd, 'ignore'], timeout: 5000 });
+      closeSync(fd);
+      reader.on('error', () => {}); // close still runs; an empty result cannot verify a catalog
+      reader.on('close', code => {
+        let verdict;
+        try { if (code === 0) verdict = JSON.parse(readFileSync(output, 'utf8')); } catch {}
+        rmSync(output, { force: true });
+        if (verdict?.thread_id === threadId) {
+          catalog = verdict;
+          clearInterval(catalogTimer);
+          writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
+          say(catalog.ok ? `Callable transfer catalog verified for thread ${threadId}.` : `❌ ${catalog.why}`);
+          if (!catalog.ok) codex.kill('SIGTERM');
+        }
+        resolve();
+      });
+    }).finally(() => { auditing = null; });
+    return auditing;
   };
   const catalogTimer = options.code ? null : setInterval(audit, 250);
   // Stopped from outside (ssh hung up, a kill): the board says so instead of showing it working.
@@ -350,7 +374,7 @@ async function main(argv) {
   const codexStatus = await new Promise(resolve => codex.on('close', resolve));
   let status = codexStatus;
   clearInterval(catalogTimer);
-  audit();
+  await audit();
   if (!options.code) {
     if (!catalog?.ok) {
       const why = catalog?.why ?? 'No model-visible transfer catalog was recorded for this owner task.';

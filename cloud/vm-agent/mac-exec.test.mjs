@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexArgs, GUIDE } from './hive-task.mjs';
+import { requestCatalog } from './task-catalog.mjs';
 
 const codex = process.env.HIVE_TEST_CODEX ?? '/root/.local/bin/codex';
 const releaseCheck = process.env.HIVE_UPDATE_CHECK === '1';
@@ -59,8 +60,9 @@ globalThis.fetch = async (url, options) => {
 };
 `);
   for (const [repaired, macEnabled] of [[false, true], [true, true], [true, false]]) {
+    rmSync(join(dir, 'runtime-catalog.json'), { force: true });
     const namespace = macEnabled ? 'mac' : 'desktop';
-    let requests = 0, failure, probed = false;
+    let requests = 0, failure, probed = false, codeMode = false;
     const respond = (res, item) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const events = [
@@ -85,9 +87,16 @@ globalThis.fetch = async (url, options) => {
             ...(body.input ?? []).filter(item => item.type === 'additional_tools').flatMap(item => item.tools ?? [])]
             .flatMap(tool => tool.type === 'namespace'
             ? tool.tools.map(fn => ({ ...fn, namespace: tool.name })) : [tool]);
+          const catalog = requestCatalog(body, 'fixture-model-request');
+          assert.equal(catalog.ok, true, JSON.stringify(catalog));
+          writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify(catalog));
+          const probe = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
+            step: 'Checking transfer before continuing the fixture task.' };
           const exec = functions.find(tool => tool.namespace === 'functions' && tool.name === 'exec');
-          if (repaired) {
-            assert.ok(exec, 'the repaired task must exercise code mode');
+          if (repaired) assert.ok(exec, 'the repaired task must exercise code mode');
+          if (exec) {
+            codeMode = true;
+            assert.ok(catalog.code_tools.includes(`mcp__${namespace}.transfer_file`));
             const name = `mcp__${namespace}__transfer_file`;
             assert.ok(exec.description.includes(`declare const tools: { ${name}(`));
             respond(res, { id: 'call-fixture', type: 'custom_tool_call', call_id: 'transfer-probe',
@@ -106,8 +115,7 @@ globalThis.fetch = async (url, options) => {
           assert.equal(transfer.parameters.properties.check_only.type, 'boolean');
           respond(res, { id: 'call-fixture', type: 'function_call', call_id: 'transfer-probe', name: transfer.name,
             ...(transfer.namespace ? { namespace: transfer.namespace } : {}),
-            arguments: JSON.stringify({ direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
-              step: 'Checking transfer before continuing the fixture task.' }) });
+            arguments: JSON.stringify(probe) });
           return;
         }
         assert.equal(requests, 2);
@@ -152,7 +160,7 @@ globalThis.fetch = async (url, options) => {
     assert.equal(status, 0, errors);
     assert.ok(probed, 'exec must discover and invoke the transfer before continuing');
     const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
-    assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
-    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${repaired ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
+    if (!codeMode) assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
+    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${codeMode ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
   }
 });

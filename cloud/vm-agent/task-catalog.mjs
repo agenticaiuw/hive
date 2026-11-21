@@ -18,17 +18,17 @@ export function requestCatalog(request, threadId) {
   }
   // Code mode declares its callable methods inside exec, not as top-level tools. Only
   // read declarations from that tool's own description; task words are not evidence.
-  const exec = tools.get('functions.exec');
+  const exec = tools.get('functions.exec') ?? tools.get('exec');
   const codeTools = new Map();
   for (const match of (exec?.description ?? '').matchAll(/declare const tools: \{ (\w+)\(args: \{([\s\S]*?)\}\): Promise<[^;]+>; \};/g)) {
-    codeTools.set(match[1].replace(/^(mcp__[^_]+)__(.+)$/, '$1.$2'), match[2]);
+    codeTools.set(match[1].replace(/^(mcp__[^_]+)__(.+)$/, '$1.$2'), match[2].replace(/^\s*\/\/.*$/gm, ''));
   }
   const transfer = tools.get('mcp__desktop.transfer_file');
   const schema = transfer?.parameters ?? transfer?.inputSchema;
   const declaration = codeTools.get('mcp__desktop.transfer_file') ?? '';
   // When exec is present, a direct-only schema cannot prove the route the task uses.
-  const ok = exec ? /^\s*check_only\??: boolean;/m.test(declaration)
-    && /^\s*direction: [^;]*"to_vm"[^;]*;/m.test(declaration)
+  const ok = exec ? /^\s*check_only\??: boolean;$/m.test(declaration)
+    && /^\s*direction: (?:"[^"]+"\s*\|\s*)*"to_vm"(?:\s*\|\s*"[^"]+")*;$/m.test(declaration)
     : schema?.properties?.check_only?.type === 'boolean' && schema?.properties?.direction?.enum?.includes('to_vm');
   return { thread_id: threadId, model: request.model, tools: [...tools.keys()].sort(),
     code_tools: [...codeTools.keys()].sort(), ok: Boolean(ok),
@@ -55,4 +55,10 @@ export function readTaskCatalog(root, threadId) {
     }
   }
   return null;
+}
+
+// Codex writes private traces as root, while hive-task runs as the VM user. The
+// privileged reader returns only tool names and the verdict, never the raw request.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  process.stdout.write(`${JSON.stringify(readTaskCatalog(process.argv[2], process.argv[3]))}\n`);
 }
