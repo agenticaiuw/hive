@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import worker from '../tasks/worker.js';
 import { callTool } from '../vm-agent/knowledge-mcp.mjs';
-import { boardClient } from '../vm-agent/orchestrator.mjs';
+import { boardClient, runSender } from '../vm-agent/orchestrator.mjs';
 
 const MIGRATIONS = new URL('../knowledge/migrations/', import.meta.url);
 
@@ -165,6 +165,43 @@ test('request context requires machine authentication and valid IDs and offsets'
   assert.equal(missing.body.error, 'No such request.');
 });
 
+test('a continuation keeps both attempts in task history, including exact comment text and completed work', async t => {
+  const { call, env } = setup();
+  const words = 'Copy the recording and use the saved thread comment.';
+  const comment = 'Example comment.\n  Keep this line EXACTLY.';
+  const id = (await call('POST', '/v1/requests', { text: words })).body.id;
+  await call('POST', '/v1/requests/update', { id, status: 'done', tasks: [
+    { key: 1, title: 'Copy recording', quote: words, status: 'blocked', outcome: 'Earlier work completed; copy still needed.' },
+  ] });
+  t.mock.method(globalThis, 'fetch', (input, options) => worker.fetch(new Request(input, options), env));
+  const board = boardClient({ url: 'https://board.test', token: 'machine-token' });
+  const first = runSender(board, { request: id, task: 1 });
+  first.step(comment);
+  for (let i = 0; i < 54; i++) first.step(`Completed step ${i + 1}`);
+  await first.done('failed');
+  const continued = runSender(board, { request: id, task: 1 });
+  continued.step('Recovered the recording');
+  continued.step('Checked completed work before continuing');
+  await continued.done('done');
+  const before = env.DB.db.prepare('SELECT * FROM board_run_steps ORDER BY n').all();
+  const retrieve = async offset => {
+    const text = await callTool(board, 'get_request', { id: `T${id * 100 + 1}`, offset });
+    return JSON.parse(text.slice(text.indexOf('\n') + 1));
+  };
+  const page = await retrieve(0);
+  assert.equal(page.request.id, id);
+  assert.equal(page.request.text, words);
+  assert.equal(page.tasks[0].outcome, 'Earlier work completed; copy still needed.');
+  assert.equal(page.runs[0].status, 'done');
+  assert.equal(page.steps[0].text, comment);
+  assert.equal(page.next_offset, 50);
+  const last = await retrieve(page.next_offset);
+  assert.equal(last.next_offset, null);
+  assert.deepEqual([...page.steps, ...last.steps].map(s => s.n), Array.from({ length: 57 }, (_, i) => i + 1));
+  assert.deepEqual(last.steps.slice(-2).map(s => s.text), ['Recovered the recording', 'Checked completed work before continuing']);
+  assert.deepEqual(env.DB.db.prepare('SELECT * FROM board_run_steps ORDER BY n').all(), before, 'reading history changes nothing');
+});
+
 test('the history tool reads through the board client before and after the history route is deployed', async t => {
   const { call, env } = setup();
   const words = 'First LINE.\n  Second line, exactly.';
@@ -186,7 +223,7 @@ test('the history tool reads through the board client before and after the histo
   });
   const board = boardClient({ url: 'https://board.test', token: 'machine-token' });
   const retrieve = async offset => {
-    const text = await callTool(board, 'get_request', { id: `R${id}`, offset });
+    const text = await callTool(board, 'get_request', { id: `T${id * 100 + 1}`, offset });
     return JSON.parse(text.slice(text.indexOf('\n') + 1));
   };
   const older = await retrieve(0);

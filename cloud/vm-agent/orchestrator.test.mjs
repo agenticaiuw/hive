@@ -86,6 +86,7 @@ function fakeBoard(folders = {}) {
   const calls = [];
   const board = async (path, body) => {
     calls.push({ path, body });
+    if (path.startsWith('/v1/runs?')) throw new Error('No such run.');
     if (path.startsWith('/v1/rules?')) return { rules: folders.__rules ?? [] };
     if (path.startsWith('/v1/folder?')) {
       const key = new URL(`http://x${path}`).searchParams.get('key');
@@ -300,7 +301,9 @@ test("a task's steps reach the board while it runs, in order, before the task is
     && c.body.request === 11 && c.body.task === 1 && c.body.title === 'Open example.com'));
   assert.deepEqual(sent.flatMap(c => c.body.steps.map(s => [s.n, s.kind, s.text])),
     [[1, 'action', '→ open_url: Open example.com'], [2, 'say', '💬 The heading says Example Domain.'], [3, 'done', '✅ Done.']]);
-  assert.deepEqual(sent.map(c => c.body.status ?? null), [...sent.slice(1).map(() => null), 'done']);
+  assert.equal(sent[0].body.status, 'working');
+  assert.equal(sent.at(-1).body.status, 'done');
+  assert.ok(sent.slice(1, -1).every(c => !c.body.status));
   const lastStep = calls.lastIndexOf(sent.at(-1));
   const done = calls.findIndex(c => c.path === '/v1/requests/update' && c.body.tasks?.[0]?.status === 'done');
   assert.ok(lastStep < done, 'every step is on the board before the task shows done');
@@ -313,6 +316,7 @@ test("a board that won't take steps never stops the task, and what it missed goe
   const ends = [];
   const board = async (path, body) => {
     if (refuse) throw new Error('fetch failed');
+    if (path.startsWith('/v1/runs?')) throw new Error('No such run.');
     sent.push(...body.steps.map(s => `${s.n} ${s.text}`));
     if (body.status) ends.push(body.status);
     return { ok: true };
@@ -341,15 +345,46 @@ test("a board that won't take steps never stops the task, and what it missed goe
 
 test("a task's run is on the board, working, before its agent says anything", async () => {
   const posts = [];
-  const steps = runSender(async (path, body) => { posts.push({ path, body }); return { ok: true }; },
+  const steps = runSender(async (path, body) => {
+    if (path.startsWith('/v1/runs?')) throw new Error('No such run.');
+    posts.push({ path, body }); return { ok: true };
+  },
     { request: 7, task: 3, agent: 'code', title: 'Fix the login page' }, { every: 1000 });
   await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(posts, [{ path: '/v1/runs', body: {
-    machine: 'cloud', run: '703', agent: 'code', title: 'Fix the login page', request: 7, task: 3, steps: [],
+    machine: 'cloud', run: '703', agent: 'code', title: 'Fix the login page', request: 7, task: 3, status: 'working', steps: [],
   } }]);
   await steps.done('done');
   assert.equal(posts.length, 2);
   assert.equal(posts[1].body.status, 'done');
+});
+
+test('continued steps wait for saved history and reuse their numbers when a post is retried', async () => {
+  let readable = false, reads = 0, posts = 0;
+  const sent = [];
+  const steps = runSender(async (path, body) => {
+    if (!body) {
+      reads++;
+      assert.equal(path, '/v1/runs?machine=cloud&run=703&tail=1');
+      if (!readable) throw new Error('fetch failed');
+      return { steps: [{ n: 80 }] };
+    }
+    posts++;
+    sent.push(body.steps);
+    if (posts === 1) throw new Error('reply lost');
+    return { ok: true };
+  }, { request: 7, task: 3 }, { every: 1000 });
+  steps.step('Earlier action completed');
+  await steps.done('failed');
+  assert.equal(posts, 0, 'never guess zero when saved history cannot be read');
+  readable = true;
+  steps.step('Continuation result');
+  const before = reads;
+  await steps.done('done');
+  assert.equal(reads, before + 1, 'read the base once, not again after a lost post reply');
+  assert.equal(posts, 2);
+  assert.deepEqual(sent[0], sent[1], 'retry the same step numbers after an uncertain post');
+  assert.deepEqual(sent[1].map(s => [s.n, s.text]), [[81, 'Earlier action completed'], [82, 'Continuation result']]);
 });
 
 // The owner (2026-11-17): "why did this task on browser failed and also the previous task when i asked it to make it
