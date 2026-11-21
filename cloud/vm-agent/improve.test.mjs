@@ -45,6 +45,21 @@ test('where a change lives decides where it is tested and put live', () => {
   assert.equal(partsOf(['cloud/tests/board.test.mjs']).cloudTests, true);
 });
 
+test('dashboard ignore rules alone need no Mac build or website deployment', () => {
+  assert.deepEqual(partsOf(['dashboard/.gitignore']),
+    { vm: false, board: false, mac: false, site: false, phone: false, cloudTests: false });
+  assert.deepEqual(gateTests(['dashboard/.gitignore'], ['cloud/shared/privacy.test.mjs']),
+    ['cloud/shared/privacy.test.mjs'], 'the privacy check still runs');
+  for (const file of ['dashboard/src/lib/agents.js', 'dashboard/src/lib/StuckRequests.svelte',
+    'dashboard/package.json', 'dashboard/package-lock.json', 'dashboard/svelte.config.js']) {
+    const parts = partsOf(['dashboard/.gitignore', file]);
+    assert.equal(parts.mac, true, file);
+    assert.equal(parts.site, true, file);
+  }
+  assert.equal(partsOf(['dashboard/.gitignore', 'desktop/app/crates/hive/hive-app/src/cloud_brain.rs']).mac, true);
+  assert.equal(partsOf(['dashboard/.gitignore', 'cloud/vm-agent/improve.mjs']).vm, true);
+});
+
 test('the gate runs the privacy test always, and the tests of each part a change touched', () => {
   const have = [
     'cloud/shared/privacy.test.mjs', 'cloud/shared/ownerDetails.test.mjs', 'cloud/tests/board.test.mjs',

@@ -99,7 +99,9 @@ export function againBrief(brief, need, landed) {
 
 /** Where a change lives, so where it's tested and put live. */
 export function partsOf(files) {
-  const any = re => files.some(f => re.test(f));
+  // The dashboard's ignore rules aren't shipped. Changing them alone must not wait for a Mac
+  // or deploy the website; dashboard sources still need both releases.
+  const any = re => files.some(f => f !== 'dashboard/.gitignore' && re.test(f));
   return {
     vm: any(/^cloud\/vm-agent\//),
     board: any(/^cloud\/(tasks|knowledge\/migrations|shared)\//),
