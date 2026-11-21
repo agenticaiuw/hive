@@ -251,13 +251,23 @@ fi
 });
 
 
-test('a transfer probe validates arguments without touching files or running commands', async () => {
+test('a transfer probe requires a live harmless command reply without touching files', async () => {
   const unused = () => assert.fail('a probe has no file effects');
-  const result = await transferFile({ ...args, check_only: true }, unused, { uuid: unused, fetch: unused, put: unused });
+  const calls = [];
+  const result = await transferFile({ ...args, check_only: true }, async call => { calls.push(call); return ok; }, { uuid: unused, fetch: unused, put: unused });
+  assert.deepEqual(calls, [{ command: '/usr/bin/true', irreversible: false, step: args.step, timeout_seconds: 15 }]);
   assert.deepEqual(JSON.parse(result.content[0].text), {
     ready: true, copied: false, direction: 'to_vm', mac_path: args.mac_path,
   });
   for (const invalid of [{ mac_path: 'relative' }, { check_only: 'true' }, { direction: 'to_mac' }]) {
     await assert.rejects(transferFile({ ...args, check_only: true, ...invalid }, unused));
   }
+});
+
+test('a stale Mac heartbeat or malformed command reply cannot pass a live probe', async () => {
+  for (const reply of [{}, { content: [{ type: 'text', text: '{"exit_code":1}' }] },
+    { content: [{ type: 'text', text: '{"exit_code":0,"timed_out":true}' }] }]) {
+    await assert.rejects(transferFile({ ...args, check_only: true }, async () => reply), /did not answer the transfer probe/);
+  }
+  assert.deepEqual(await transferFile({ ...args, check_only: true }, async () => failed), failed);
 });

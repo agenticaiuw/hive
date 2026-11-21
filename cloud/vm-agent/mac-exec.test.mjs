@@ -19,8 +19,9 @@ const execTimeout = 90000;
 test('exec exposes and invokes transfer before continuing a repaired task', {
   skip: !releaseCheck && !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the agent-facing catalog', timeout: 3 * execTimeout + 15000,
 }, async t => {
-  // The release gate must prove exposure and invocation before retrying. A developer's
-  // restricted sandbox may skip this integration test, but that is never release evidence.
+  // This release test covers exposure and invocation in a fixture. The actual task
+  // must independently pass its catalog and live-probe gates before continuing.
+  // A sandbox skip is never release evidence.
   assert.ok(existsSync(codex), 'The release check requires the installed Codex runtime');
   const server = createServer();
   try {
@@ -54,9 +55,13 @@ test('exec exposes and invokes transfer before continuing a repaired task', {
   const preload = join(dir, 'fixture.mjs');
   writeFileSync(preload, `
 globalThis.fetch = async (url, options) => {
-  if (url !== 'https://board.invalid/v1/mac/status?tools=1' || options.headers.authorization !== 'Bearer fixture') {
-    throw new Error('A probe must only read the fixture Mac status');
+  if (options.headers.authorization !== 'Bearer fixture') throw new Error('Wrong board config');
+  if (url === 'https://board.invalid/v1/mac/calls') {
+    const call = JSON.parse(options.body);
+    if (call.name !== 'run_command' || call.arguments.command !== '/usr/bin/true') throw new Error('Only the harmless probe may run');
+    return Response.json({ call: { status: 'done', result: { content: [{ type: 'text', text: JSON.stringify({ exit_code: 0 }) }] } } });
   }
+  if (url !== 'https://board.invalid/v1/mac/status?tools=1') throw new Error('Unexpected route');
   return Response.json({ macs: [{ name: 'fixture-mac', tools: [
     { name: 'run_command', description: 'Fixture command', inputSchema: { type: 'object' } },
   ] }] });
@@ -64,7 +69,7 @@ globalThis.fetch = async (url, options) => {
 `);
   for (const [repaired, macEnabled] of [[false, true], [true, true], [true, false]]) {
     rmSync(join(dir, 'runtime-catalog.json'), { force: true });
-    const namespace = macEnabled ? 'mac' : 'desktop';
+    const namespace = 'hivefiles';
     let requests = 0, failure, probed = false, codeMode = false;
     const respond = (res, item) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -92,7 +97,7 @@ globalThis.fetch = async (url, options) => {
             ? tool.tools.map(fn => ({ ...fn, namespace: tool.name })) : [tool]);
           const catalog = requestCatalog(body, 'fixture-model-request');
           assert.equal(catalog.ok, true, JSON.stringify(catalog));
-          writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify(catalog));
+          writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify({ ...catalog, probe_required: repaired }));
           const probe = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
             step: 'Checking transfer before continuing the fixture task.' };
           const exec = functions.find(tool => tool.namespace === 'functions' && tool.name === 'exec');
@@ -135,7 +140,7 @@ globalThis.fetch = async (url, options) => {
       stateDir: dir, filesDir: join(dir, 'files'), stepsFile: join(dir, 'steps'), user: 'test', label: 'R42-1',
       tasksConfig: join(dir, 'board.json'), improveFile: repaired ? join(dir, 'repair.json') : '' });
     args.pop();
-    for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) {
+    for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac', 'hivefiles']) {
       args.push('-c', `mcp_servers.${name}.env.NODE_OPTIONS=${JSON.stringify(`--import=${preload}`)}`,
         '-c', `mcp_servers.${name}.env.HIVE_TASKS_CONFIG=${JSON.stringify(join(dir, 'board.json'))}`);
     }

@@ -4,13 +4,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
-import { readTaskCatalog, requestCatalog } from './task-catalog.mjs';
+import { needsTransferProbe, readTaskCatalog, requestCatalog } from './task-catalog.mjs';
+import { againBrief } from './improve.mjs';
 
 const transfer = { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema };
-const tools = [{ type: 'namespace', name: 'mcp__desktop', tools: [transfer] }];
+const tools = [{ type: 'namespace', name: 'mcp__hivefiles', tools: [transfer] }];
 const exec = { type: 'custom', name: 'exec', description: `exec tool declaration:
 \`\`\`ts
-declare const tools: { mcp__desktop__transfer_file(args: {
+declare const tools: { mcp__hivefiles__transfer_file(args: {
   check_only?: boolean;
   direction: "to_vm" | "to_mac";
   mac_path: string;
@@ -19,16 +20,40 @@ declare const tools: { mcp__desktop__transfer_file(args: {
 \`\`\`` };
 const codeTools = [{ type: 'namespace', name: 'functions', tools: [exec] }];
 
+test('only transfer repair continuations need a live probe before acting', () => {
+  assert.equal(needsTransferProbe('Use the VM browser.'), false);
+  assert.equal(needsTransferProbe(againBrief('Continue.', { what: 'Fix browser zoom' }, 'fixture')), false);
+  for (const what of ['Expose a Mac-to-VM transfer tool', 'Restore Mac file tools']) {
+    assert.equal(needsTransferProbe(againBrief('Continue.', { what }, 'fixture')), true);
+  }
+});
+
+test('the desktop fallback verifies a callable transfer schema on the active surface', () => {
+  const desktop = [{ ...tools[0], name: 'mcp__desktop' }];
+  const desktopExec = [{ type: 'namespace', name: 'functions', tools: [
+    { ...exec, description: exec.description.replace('mcp__hivefiles', 'mcp__desktop') },
+  ] }];
+  for (const catalog of [desktop, desktopExec]) {
+    assert.equal(requestCatalog({ tools: catalog }, 'current').ok, true);
+    assert.equal(requestCatalog({ input: [{ type: 'additional_tools', tools: catalog }] }, 'current').ok, true);
+  }
+  assert.equal(requestCatalog({ tools: [...desktop,
+    { type: 'namespace', name: 'functions', tools: [{ ...exec, description: '' }] },
+  ] }, 'current').ok, false, 'a direct fallback cannot prove code-mode exposure');
+  assert.equal(requestCatalog({ tools: [{ type: 'function', name: 'mcp__desktop__transfer_file',
+    parameters: { properties: {} } }] }, 'current').ok, false);
+});
+
 test('code mode requires the transfer in exec itself, including Responses Lite', () => {
   for (const request of [{ tools: codeTools }, { input: [{ type: 'additional_tools', tools: codeTools }] }]) {
     const catalog = requestCatalog(request, 'current');
     assert.equal(catalog.ok, true);
-    assert.deepEqual(catalog.code_tools, ['mcp__desktop.transfer_file']);
+    assert.deepEqual(catalog.code_tools, ['mcp__hivefiles.transfer_file']);
   }
-  for (const description of ['', 'mcp__desktop__transfer_file is available',
+  for (const description of ['', 'mcp__hivefiles__transfer_file is available',
     exec.description.replace('check_only?: boolean;', 'check_only?: string;'),
     exec.description.replace('"to_vm" | ', ''),
-    exec.description.replace('mcp__desktop__transfer_file', 'mcp__mac__transfer_file')]) {
+    exec.description.replace('mcp__hivefiles__transfer_file', 'mcp__mac__transfer_file')]) {
     assert.equal(requestCatalog({ tools: [...tools,
       { type: 'namespace', name: 'functions', tools: [{ ...exec, description }] }],
       input: [{ type: 'message', content: [{ text: exec.description }] }],
@@ -37,7 +62,7 @@ test('code mode requires the transfer in exec itself, including Responses Lite',
 });
 
 test('code-mode evidence requires the callable declaration in exec, not a mention or prompt', () => {
-  const declaration = `declare const tools: { mcp__desktop__transfer_file(args: {
+  const declaration = `declare const tools: { mcp__hivefiles__transfer_file(args: {
   check_only?: boolean;
   direction: "to_vm" | "to_mac";
   mac_path: string;
@@ -47,7 +72,7 @@ test('code-mode evidence requires the callable declaration in exec, not a mentio
     { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description }] },
   ] }] });
   assert.equal(requestCatalog(request(declaration), 'current').ok, true);
-  for (const description of ['tools.mcp__desktop__transfer_file exists',
+  for (const description of ['tools.mcp__hivefiles__transfer_file exists',
     declaration.replace('check_only?: boolean;', 'check_only?: string;'),
     declaration.replace('"to_vm"', '"from_vm"'),
     declaration.replace('check_only?: boolean;', '// check_only?: boolean;')]) {
@@ -58,13 +83,13 @@ test('code-mode evidence requires the callable declaration in exec, not a mentio
 
 test('only a model-visible transfer schema verifies the catalog, including Responses Lite', () => {
   for (const request of [{ tools }, { input: [{ type: 'additional_tools', tools }] },
-    { tools: [{ ...transfer, name: 'mcp__desktop__transfer_file' }] }]) {
+    { tools: [{ ...transfer, name: 'mcp__hivefiles__transfer_file' }] }]) {
     assert.equal(requestCatalog(request, 'current').ok, true);
-    assert.deepEqual(requestCatalog(request, 'current').tools, ['mcp__desktop.transfer_file']);
+    assert.deepEqual(requestCatalog(request, 'current').tools, ['mcp__hivefiles.transfer_file']);
   }
   for (const request of [{}, { input: [{ type: 'message', content: [{ text: 'desktop.transfer_file exists' }] }] },
     { tools: [{ ...transfer, name: 'mcp__mac__transfer_file' }] },
-    { tools: [{ name: 'mcp__desktop__transfer_file', parameters: { properties: {} } }] }]) {
+    { tools: [{ name: 'mcp__hivefiles__transfer_file', parameters: { properties: {} } }] }]) {
     assert.equal(requestCatalog(request, 'current').ok, false);
   }
 });

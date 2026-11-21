@@ -13,7 +13,7 @@ export const TRANSFER_TOOL = {
     + 'Paths must be absolute. The destination folder on the Mac must exist and the file must not exist. '
     + 'Mac-to-VM copies are verified by size and SHA-256. After an upload error, checks the cloud copy before one bounded retry. '
     + 'Use recovery_key from a failed to_vm call to fetch and verify that copy without uploading again. '
-    + 'check_only=true validates this call without reading or copying a file; the Mac server also checks command support. '
+    + 'First use check_only=true with the intended paths: runs a harmless command on the Mac without reading or copying a file. '
     + 'Sources and the cloud copy are kept. Uses the Mac\'s cf login; does not send or publish to anyone else.',
   inputSchema: { type: 'object', properties: {
     direction: { type: 'string', enum: ['to_vm', 'to_mac'] },
@@ -69,11 +69,17 @@ export async function transferFile(args, command, { fetch = (key, expected) => f
     throw new Error('recovery_key must be a transfers/ key from a previous to_vm call');
   }
   if (args.check_only !== undefined && typeof args.check_only !== 'boolean') throw new Error('check_only must be a boolean');
-  // The caller checks that this Mac supports commands. A probe proves dispatch and argument
-  // validation only; it must never be mistaken for a copied or even an existing source file.
-  if (args.check_only === true) return { content: [{ type: 'text', text: JSON.stringify({
-    ready: true, copied: false, direction, mac_path: macPath,
-  }) }] };
+  // A board heartbeat can outlive the Mac connection. Require a fresh command reply;
+  // this proves the live route, but neither file existence nor a completed copy.
+  if (args.check_only === true) {
+    const result = await command({ command: '/usr/bin/true', irreversible: false, step, timeout_seconds: 15 });
+    if (result?.isError) return result;
+    const out = commandOutput(result);
+    if (out?.exit_code !== 0 || out.timed_out === true) throw new Error('The Mac did not answer the transfer probe successfully; no file was copied.');
+    return { content: [{ type: 'text', text: JSON.stringify({
+      ready: true, copied: false, direction, mac_path: macPath,
+    }) }] };
+  }
   const key = args.recovery_key ?? checkKey(`transfers/${uuid()}/${posix.basename(direction === 'to_vm' ? macPath : vmPath)}`);
   const run = script => command({ command: `set -e\numask 077\n${CF}${script}`, irreversible: false, step, timeout_seconds: 240 });
   let script;

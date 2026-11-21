@@ -50,7 +50,7 @@ function client(t, args, env, namespace = 'mac') {
   };
 }
 
-for (const namespace of ['mac', 'desktop']) test(`${namespace}: a task and its restart register and call Mac file tools through the configured stdio process`, { timeout: 15000 }, async t => {
+for (const namespace of ['mac', 'desktop', 'hivefiles']) test(`${namespace}: a task and its restart register and call Mac file tools through the configured stdio process`, { timeout: 15000 }, async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hive-mac-startup-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const files = join(dir, 'files');
@@ -94,14 +94,14 @@ globalThis.fetch = async (url, options) => {
     const mcp = client(t, args, env, namespace);
     const init = await mcp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {},
       clientInfo: { name: 'startup-test', version: '1' } });
-    assert.equal(init.result?.serverInfo.name, namespace === 'mac' ? 'mac' : 'hive-vm-desktop', JSON.stringify(init));
+    assert.equal(init.result?.serverInfo.name, namespace === 'desktop' ? 'hive-vm-desktop' : namespace, JSON.stringify(init));
     const catalog = await mcp.request('tools/list');
     if (namespace === 'mac') assert.deepEqual(catalog.result.tools.map(tool => tool.name), ['run_command', 'transfer_file']);
     const transfer = catalog.result.tools.find(tool => tool.name === 'transfer_file');
     assert.equal(transfer?.inputSchema.properties.recovery_key.type, 'string');
     let answered = false;
     const pending = mcp.request('tools/call', { name: transfer.name, arguments: {
-      direction: 'to_vm', mac_path: '/Users/test/Desktop/clip.mov', step: 'Checking the offline Mac.',
+      direction: 'to_vm', mac_path: '/Users/test/Desktop/clip.mov', step: 'Checking the offline Mac.', check_only: true,
     } }).then(result => { answered = true; return result; });
     await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(answered, false, 'the actual server must not act before the model catalog is verified');
@@ -116,6 +116,10 @@ globalThis.fetch = async (url, options) => {
       } });
       assert.equal(command.result.isError, undefined);
     }
+    const probe = await mcp.request('tools/call', { name: transfer.name, arguments: {
+      direction: 'to_vm', mac_path: '/Users/test/Desktop/clip.mov', check_only: true, step: 'Checking the live route.',
+    } });
+    assert.equal(JSON.parse(probe.result.content[0].text).ready, true);
     const copy = await mcp.request('tools/call', { name: transfer.name, arguments: {
       direction: 'to_vm', mac_path: '/Users/test/Desktop/clip.mov', step: 'Copying the fixture recording.',
     } });
@@ -127,7 +131,7 @@ globalThis.fetch = async (url, options) => {
     await mcp.close();
   }
   const sent = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(sent.length, namespace === 'mac' ? 6 : 4, 'each transfer sends only metadata and upload commands');
+  assert.equal(sent.length, namespace === 'mac' ? 8 : 6, 'each transfer sends a probe, metadata and upload commands');
   assert.ok(sent.every(call => call.name === 'run_command' && call.request === 42));
   assert.deepEqual(readFileSync(source), bytes, 'the source stays intact');
 });

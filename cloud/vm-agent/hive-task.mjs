@@ -3,12 +3,13 @@
 //
 // Codex here is the VM's existing install (the one Devhub runs, in root's home), with a Codex home of
 // its own signed in to the owner's ChatGPT account (HIVE_CODEX_HOME, default /root/.codex-hive). It
-// runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets five
+// runs with no config file (--ignore-user-config), keeps no session files (--ephemeral), and gets six
 // tool servers, run as this user: desktop-mcp.mjs, the VM's screen, mouse and keyboard, saved logins
 // and the files sent to Hive; phone-mcp.mjs, the owner's iPhone through its relay in the cloud (Duo, Siri
 // tasks); browser-mcp.mjs, the owner's own Safari or Chrome through the board in the cloud;
-// knowledge-mcp.mjs, the owner's knowledge base, the one every node shares, through the board too; and
-// mac-mcp.mjs, the owner's own Mac, its tools run by Hive there, through the board as well.
+// knowledge-mcp.mjs, the owner's knowledge base, the one every node shares, through the board too;
+// mac-mcp.mjs, the owner's own Mac, its tools run by Hive there, through the board as well; and
+// transfer-mcp.mjs, a stable file-transfer catalog independent of the two desktop catalogs.
 // Shell commands it might run are read-only. Each step it says goes to stdout and to the task's folder.
 //
 // With --code DIR it works on code instead (Hive's nightly dream): no screen, no phone, no tool
@@ -27,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
 import { Lease } from './devices.mjs';
 import { boardClient, boardConfig, runSender } from './orchestrator.mjs';
-import { transferProbeRequired, transferProbeSucceeded } from './task-catalog.mjs';
+import { needsTransferProbe, transferProbed, transferProbeRequired, transferProbeSucceeded } from './task-catalog.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAFE = /^[\w@%+=:,./~-]+$/;
@@ -91,17 +92,18 @@ a request said on the Mac about "this" or "here"); otherwise use the VM. For scr
 For files and shell work use mac.run_command directly on the Mac, without opening Terminal or Finder. It returns the
 exit code and bounded stdout/stderr; check them. Give irreversible=true for any command that deletes, sends, publishes
 or otherwise cannot be undone, and use the same One-way: step quoting the owner's exact words. A timeout can leave
-partial effects: inspect before retrying, especially a send. Use mac.transfer_file with direction=to_vm and mac_path
+partial effects: inspect before retrying, especially a send. Use hivefiles.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
 Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
-Search ALL_TOOLS for transfer_file. In functions.exec, find mcp__mac__transfer_file or
+Search ALL_TOOLS for transfer_file. Prefer mcp__hivefiles__transfer_file, Hive's dedicated transfer tool.
+In functions.exec, find mcp__hivefiles__transfer_file, mcp__mac__transfer_file or
 mcp__desktop__transfer_file in ALL_TOOLS and check that the matching tools property is a function.
 Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
-If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
-When functions.exec is unavailable, use the directly exposed mac or desktop tool namespace.
+mac.transfer_file and desktop.transfer_file also provide the file transfer route.
+When functions.exec is unavailable, use the directly exposed hivefiles or desktop tool namespace.
 After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
 with check_only=true and the intended direction and paths. Require ready=true in its result, then call again without
-check_only to copy. This checks the current tool route and Mac command support, not file existence or a completed copy.
+check_only to copy. This checks the current tool route with a harmless command on the Mac, not file existence or a completed copy.
 If discovery fails, report that exact failure to improve_hive and stop. If the probe says the Mac is offline, report
 that reason instead of asking Hive to repair code. Earlier tests or replies are not proof that this execution has the tool. Never post until the real copy returns a verified VM path.
 Transfers keep the source and a cloud copy, return the destination path, and never overwrite a Mac file. Use a new
@@ -181,6 +183,8 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
   // using another config silently loses its Mac tools when the default config isn't readable.
   const mac = ['-n', '-u', user, 'env', `HIVE_VM_STATE=${stateDir}`, `HIVE_FILES_DIR=${filesDir}`,
     `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), ...launch('mac-mcp.mjs')];
+  const transfers = [...mac.slice(0, -4), `HIVE_TASK_CATALOG=${join(workDir, 'runtime-catalog.json')}`,
+    ...launch('transfer-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
     // Owner tasks discover and call tools through functions.exec. Direct-only exposure
@@ -188,7 +192,10 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     // Keep transfers in code mode and out of deferred search, including after a repair.
     // Strict third-party deferral would ignore these servers' exposure settings.
     '-c', 'features.code_mode_only_strict_3p_tools=false',
-    ...['desktop', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["deferred"]`]),
+    ...['desktop', 'mac', 'hivefiles'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["deferred"]`]),
+    '-c', 'mcp_servers.hivefiles.command="sudo"', '-c', `mcp_servers.hivefiles.args=${toml(transfers)}`,
+    '-c', 'mcp_servers.hivefiles.required=true', '-c', 'mcp_servers.hivefiles.startup_readiness="catalog"',
+    '-c', 'mcp_servers.hivefiles.startup_timeout_sec=30', '-c', 'mcp_servers.hivefiles.tool_timeout_sec=3700',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     // The desktop catalog includes the Mac file fallback. Load it before the first turn,
     // and fail startup instead of letting a task run with missing file tools.
@@ -213,7 +220,7 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     '-c', 'mcp_servers.mac.startup_timeout_sec=30', '-c', 'mcp_servers.mac.tool_timeout_sec=3700',
     // Codex asks before running an MCP tool, and with no one to ask (exec) that ask is a refusal, so
     // Hive's own servers are approved up front, as the Mac's Hive does (hive-codex agent.rs).
-    ...['desktop', 'phone', 'browser', 'knowledge', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.default_tools_approval_mode="approve"`]), '-'];
+    ...['desktop', 'phone', 'browser', 'knowledge', 'mac', 'hivefiles'].flatMap(name => ['-c', `mcp_servers.${name}.default_tools_approval_mode="approve"`]), '-'];
 }
 
 /** One line for a person, from one of Codex's JSON events; null for the rest. */
@@ -308,7 +315,7 @@ async function main(argv) {
   // Hive's own Codex home on the VM, signed in to the owner's account (Devhub's, /root/.codex, is another).
   const codexHome = process.env.HIVE_CODEX_HOME ?? '/root/.codex-hive';
   if (!SAFE.test(codexHome)) throw new Error('unsupported HIVE_CODEX_HOME');
-  const probeRequired = !options.code && transferProbeRequired(text);
+  const probeRequired = !options.code && (transferProbeRequired(text) || needsTransferProbe(text));
   const args = options.code
     ? codeArgs({ ...options, codeDir: options.code })
     : codexArgs({ ...options, keepOpen: options.keepOpen || probeRequired,
@@ -318,14 +325,14 @@ async function main(argv) {
   // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
   const traceDir = join(workDir, 'runtime-trace');
   const catalogFile = join(workDir, 'runtime-catalog.json');
-  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
+  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'task-mcp.mjs', 'task-catalog.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs', 'transfer-mcp.mjs']
     .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
   if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
   const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,
     ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), '/root/.local/bin/codex', ...args],
     { stdio: ['pipe', 'pipe', 'pipe'] });
   let threadId = '', catalog = null, auditing = null;
-  let probed = false, announced = false;
+  let announced = false;
   const audit = () => {
     if (options.code || catalog?.ok === false || !threadId) return;
     if (auditing) return auditing;
@@ -343,7 +350,7 @@ async function main(argv) {
         try { if (code === 0) verdict = JSON.parse(readFileSync(output, 'utf8')); } catch {}
         rmSync(output, { force: true });
         // An unfinished or unreadable request cannot reuse an earlier success.
-        catalog = verdict?.thread_id === threadId ? verdict : null;
+        catalog = verdict?.thread_id === threadId ? { ...verdict, probe_required: probeRequired } : null;
         if (catalog) {
           writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
           if (!announced || !catalog.ok) {
@@ -374,7 +381,11 @@ async function main(argv) {
     appendFileSync(events, `${line}\n`);
     let event; try { event = JSON.parse(line); } catch { return; }
     if (event.type === 'thread.started') threadId = event.thread_id;
-    if (transferProbeSucceeded(event)) probed = true;
+    // Direct MCP calls provide the same live evidence as the dedicated server's
+    // receipt. Share it with the call gate so a fallback probe can unblock work.
+    if (!options.code && threadId && transferProbeSucceeded(event)) {
+      writeFileSync(`${catalogFile}.probe`, JSON.stringify({ thread_id: threadId, ready: true }), { mode: 0o600 });
+    }
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') last = event.item.text;
     const line2 = describe(event); if (line2) say(line2);
   });
@@ -387,8 +398,10 @@ async function main(argv) {
   await auditing;
   await audit();
   if (!options.code) {
+    // Receipts come from successful direct MCP events or the dedicated server.
+    const probed = transferProbed(catalogFile, threadId);
     if (catalog?.ok && probeRequired && !probed) catalog = { ...catalog, ok: false,
-      why: 'The resumed Mac transfer task did not complete a successful to_vm check_only call in this execution.' };
+      why: 'The repaired task did not complete a live transfer_file probe in its own execution; the task cannot continue.' };
     writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources,
       probe_required: probeRequired, probed, ok: Boolean(catalog?.ok) })}\n`, { mode: 0o600 });
     if (!catalog?.ok) {
@@ -400,6 +413,8 @@ async function main(argv) {
       appendFileSync(events, `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: why } })}\n`);
       say(`❌ ${why}`);
       status = 1;
+    } else if (probeRequired) {
+      say(`Live transfer probe verified for thread ${threadId}.`);
     }
     // The raw trace includes prompts and tool results. Keep the compact verdict, not a second
     // copy of the task history. Codex wrote these directories as root, so remove them as root.
