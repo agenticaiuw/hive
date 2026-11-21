@@ -19,12 +19,15 @@ const options = dir => ({ model: 'fixture', effort: 'low', workDir: dir, appDir:
 test('new and repaired tasks require both transfer catalogs and a probe in the current execution', () => {
   for (const improveFile of ['', '/tmp/repair.json']) {
     const args = codexArgs({ ...options('/tmp/task'), improveFile });
+    assert.ok(args.includes('features.code_mode_only_strict_3p_tools=false'));
     for (const name of ['mac', 'desktop']) {
       assert.ok(args.includes(`mcp_servers.${name}.required=true`));
       assert.ok(args.includes(`mcp_servers.${name}.startup_readiness="catalog"`));
+      assert.ok(args.includes(`mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`));
     }
   }
   assert.match(GUIDE, /missing name in ALL_TOOLS alone does not prove the tool is absent/);
+  assert.match(GUIDE, /directly exposed mac and desktop tool namespaces/);
   assert.match(GUIDE, /search deferred tools with tool_search/);
   assert.match(GUIDE, /check_only=true[\s\S]*Require ready=true/);
 });
@@ -204,8 +207,17 @@ for (const direct of [false, true]) test(`owner exec with code mode: ${direct ? 
   }] }));
   const args = codexArgs({ ...options(dir), improveFile: join(dir, 'repair.json') });
   if (!direct) {
-    const at = args.indexOf('features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]');
-    args.splice(at - 1, 2);
+    // Registration alone must exclude every exposure override, including the server
+    // settings that keep transfers out of code mode and deferred discovery.
+    for (const setting of [
+      'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]',
+      'features.code_mode_only_strict_3p_tools=false',
+      ...['desktop', 'mac'].map(name => `mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`),
+    ]) {
+      const at = args.indexOf(setting);
+      assert.ok(at > 0 && args[at - 1] === '-c', `Missing exposure setting: ${setting}`);
+      args.splice(at - 1, 2);
+    }
   }
   const config = [`model_catalog_json=${JSON.stringify(models)}`, 'model_provider="fixture"',
     'model_providers.fixture.name="Offline fixture"', 'model_providers.fixture.base_url="http://127.0.0.1:1"',
