@@ -53,7 +53,7 @@ export const MODELS = {
 };
 export const PLANNER = { model: 'gpt-6.1-terra', effort: 'low' };
 const RATINGS = Object.keys(MODELS);
-const KINDS = ['screen', 'mac', 'answer', 'code'];
+const KINDS = ['screen', 'mac', 'answer', 'code', 'page'];
 const MOST_TASKS = 8;
 /** Repositories Hive's cloud agent changes code in: project → origin (the dream's deploy key pushes to it). */
 export const REPOS = { hive: 'git@github.com:agenticaiuw/hive.git' };
@@ -75,11 +75,15 @@ export const PLAN_GUIDE = `You are Hive's orchestrator. The owner sent the instr
  "tasks": [{"title": "<one line, an imperative>", "quote": "<the owner's exact words for this task>",
             "brief": "<what the agent doing it must do and how to tell it is done, in a few sentences>",
             "folder": "<the part of the project it belongs to, or empty>",
-            "kind": "screen|mac|answer|code", "difficulty": "easy|normal|hard|hardest",
+            "kind": "screen|mac|answer|code|page", "difficulty": "easy|normal|hard|hardest",
             "minutes": <estimate>, "value": "low|medium|high", "needs": [<task numbers>]}]}
 kind: screen = done in a web browser (signing in, reading or filling pages, sending as the owner); mac = done on the
 owner's own Mac (its apps, its files, what's on its screen); answer = only needs an answer or a lookup; code = changes
-code in a repository. An instruction said on the owner's Mac about "this", "here" or their screen is about the Mac.
+code in a repository; page = change how the web page the owner sent this from looks every time it loads (hide or
+restyle parts, keep only some items, dark mode, send it on to another page, add links), only for an instruction sent from
+the browser extension, which says the page. Anything else asked from the extension (reading, checking, finding, writing,
+sending) is screen, done in that browser. An instruction said on the owner's Mac about "this", "here" or their screen is
+about the Mac.
 difficulty: easy = one quick lookup or step; normal = a few steps; hard = many steps or real judgment;
 hardest = long, open-ended or high-stakes work. Rate honestly: the rating picks the agent's model.
 needs: the numbers (1 for the first task in your list) of earlier tasks this one can't start before, because it uses
@@ -123,7 +127,7 @@ export function fromBrowser(request) {
     `${page.title ? ` ("${page.title}")` : ''}, where they are signed in. "This", "here", "my emails" and the like mean what's in ` +
     "that browser: do it there with the browser tools, which act in that very browser through the cloud (read its pages, " +
     "open and read tabs in it), not in the VM's own browser. Read what you need yourself, page by page; never ask the owner " +
-    'to copy it to you.', request.pageNote,
+    'to copy it to you.',
     "If Hive can't do something this needs, change Hive so it can (improve_hive) instead of stopping."].filter(Boolean).join(' ');
 }
 
@@ -346,23 +350,26 @@ export function pagePrompt(request, page, current = []) {
     `The changes already on for this site:\n${on}\n\nThe page's outline (tag#id.classes "text"):\n${page.outline || '(none)'}\n`;
 }
 
-/** A request asked on a web page: a model call writes the page's rule (one retry), and the board keeps it. */
-export async function handlePage(request, { board, ask, log = () => {} }) {
+/**
+ * A page task (the planner's kind "page", for a request from the browser extension): a model call writes the
+ * page's rule (one retry), and the board keeps it. {ok, report} when it's on, or {agent: why} when the writer
+ * can't do it as a rule: then Hive's agent does the task instead, in that browser, changing Hive if it must.
+ */
+export async function writePage(request, task, { board, ask, log = () => {} }) {
   const page = request.page;
   const url = new URL(page.url);
   const site = url.hostname.replace(/^www\./, '');
-  log(`R${request.id} on ${site}${url.pathname}: ${request.text}`);
-  await board('/v1/requests/update', { id: request.id, status: 'working', project: 'web' });
+  log(`R${request.id} on ${site}${url.pathname}: ${task.quote || request.text}`);
   // What's already on for the site, so "make it work in full screen as well" adds to the rule it means.
   const { rules: current = [] } = await board(`/v1/page-rules?host=${encodeURIComponent(site)}`).catch(() => ({}));
-  const prompt = pagePrompt(request, page, current);
+  const prompt = pagePrompt({ text: task.quote || request.text }, page, current);
   let made;
   try {
     let answer = await ask(prompt, MODELS.normal);
     try {
       made = parsePageRule(answer);
     } catch (error) {
-      // Once more, told what was wrong with the answer, before the owner hears it didn't work.
+      // Once more, told what was wrong with the answer, before handing it on.
       answer = await ask(`${prompt}\nYour last answer was refused (${error.message}):\n${String(answer).slice(0, 2000)}\n` +
         'Answer again: a rule that changes the page, or {"cannot": "<the exact reason>"}.\n', MODELS.normal);
       made = parsePageRule(answer);
@@ -375,15 +382,15 @@ export async function handlePage(request, { board, ask, log = () => {} }) {
   if (made.cannot) return { agent: `Hive's page-change writer couldn't do this as a page rule: ${made.cannot}` };
   if (made.off) {
     const { off } = await board('/v1/page-rules/off', { host: site });
-    await board('/v1/requests/update', { id: request.id, status: 'done', outcome: `${site} is back to normal (${off} change${off === 1 ? '' : 's'} off).` });
-    return;
+    return { ok: true, report: `${site} is back to normal (${off} change${off === 1 ? '' : 's'} off).`, seconds: 0 };
   }
   const saved = [];
   for (const r of made.rules) {
     const { id } = await board('/v1/page-rules', { host: site, path: r.path, title: r.title, rule: r.rule, request: request.id });
     saved.push(`${r.title}: on ${site}${r.path || ' (every page)'} from now on (page rule ${id}).`);
   }
-  await board('/v1/requests/update', { id: request.id, status: 'done', outcome: saved.join(' ') });
+  // One change is one line; several are listed under one, so the request's outcome keeps them all (outcomeOf).
+  return { ok: true, report: saved.length === 1 ? saved[0] : [`Page changes on ${site}:`, ...saved].join('\n'), seconds: 0 };
 }
 
 /**
@@ -538,15 +545,10 @@ export async function tellRunning(request, earlier, { board, stateDir, log = () 
   return heard;
 }
 
+// Every request, from any node or portal (the browser extension's too), goes to the orchestrator's plan
+// first, and the plan gives each task to an agent (the owner, 2026-11-21: "every request from any node
+// and any portal goes to the main orchestrator first"). A page look is one kind of task (writePage).
 export async function handle(request, deps) {
-  if (request.page?.url && deps.ask) {
-    // Only a change to how the page looks stays a page rule; everything else asked on a page (the owner,
-    // 2026-11-21: "the extension agent cannot read emails when my gmail is open right here") goes to
-    // Hive's agent like any other request, told which page of which browser it came from.
-    const looked = await handlePage(request, deps);
-    if (!looked || !('agent' in looked)) return looked;
-    request = { ...request, pageNote: looked.agent };
-  }
   const stopping = watchStop(request, deps);
   try {
     return await handleWork(request, deps, stopping.signal);
@@ -712,8 +714,17 @@ async function handleWork(request, deps, signal) {
     deps.labels?.set(label, { title: task.title, step: steps.step });
     try {
       // What was said to the request after it was planned, before this task started (meanwhile.mjs).
-      const brief = [taskBrief(task, request, folder, rules), told(deps.hear?.(label))].filter(Boolean).join('\n\n');
-      result = selfChange
+      let brief = [taskBrief(task, request, folder, rules), told(deps.hear?.(label))].filter(Boolean).join('\n\n');
+      if (task.kind === 'page' && request.page?.url && deps.ask) {
+        steps.step('🎨 Writing the change to this page');
+        result = await writePage(request, task, deps);
+        if ('agent' in result) {
+          if (result.agent) steps.step(result.agent);
+          brief = [brief, result.agent, "Do it another way in the owner's browser, or change Hive so it can (improve_hive)."].filter(Boolean).join('\n\n');
+          result = null;
+        }
+      }
+      result ??= selfChange
         ? await changeHive(brief, { task, request, label, signal, step: steps.step }, deps)
         : coding
         ? await code(brief, task.choice, { project, branch: branchOf(request.id, task), title: task.title, request: request.id, key: task.key, label, signal }, steps.step)
