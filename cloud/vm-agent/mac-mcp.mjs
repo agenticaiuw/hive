@@ -64,7 +64,9 @@ export async function callMac(board, mac, name, args, { request = null, sleep = 
 export function server({ board, label = '', turn = null, files = undefined }) {
   let mac;
   const find = async () => {
-    if (mac === undefined) mac = board ? await connectedMac(board).catch(() => null) : null;
+    // A Mac may reconnect after this task starts. Keep a successful discovery, but let
+    // later calls try again after an offline result or a temporary board failure.
+    if (!mac) mac = board ? await connectedMac(board).catch(() => null) : null;
     return mac;
   };
   return async message => {
@@ -80,11 +82,15 @@ export function server({ board, label = '', turn = null, files = undefined }) {
             : OFFLINE });
       }
       case 'tools/list': {
-        const tools = (await find())?.tools ?? [];
+        const found = await find();
+        const tools = found?.tools ?? [];
         // The orchestrator uses this module's Mac calls, but never serves task tools. Load
         // transfers only in the task process so their updates need no orchestrator restart.
         const { TRANSFER_TOOL } = await import('./mac-files.mjs');
-        return reply({ tools: tools.some(t => t.name === 'run_command') ? [...tools, TRANSFER_TOOL] : tools });
+        // Codex learns tools at startup. Keep the VM's transfer tool discoverable while
+        // the Mac is offline, so this same task can copy a file once it reconnects.
+        const transfer = board && (!found || tools.some(t => t.name === 'run_command'));
+        return reply({ tools: transfer ? [...tools, TRANSFER_TOOL] : tools });
       }
       case 'ping': return reply({});
       case 'tools/call': {

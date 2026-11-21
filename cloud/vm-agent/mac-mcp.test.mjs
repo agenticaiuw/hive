@@ -59,10 +59,10 @@ test("a task can call only the tools the Mac listed, never Hive's own change job
   assert.ok(!calls.some(c => c.path === '/v1/mac/calls'), 'never sent to the Mac');
 });
 
-test("with no Mac connected there are no tools and a call says why; a failed call says what failed", async () => {
+test("with no Mac connected transfer stays discoverable and a call says why; a failed call says what failed", async () => {
   const none = server({ board: fakeBoard({ macs: [] }).board, label: 'R1-1' });
   assert.equal((await none({ id: 1, method: 'initialize', params: {} })).result.instructions, OFFLINE);
-  assert.deepEqual((await none({ id: 2, method: 'tools/list' })).result.tools, []);
+  assert.deepEqual((await none({ id: 2, method: 'tools/list' })).result.tools.map(t => t.name), ['transfer_file']);
   const refused = await none({ id: 3, method: 'tools/call', params: { name: 'click', arguments: {} } });
   assert.equal(refused.result.isError, true);
   assert.match(refused.result.content[0].text, /Hive isn't running there/);
@@ -73,6 +73,47 @@ test("with no Mac connected there are no tools and a call says why; a failed cal
   assert.match(out.content[0].text, /The Mac took it but never answered/);
   assert.match(out.content[0].text, /call 5.*may still run or may already have run/);
   assert.match(out.content[0].text, /before retrying/);
+});
+
+test('a transfer listed while offline works in the same task after the Mac reconnects', async () => {
+  for (const unavailable of ['offline', 'board error']) {
+    let connected = false;
+    const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }], answer: { result: sourceInfo } });
+    const turns = [];
+    const answer = server({ board: async (path, body) => {
+      if (path === '/v1/mac/status?tools=1' && !connected) {
+        if (unavailable === 'board error') throw new Error('Board temporarily unavailable');
+        return { macs: [] };
+      }
+      return board(path, body);
+    }, label: 'R42-1', turn: { use: async fn => { turns.push('take'); return fn(); } },
+    files: { uuid: () => 'copy-id', fetch: async key => `/files/${key}` } });
+    await answer({ id: 1, method: 'initialize', params: {} });
+    const listed = (await answer({ id: 2, method: 'tools/list' })).result.tools;
+    assert.deepEqual(listed.map(t => t.name), ['transfer_file']);
+    assert.equal(listed[0].inputSchema.properties.direction.enum[0], 'to_vm');
+    const request = { id: 3, method: 'tools/call', params: { name: 'transfer_file', arguments: {
+      direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Copying the clip.',
+    } } };
+    assert.equal((await answer(request)).result.isError, true);
+    assert.deepEqual(turns, [], 'an offline transfer never takes the Mac lease');
+    assert.deepEqual(calls, [], 'an offline transfer never submits a command');
+    connected = true;
+    const copied = await answer({ ...request, id: 4 });
+    assert.equal(copied.result.isError, undefined);
+    assert.equal(JSON.parse(copied.result.content[0].text).vm_path, '/files/transfers/copy-id/clip.mov');
+    assert.deepEqual(turns, ['take']);
+    assert.equal(calls.filter(c => c.path === '/v1/mac/calls').length, 2);
+    assert.ok(calls.filter(c => c.path === '/v1/mac/calls').every(c => c.body.name === 'run_command' && c.body.request === 42));
+  }
+});
+
+test('without board credentials no transfer is advertised or attempted', async () => {
+  const answer = server({ board: null, turn: { use: () => assert.fail('must not take the Mac') } });
+  assert.deepEqual((await answer({ id: 1, method: 'tools/list' })).result.tools, []);
+  const out = await answer({ id: 2, method: 'tools/call', params: { name: 'transfer_file', arguments: {} } });
+  assert.equal(out.result.isError, true);
+  assert.match(out.result.content[0].text, /doesn't have the board's key/);
 });
 
 test('a lost command reply keeps its call id when known and never submits the command again', async () => {
