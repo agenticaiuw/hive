@@ -25,9 +25,11 @@ pub struct Codex {
 
 impl Codex {
     pub fn spawn(cmd: &str, env: &[(String, String)], events: mpsc::Sender<Event>) -> Result<Arc<Codex>, String> {
-        let mut child = Command::new(cmd).arg("app-server").envs(env.iter().cloned())
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
-            .spawn().map_err(|e| format!("couldn't start Codex ({cmd}): {e}"))?;
+        let mut c = Command::new(cmd);
+        c.arg("app-server").envs(env.iter().cloned()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        #[cfg(windows)] // no console window
+        { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); }
+        let mut child = c.spawn().map_err(|e| format!("couldn't start Codex ({cmd}): {e}"))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let codex = Arc::new(Codex {

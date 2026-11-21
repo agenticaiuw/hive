@@ -27,14 +27,13 @@ fn load() -> Result<Vec<Value>, String> {
 }
 
 fn save(logins: &[Value]) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(DIR).and_then(|_| std::fs::set_permissions(DIR, std::fs::Permissions::from_mode(0o700))).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(DIR).and_then(|_| private(DIR, 0o700)).map_err(|e| e.to_string())?;
     let part = format!("{}.part", store());
     let mut c = Command::new("systemd-creds").args(["encrypt", &format!("--name={NAME}"), "-", &part]).stdin(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     c.stdin.take().unwrap().write_all(serde_json::to_string(logins).unwrap().as_bytes()).map_err(|e| e.to_string())?;
     if !c.wait().map(|st| st.success()).unwrap_or(false) { return Err("systemd-creds couldn't encrypt the logins".into()); }
     std::fs::rename(&part, store()).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(store(), std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+    private(&store(), 0o600).map_err(|e| e.to_string())
 }
 
 /// The one login to use for a site: the same host first, then a parent or child domain (wisc.edu ↔ login.wisc.edu).
@@ -99,3 +98,8 @@ mod tests {
         assert_eq!(super::host(" user@x.com/a "), "x.com");
     }
 }
+
+#[cfg(unix)]
+fn private(path: &str, mode: u32) -> std::io::Result<()> { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) }
+#[cfg(not(unix))]
+fn private(_: &str, _: u32) -> std::io::Result<()> { Ok(()) }

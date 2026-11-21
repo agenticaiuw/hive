@@ -1,10 +1,11 @@
 //! `hive`: the Hive app for Mac and Windows (desktop/src/app.rs), and Claude Code's way into Hive.
-//!   hive                        open the app: this computer works with Hive while it runs
+//!   hive                        open the app: this computer works with Hive while it runs, or is the owner's Hive (home.rs)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
 mod common;
+mod home;
 mod hook;
 #[cfg(target_os = "macos")]
 #[path = "mac.rs"]
@@ -26,6 +27,15 @@ fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
     hive_protocol::pair("node", server, code, os::KIND, &os::host(), &repo())
 }
 
+fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }
+
+/// What the setup page asked for: this computer as the owner's Hive, or joining the Hive a pairing link is from.
+fn act(what: &str, say: &dyn Fn(&str)) -> Result<String, String> {
+    let (url, c) = if what == "home" { home::start(say)? } else { let c = connect(what)?; (dashboard(&c), c) };
+    std::thread::spawn(move || serve(c));
+    Ok(url)
+}
+
 fn serve(c: hive_protocol::Conf) {
     hive_protocol::run(c, hive_protocol::Node { kind: os::KIND, name: os::host(), package: "hive", tools: common::tools(),
         notes: format!("The owner's {}: {}_* tools. One agent at a time drives its keyboard and mouse; the shell ({}) and files work alongside.",
@@ -40,7 +50,11 @@ fn main() {
         Some("hook") => hook::run(),
         Some("end") => hook::end(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("--version") => println!("{}", hive_protocol::VERSION),
-        None => app::run(hive_protocol::load("node"), connect, serve),
+        None => app::run(match hive_protocol::load("node") {
+            _ if home::is_on() => app::Start::Home,
+            Some(c) => { let url = dashboard(&c); std::thread::spawn(move || serve(c)); app::Start::Dashboard(url) }
+            None => app::Start::Setup,
+        }, act),
         _ => fail("usage: hive | hive hook | hive end <task> …".into()),
     }
 }

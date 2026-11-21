@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hive</title>
-<link rel="manifest" href="/manifest.json"><link rel="apple-touch-icon" href="/icon.png"><meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon.png"><meta name="apple-mobile-web-app-capable" content="yes">
 <style>
 :root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #b45309; --ok: #15803d; --warn: #b91c1c; }
 @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f5f5f4; --muted: #a8a29e; --line: #2c2926; --card: #1f1c1a; --accent: #f59e0b; --ok: #4ade80; --warn: #f87171; } }
@@ -73,24 +73,24 @@ async function api(path, opts = {}) {
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
 }
 async function login() {
-  const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ secret: $('#secret').value }) });
+  const r = await fetch('api/login', { method: 'POST', body: JSON.stringify({ secret: $('#secret').value }) });
   if (r.ok) { $('#login').hidden = true; start(); } else $('#loginerr').textContent = (await r.json()).error;
 }
 async function forget(id, name) {
   if (!confirm(`Forget ${name}? It stops working with Hive until it's paired again.`)) return;
-  await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  await api(`api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
   await refresh();
 }
 // One link pairs anything: opened on a phone or computer it signs in here; pasted into the Hive app or extension it connects that.
 async function pairCode() {
-  const link = `${location.origin}/#pair=${(await api('/api/pair/code', { method: 'POST' })).code}`;
+  const link = `${location.origin}${location.pathname.replace(/\/$/, '')}/#pair=${(await api('api/pair/code', { method: 'POST' })).code}`;
   navigator.clipboard?.writeText(link).catch(() => {});
   $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · open it on the device, or paste it into the Hive app or extension (10 min)`;
 }
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
   $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
-  const r = await api('/api/requests?wait=1', { method: 'POST', body: { text, node: 'dashboard' } });
+  const r = await api('api/requests?wait=1', { method: 'POST', body: { text, node: 'dashboard' } });
   $('#reply').textContent = r.reply || r.status; refresh();
 }
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -116,13 +116,13 @@ function chatPane() {
 }
 async function loadChat() {
   if (!chat || !$('#chatlog')) return;
-  const r = await api(`/api/tasks/${chat}?after=${chatAfter}`);
+  const r = await api(`api/tasks/${chat}?after=${chatAfter}`);
   const box = $('#chatlog'), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   for (const l of r.log) { box.insertAdjacentHTML('beforeend', `<div><span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`); chatAfter = l.id; }
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
-async function msgTask(id) { const text = $('#msg').value.trim(); if (!text) return; $('#msg').value = ''; await api(`/api/tasks/${id}/message`, { method: 'POST', body: { text } }); loadChat(); }
-async function dropTask(id) { await api(`/api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
+async function msgTask(id) { const text = $('#msg').value.trim(); if (!text) return; $('#msg').value = ''; await api(`api/tasks/${id}/message`, { method: 'POST', body: { text } }); loadChat(); }
+async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
 $('#view').addEventListener('keydown', e => { if (e.target.id === 'msg' && e.key === 'Enter') msgTask(chat); });
 
 function table(rows) {
@@ -140,44 +140,44 @@ async function render() {
     v.innerHTML = `<div class="split"><div>${Object.entries(groups).map(([g, ts]) => `<p class="muted">${esc(g)}</p>${ts.map(t => taskCard(t)).join('')}`).join('') || '<p class="muted">No agents are working.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
     loadChat();
   } else if (tab === 'Past') {
-    const done = await api('/api/tasks?status=done'), dropped = await api('/api/tasks?status=dropped');
+    const done = await api('api/tasks?status=done'), dropped = await api('api/tasks?status=dropped');
     v.innerHTML = `<div class="split"><div>${[...done, ...dropped].map(t => taskCard(t)).join('') || '<p class="muted">None yet.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
     loadChat();
   } else if (tab === 'Rules') {
-    const rules = await api('/api/rules');
+    const rules = await api('api/rules');
     v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
       ${rules.map(r => `<div class="card row"><b>R${r.id}</b>${r.scope ? `<span class="badge">${esc(r.scope)}</span>` : ''}<span style="flex:1">${esc(r.text)}${r.code ? ' <span class="muted">(page change)</span>' : ''}${r.quote ? `<br><span class="muted">"${esc(r.quote)}"</span>` : ''}</span><button class="plain" onclick="delRule(${r.id})">Remove</button></div>`).join('')}`;
   } else if (tab === 'Info') {
-    const info = await api('/api/info');
+    const info = await api('api/info');
     v.innerHTML = `<div class="card row"><input id="ikey" placeholder="Key" style="flex:1"><input id="ival" placeholder="Value" style="flex:3"><button onclick="addInfo()">Save</button></div>${table(info)}`;
   } else if (tab === 'Files') {
-    const files = await api('/api/files');
+    const files = await api('api/files');
     v.innerHTML = `<div class="card row"><input type="file" id="up" multiple style="flex:1"><button onclick="upload()">Upload to Hive</button></div>
-      ${files.map(f => `<div class="card row"><a href="/api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
+      ${files.map(f => `<div class="card row"><a href="api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
   } else if (tab === 'Nodes') {
     v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
     v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
-    v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="/api/vm/screen?t=${Date.now()}">`;
+    v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="api/vm/screen?t=${Date.now()}">`;
   } else if (tab === 'Database') {
-    const tables = await api('/api/db');
+    const tables = await api('api/db');
     v.innerHTML = `<div class="row">${tables.map(t => `<button class="plain" onclick="showTable('${t.table}')">${t.table} (${t.rows})</button>`).join('')}</div><div id="rows"></div>`;
   } else if (tab === 'Tools') {
-    const tools = await api('/api/tools');
+    const tools = await api('api/tools');
     v.innerHTML = tools.map(g => `<div class="card"><b>${esc(g.node)}</b>${g.tools.map(t => `<div><code>${esc(t.name)}</code> <span class="muted">${esc(t.description)}</span></div>`).join('')}</div>`).join('');
   } else if (tab === 'Log') {
-    const log = await api('/api/log?limit=300');
+    const log = await api('api/log?limit=300');
     v.innerHTML = `<div class="card log">${log.map(l => `<div><span class="muted">${ago(l.at)} ${l.task_id ? '#' + l.task_id : ''}</span> <span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`).join('')}</div>`;
   }
 }
-async function showTable(t) { $('#rows').innerHTML = table(await api(`/api/db/${t}?limit=200`)); }
-async function addRule() { await api('/api/rules', { method: 'POST', body: { text: $('#rtext').value, scope: $('#rscope').value, quote: $('#rtext').value } }); render(); }
-async function delRule(id) { await api(`/api/rules/${id}`, { method: 'DELETE' }); render(); }
-async function addInfo() { await api('/api/info', { method: 'POST', body: { key: $('#ikey').value, value: $('#ival').value } }); render(); }
-async function upload() { for (const f of $('#up').files) await api(`/api/files?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f }); render(); }
+async function showTable(t) { $('#rows').innerHTML = table(await api(`api/db/${t}?limit=200`)); }
+async function addRule() { await api('api/rules', { method: 'POST', body: { text: $('#rtext').value, scope: $('#rscope').value, quote: $('#rtext').value } }); render(); }
+async function delRule(id) { await api(`api/rules/${id}`, { method: 'DELETE' }); render(); }
+async function addInfo() { await api('api/info', { method: 'POST', body: { key: $('#ikey').value, value: $('#ival').value } }); render(); }
+async function upload() { for (const f of $('#up').files) await api(`api/files?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f }); render(); }
 
 async function refresh() {
-  state = await api('/api/state');
+  state = await api('api/state');
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
   $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
   if (['Agents', 'Tasks', 'Nodes'].includes(tab) && !document.activeElement?.matches('input,textarea')) render();
@@ -186,13 +186,13 @@ async function refresh() {
 async function start() {
   const link = location.hash.match(/^#(?:key|pair)=(.+)$/);
   if (link) {
-    history.replaceState(null, '', '/'); tab = 'Agents';
-    await fetch('/api/login', { method: 'POST', body: JSON.stringify({ secret: decodeURIComponent(link[1]) }) });
+    history.replaceState(null, '', location.pathname); tab = 'Agents';
+    await fetch('api/login', { method: 'POST', body: JSON.stringify({ secret: decodeURIComponent(link[1]) }) });
   }
-  try { await api('/api/me'); } catch { return; }
+  try { await api('api/me'); } catch { return; }
   $('#app').hidden = false; tabs(); await refresh(); render();
   clearInterval(timer);
-  timer = setInterval(() => { refresh().catch(() => {}); const s = $('#shot'); if (s) s.src = `/api/vm/screen?t=${Date.now()}`; }, 2000);
+  timer = setInterval(() => { refresh().catch(() => {}); const s = $('#shot'); if (s) s.src = `api/vm/screen?t=${Date.now()}`; }, 2000);
 }
 $('#secret').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 start();
