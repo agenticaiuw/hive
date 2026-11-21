@@ -1,5 +1,5 @@
-// Use Codex's thread catalog and dispatcher, not a second client talking straight to MCP.
-// Only the board and cloud CLI are fixtures. No model request or owner credentials are used.
+// Check both Codex's dispatcher and the owner exec's actual model request. The board and cloud
+// CLI are fixtures; exec uses an unreachable local provider, with no live model or owner credentials.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { codexArgs, GUIDE } from './hive-task.mjs';
+import { readTaskCatalog } from './task-catalog.mjs';
 
 const codex = process.env.HIVE_TEST_CODEX ?? '/root/.local/bin/codex';
 const options = dir => ({ model: 'fixture', effort: 'low', workDir: dir, appDir: import.meta.dirname,
@@ -75,9 +76,7 @@ function client(t, config, dir) {
   };
 }
 
-test('Codex discovers, probes and transfers in each task thread, including a repair retry', {
-  skip: !existsSync(codex) && 'Set HIVE_TEST_CODEX to the installed Codex CLI to check the runtime boundary', timeout: 45000,
-}, async t => {
+function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'hive-mac-catalog-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'bin'));
@@ -125,6 +124,13 @@ childProcess.execFile = (command, args, options, callback) => {
 };
 syncBuiltinESMExports();
 `);
+  return { dir, bytes, expected, source, preload };
+}
+
+test('Codex discovers, probes and transfers in each task thread, including a repair retry', {
+  skip: !existsSync(codex) && 'Set HIVE_TEST_CODEX to the installed Codex CLI to check the runtime boundary', timeout: 45000,
+}, async t => {
+  const { dir, bytes, expected, source, preload } = fixture(t);
   for (const [repaired, macEnabled] of [[false, true], [true, true], [true, false]]) {
     rmSync(join(dir, 'connected'), { force: true });
     rmSync(join(dir, 'desktop-listed'), { force: true });
@@ -178,4 +184,64 @@ syncBuiltinESMExports();
   assert.equal(calls.length, 10);
   assert.ok(calls.every(c => c.request === 42 && c.name === 'run_command'));
   assert.deepEqual(readFileSync(source), bytes);
+});
+
+for (const direct of [false, true]) test(`owner exec with code mode: ${direct ? 'repair exposes direct transfers' : 'registration alone is not direct exposure'}`, {
+  skip: !existsSync(codex) && 'Set HIVE_TEST_CODEX to check the owner exec runtime', timeout: 30000,
+}, async t => {
+  const { dir, preload } = fixture(t);
+  // The old app-server test used an unknown model, whose fallback metadata uses direct tools.
+  // Owner models use code_mode_only and Responses Lite; exercise that provisioning path too.
+  const models = join(dir, 'models.json');
+  writeFileSync(models, JSON.stringify({ models: [{ slug: 'fixture', display_name: 'Fixture', description: 'Offline test',
+    base_instructions: 'Use the tools to carry out the task.',
+    default_reasoning_level: 'low', supported_reasoning_levels: [{ effort: 'low', description: 'Low' }],
+    shell_type: 'unified_exec', visibility: 'list', supported_in_api: true, priority: 0,
+    tool_mode: 'code_mode_only', use_responses_lite: true, supports_search_tool: true,
+    default_reasoning_summary: 'none', support_verbosity: true, default_verbosity: 'low',
+    truncation_policy: { mode: 'tokens', limit: 10000 }, context_window: 32000,
+    effective_context_window_percent: 95, experimental_supported_tools: [], input_modalities: ['text'],
+  }] }));
+  const args = codexArgs({ ...options(dir), improveFile: join(dir, 'repair.json') });
+  if (!direct) {
+    const at = args.indexOf('features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]');
+    args.splice(at - 1, 2);
+  }
+  const config = [`model_catalog_json=${JSON.stringify(models)}`, 'model_provider="fixture"',
+    'model_providers.fixture.name="Offline fixture"', 'model_providers.fixture.base_url="http://127.0.0.1:1"',
+    'model_providers.fixture.wire_api="responses"'];
+  for (const name of ['desktop', 'phone', 'browser', 'knowledge', 'mac']) {
+    config.push(`mcp_servers.${name}.env.NODE_OPTIONS=${JSON.stringify(`--import=${preload}`)}`,
+      `mcp_servers.${name}.env.HIVE_TASKS_CONFIG=${JSON.stringify(join(dir, 'board.json'))}`);
+  }
+  args.splice(-1, 0, ...config.flatMap(c => ['-c', c]));
+  const trace = join(dir, 'trace');
+  const child = spawn(codex, args, { cwd: dir, detached: true,
+    env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir, CODEX_HOME: dir, CODEX_ROLLOUT_TRACE_ROOT: trace },
+    stdio: ['pipe', 'pipe', 'pipe'] });
+  let thread = '', errors = '', ended = false;
+  const closed = new Promise(resolve => child.on('close', () => { ended = true; resolve(); }));
+  child.stderr.on('data', b => { errors = (errors + b).slice(-4000); });
+  child.on('error', error => { errors += error.message; });
+  createInterface({ input: child.stdout }).on('line', line => {
+    const event = JSON.parse(line);
+    if (event.type === 'thread.started') thread = event.thread_id;
+  });
+  t.after(async () => {
+    // Kill the group, including the CLI's native child and MCP servers, before removing fixtures.
+    try { process.kill(-child.pid, 'SIGTERM'); } catch {}
+    await closed;
+  });
+  child.stdin.end('Check which file transfer tools are callable. Do not copy or publish anything.');
+  const until = Date.now() + 20000;
+  let catalog;
+  while (!ended && Date.now() < until && !(catalog = readTaskCatalog(trace, thread))) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(catalog, `exec did not record its model request: ${errors}`);
+  assert.equal(catalog.ok, direct, JSON.stringify(catalog));
+  assert.equal(catalog.tools.includes('mcp__mac.transfer_file'), direct);
+  assert.equal(catalog.tools.includes('mcp__mac.run_command'), direct);
+  assert.ok(catalog.tools.includes('functions.exec'), 'the model really uses code mode');
+  t.diagnostic(`Owner exec thread ${thread}: direct transfer catalog ${catalog.ok ? 'verified' : 'absent without the repair'}.`);
 });
