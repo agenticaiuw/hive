@@ -129,3 +129,25 @@ test('the catalog comes from this exec thread, not earlier runs or another agent
   writeFileSync(join(dir, 'payloads/1.json'), '{');
   assert.equal(readTaskCatalog(root, 'current'), null, 'wait for the complete payload');
 });
+
+test("a request chained onto the last one (Codex's next step after a tool call) keeps that catalog", t => {
+  // Live on the VM 2026-11-21: after the first screenshot Codex sent only the tool's output with
+  // previous_response_id and no tools, and the check stopped every task there as "did not receive".
+  const root = mkdtempSync(join(tmpdir(), 'hive-catalog-chain-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'trace-one');
+  mkdirSync(join(dir, 'payloads'), { recursive: true });
+  const event = n => ({ thread_id: 'current', payload: { type: 'inference_started', request_payload: { path: `payloads/${n}.json` } } });
+  writeFileSync(join(dir, 'payloads/1.json'), JSON.stringify({ model: 'fixture', input: [{ type: 'additional_tools', tools }, { type: 'message' }] }));
+  writeFileSync(join(dir, 'payloads/2.json'), JSON.stringify({ model: 'fixture', previous_response_id: 'resp_1', input: [{ type: 'custom_tool_call_output' }] }));
+  writeFileSync(join(dir, 'trace.jsonl'), `${JSON.stringify(event(1))}\n${JSON.stringify(event(2))}\n`);
+  const catalog = readTaskCatalog(root, 'current');
+  assert.equal(catalog.ok, true);
+  assert.equal(catalog.requests, 1);
+  // A chained request that does declare tools is checked like any other.
+  writeFileSync(join(dir, 'payloads/2.json'), JSON.stringify({ model: 'fixture', previous_response_id: 'resp_1', tools: [{ type: 'function', name: 'other' }] }));
+  assert.equal(readTaskCatalog(root, 'current').ok, false);
+  // An unchained request with no tools still fails.
+  writeFileSync(join(dir, 'payloads/2.json'), JSON.stringify({ model: 'fixture', input: [{ type: 'message' }] }));
+  assert.equal(readTaskCatalog(root, 'current').ok, false);
+});
