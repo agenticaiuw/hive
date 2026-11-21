@@ -1,124 +1,68 @@
-//! The Mac's tools. Input goes through the owner's input helper (/tmp/agent-vhid.sock: a virtual keyboard and mouse that
-//! hands control back the moment the owner touches theirs); screenshots through screencapture; the shell through zsh.
-//! x/y everywhere are screen points, which are also the screenshot's pixels.
-use hive_protocol::{b64, n, s, tool};
+//! The Mac's screen, mouse and keyboard. Input goes through the owner's input helper (/tmp/agent-vhid.sock: a virtual keyboard
+//! and mouse that hands control back the moment the owner touches theirs); screenshots through screencapture. x/y are screen
+//! points, which are also the screenshot's pixels.
+use crate::common::pause;
+use hive_protocol::b64;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub fn tools() -> Vec<Value> {
-    let xy = || json!({ "x": n("x in the latest screenshot"), "y": n("y in the latest screenshot") });
-    let mut input = vec![
-        tool("mac_click", "Click on the Mac at (x, y). count 2 = double click; button left|right.",
-            { let mut p = xy(); p["button"] = s("left or right"); p["count"] = n("1 or 2"); p }, &["x", "y", "button", "count"]),
-        tool("mac_drag", "Drag on the Mac from (x, y) to (to_x, to_y).",
-            { let mut p = xy(); p["to_x"] = n("end x"); p["to_y"] = n("end y"); p }, &["x", "y", "to_x", "to_y"]),
-        tool("mac_scroll", "Scroll on the Mac at (x, y): dy > 0 scrolls down, dx > 0 right (in wheel notches).",
-            { let mut p = xy(); p["dy"] = n("notches down"); p["dx"] = n("notches right"); p }, &["x", "y", "dy", "dx"]),
-        tool("mac_type", "Type text on the Mac into whatever has focus.", json!({ "text": s("Text to type") }), &["text"]),
-        tool("mac_key", "Press keys on the Mac, e.g. cmd+space, return, cmd+shift+t, escape, down.", json!({ "keys": s("Keys joined with +") }), &["keys"]),
-    ];
-    for t in &mut input { t["lock"] = json!("input"); }
-    let mut all = vec![tool("mac_screenshot", "See the owner's Mac screen. x/y in the other mac tools are pixels in this image.", json!({}), &[])];
-    all.append(&mut input);
-    all.extend([
-        tool("mac_shell", "Run a shell command on the owner's Mac (zsh, as the owner) and get its output.",
-            json!({ "command": s("The command"), "timeout": n("Seconds, default 120") }), &["command", "timeout"]),
-        tool("mac_get_file", "Copy a file from the Mac into Hive's files on the VM; returns its VM path.", json!({ "path": s("Path on the Mac") }), &["path"]),
-        tool("mac_put_file", "Copy a file from the VM to the Mac.", json!({ "vm_path": s("Path on the VM"), "path": s("Path on the Mac") }), &["vm_path", "path"]),
-    ]);
-    for t in all.iter_mut().rev().take(2) { t["timeout"] = json!(600); }
-    all
+pub const KIND: &str = "mac";
+pub const NAME: &str = "Mac";
+pub const SHELL: &str = "zsh";
+pub const KEYS: &str = "cmd+space, return, cmd+shift+t, escape, down";
+
+pub fn host() -> String {
+    Command::new("scutil").args(["--get", "ComputerName"]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "Mac".into())
 }
 
-pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
-    let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
-    let done = |t: &str| Ok(json!({ "text": t }));
-    match tool {
-        "mac_screenshot" => screenshot(),
-        "mac_click" => {
-            let count = a["count"].as_i64().unwrap_or(1).clamp(1, 3);
-            let bit = if a["button"] == "right" { 2 } else { 1 };
-            move_to(f("x"), f("y"))?;
-            pause(60);
-            for i in 0..count {
-                send(&format!("buttons {bit}"))?;
-                pause(50);
-                send("buttons 0")?;
-                if i + 1 < count { pause(90); }
-            }
-            done("Clicked.")
-        }
-        "mac_drag" => {
-            move_to(f("x"), f("y"))?;
-            pause(80);
-            send("buttons 1")?;
-            pause(100);
-            let moved = move_to(f("to_x"), f("to_y"));
-            pause(80);
-            send("buttons 0").ok();
-            moved.and(done("Dragged."))
-        }
-        "mac_scroll" => {
-            move_to(f("x"), f("y"))?;
-            // Rolling a wheel away from you is +1; natural scrolling flips what that does.
-            let natural = !sh("defaults read -g com.apple.swipescrolldirection").trim().eq("0");
-            let sign = if natural { 1 } else { -1 };
-            for (amount, fmt) in [(f("dy") as i64, "{} 0"), (f("dx") as i64, "0 {}")] {
-                for _ in 0..amount.abs() {
-                    send(&format!("scroll {}", fmt.replace("{}", &(sign * amount.signum()).to_string())))?;
-                    pause(30);
-                }
-            }
-            done("Scrolled.")
-        }
-        "mac_type" => { type_text(a["text"].as_str().unwrap_or(""))?; done("Typed.") }
-        "mac_key" => { key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
-        "mac_shell" => shell(a["command"].as_str().unwrap_or(""), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
-        "mac_get_file" => {
-            let path = a["path"].as_str().unwrap_or("");
-            let data = std::fs::read(path).map_err(|e| format!("couldn't read {path}: {e}"))?;
-            let name = std::path::Path::new(path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or("file".into());
-            Ok(json!({ "data": b64::encode(&data), "name": name }))
-        }
-        "mac_put_file" => {
-            let path = a["path"].as_str().unwrap_or("");
-            let data = b64::decode(a["data"].as_str().unwrap_or("")).ok_or("no file data came with the call")?;
-            if let Some(dir) = std::path::Path::new(path).parent() { std::fs::create_dir_all(dir).ok(); }
-            std::fs::write(path, &data).map_err(|e| format!("couldn't write {path}: {e}"))?;
-            done(&format!("Wrote {} bytes to {path}.", data.len()))
-        }
-        _ => Err(format!("this Mac has no tool {tool}")),
+pub fn shell(cmd: &str) -> Command {
+    let mut c = Command::new("zsh");
+    c.args(["-lc", cmd]);
+    c
+}
+
+pub fn click(x: f64, y: f64, right: bool, count: i64) -> Result<(), String> {
+    let bit = if right { 2 } else { 1 };
+    move_to(x, y)?;
+    pause(60);
+    for i in 0..count {
+        send(&format!("buttons {bit}"))?;
+        pause(50);
+        send("buttons 0")?;
+        if i + 1 < count { pause(90); }
     }
+    Ok(())
 }
 
-fn pause(ms: u64) { std::thread::sleep(Duration::from_millis(ms)); }
-
-fn sh(cmd: &str) -> String {
-    Command::new("zsh").args(["-c", cmd]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+pub fn drag(x: f64, y: f64, to_x: f64, to_y: f64) -> Result<(), String> {
+    move_to(x, y)?;
+    pause(80);
+    send("buttons 1")?;
+    pause(100);
+    let moved = move_to(to_x, to_y);
+    pause(80);
+    send("buttons 0").ok();
+    moved
 }
 
-fn shell(cmd: &str, secs: u64) -> Result<Value, String> {
-    let mut child = Command::new("zsh").args(["-lc", cmd]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|e| e.to_string())?;
-    let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let o = std::thread::spawn(move || { let mut b = Vec::new(); out.read_to_end(&mut b).ok(); b });
-    let e = std::thread::spawn(move || { let mut b = Vec::new(); err.read_to_end(&mut b).ok(); b });
-    let end = Instant::now() + Duration::from_secs(secs);
-    let status = loop {
-        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? { break Some(st); }
-        if Instant::now() > end { child.kill().ok(); child.wait().ok(); break None; }
-        pause(100);
-    };
-    let text = format!("{}{}", String::from_utf8_lossy(&o.join().unwrap_or_default()), String::from_utf8_lossy(&e.join().unwrap_or_default()));
-    let tail: String = if text.chars().count() > 20000 { text.chars().skip(text.chars().count() - 20000).collect() } else { text };
-    Ok(json!({ "text": match status {
-        Some(st) => format!("exit {}\n{tail}", st.code().unwrap_or(-1)),
-        None => format!("timed out after {secs}s\n{tail}"),
-    }}))
+pub fn scroll(x: f64, y: f64, dx: i64, dy: i64) -> Result<(), String> {
+    move_to(x, y)?;
+    // Rolling a wheel away from you is +1; natural scrolling flips what that does.
+    let natural = Command::new("defaults").args(["read", "-g", "com.apple.swipescrolldirection"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() != "0").unwrap_or(true);
+    let sign = if natural { 1 } else { -1 };
+    for (amount, fmt) in [(dy, "{} 0"), (dx, "0 {}")] {
+        for _ in 0..amount.abs() {
+            send(&format!("scroll {}", fmt.replace("{}", &(sign * amount.signum()).to_string())))?;
+            pause(30);
+        }
+    }
+    Ok(())
 }
 
 // ---- the screen: CoreGraphics for the cursor and display size ----
@@ -150,7 +94,7 @@ fn screen_size() -> (f64, f64) {
     (r.size.x, r.size.y)
 }
 
-fn screenshot() -> Result<Value, String> {
+pub fn screenshot() -> Result<Value, String> {
     let file = std::env::temp_dir().join(format!("hive-shot-{}.jpg", std::process::id()));
     let p = file.to_string_lossy().into_owned();
     let (w, _) = screen_size();
@@ -257,7 +201,7 @@ fn char_key(c: char) -> Option<(u8, bool)> {
     }
 }
 
-fn key(combo: &str) -> Result<(), String> {
+pub fn key(combo: &str) -> Result<(), String> {
     let parts: Vec<String> = combo.replace(' ', "").split('+').filter(|p| !p.is_empty()).map(String::from).collect();
     let (mut mods, mut usage) = (0u8, None);
     for (i, p) in parts.iter().enumerate() {
@@ -280,7 +224,7 @@ fn key(combo: &str) -> Result<(), String> {
     pressed.map(|_| ())
 }
 
-fn type_text(text: &str) -> Result<(), String> {
+pub fn type_text(text: &str) -> Result<(), String> {
     let mut other = String::new();
     for c in text.chars() {
         let Some((u, shifted)) = char_key(c) else { other.push(c); continue };

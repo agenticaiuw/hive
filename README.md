@@ -7,7 +7,7 @@ The club's one project ([agenticaiuw.com/hive](https://agenticaiuw.com/hive)): a
 - **One brain.** The server on the VM is the only place agents run. Codex is signed in there and nowhere else.
 - **Every request goes to the orchestrator first.** It turns the owner's words into rules (standing instructions, scoped to everywhere, a node, a site, an app or a folder) and tasks, or passes them to the agent already on that task.
 - **One agent per task**, with the tools of the nodes the task needs. A turn ends with done and the outcome, or exactly why it stopped and what the owner must do; there is no "stuck".
-- **Nodes bring their own tools.** The Mac, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.
+- **Nodes bring their own tools.** A Mac or Windows computer, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.
 - **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
 - **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive; nodes with a checkout pick the change up from the VM.
 
@@ -21,7 +21,8 @@ Folders follow the parts of Hive, not the club's teams: parts last longer than t
 | `server/` | The brain: orchestrator, agents, database, API | Cloud |
 | `vm/` | How the VM runs Hive: its services, installer and screen | Cloud |
 | `dashboard/` | The dashboard the server shows at `/` | Product Design |
-| `mac/` | The Mac as a node (`hive`): keyboard, mouse, screen, shell, files; also Claude Code's hook | Automation |
+| `desktop/` | A Mac or Windows computer as a node (`hive`): screen, mouse, keyboard, shell, files; also Claude Code's hook | Automation |
+| `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive | Automation |
 | `phone/` | The iPhone as a node (`hive-phone`, runs on the VM next to the server) | Automation |
 
 A folder appears with its first code: a new device, like Hardware's wearable, is a new top-level folder that speaks `protocol/`, and the server doesn't change for it.
