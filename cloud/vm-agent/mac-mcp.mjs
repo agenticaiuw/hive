@@ -61,12 +61,22 @@ export async function callMac(board, mac, name, args, { request = null, sleep = 
   return failed(call?.error ?? 'the board lost the call', !['expired', 'cancelled'].includes(call?.status));
 }
 
-export function server({ board, label = '', turn = null, files = undefined }) {
+export function server({ board, label = '', turn = null, files = undefined, discoveryMs = 5000 }) {
   let mac;
   const find = async () => {
     // A Mac may reconnect after this task starts. Keep a successful discovery, but let
     // later calls try again after an offline result or a temporary board failure.
-    if (!mac) mac = board ? await connectedMac(board).catch(() => null) : null;
+    if (!mac && board) {
+      // The board's 30-second timeout is also Codex's whole startup budget. Bound each
+      // lookup so initialize and tools/list can return the transfer tool even if it stalls.
+      let timer;
+      try {
+        mac = await Promise.race([
+          connectedMac(board).catch(() => null),
+          new Promise(resolve => { timer = setTimeout(() => resolve(null), discoveryMs); }),
+        ]);
+      } finally { clearTimeout(timer); }
+    }
     return mac;
   };
   return async message => {

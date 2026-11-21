@@ -75,18 +75,19 @@ test("with no Mac connected transfer stays discoverable and a call says why; a f
   assert.match(out.content[0].text, /before retrying/);
 });
 
-test('a transfer listed while offline works in the same task after the Mac reconnects', async () => {
-  for (const unavailable of ['offline', 'board error']) {
+test('a transfer listed while discovery is unavailable works in the same task once it recovers', { timeout: 1000 }, async () => {
+  for (const unavailable of ['offline', 'board error', 'board timeout']) {
     let connected = false;
     const { board, calls } = fakeBoard({ macs: [{ name: 'test-mac', tools: [{ name: 'run_command' }] }], answer: { result: sourceInfo } });
     const turns = [];
     const answer = server({ board: async (path, body) => {
       if (path === '/v1/mac/status?tools=1' && !connected) {
         if (unavailable === 'board error') throw new Error('Board temporarily unavailable');
+        if (unavailable === 'board timeout') return new Promise(() => {});
         return { macs: [] };
       }
       return board(path, body);
-    }, label: 'R42-1', turn: { use: async fn => { turns.push('take'); return fn(); } },
+    }, label: 'R42-1', discoveryMs: 10, turn: { use: async fn => { turns.push('take'); return fn(); } },
     files: { uuid: () => 'copy-id', fetch: async key => `/files/${key}` } });
     await answer({ id: 1, method: 'initialize', params: {} });
     const listed = (await answer({ id: 2, method: 'tools/list' })).result.tools;
