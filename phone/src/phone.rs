@@ -16,14 +16,10 @@ impl Phone {
     }
 
     fn config(&self) -> Result<(String, String), String> {
-        let own = [hive_protocol::conf_path("phone-relay"), "/home/ubuntu/hive-vm-agent/state/phone-relay.json".into()].iter()
-            .find_map(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok());
-        if let Some(c) = own {
-            return Ok((c["url"].as_str().unwrap_or("").trim_end_matches('/').to_string(), c["token"].as_str().unwrap_or("").to_string()));
-        }
-        let board = std::fs::read_to_string("/root/.config/hive/tasks.json").map_err(|_| "Hive has no phone relay configured".to_string())?;
-        let c: Value = serde_json::from_str(&board).map_err(|e| e.to_string())?;
-        Ok((format!("{}/v1/phone", c["url"].as_str().unwrap_or("").trim_end_matches('/')), c["token"].as_str().unwrap_or("").to_string()))
+        let path = hive_protocol::conf_path("phone-relay");
+        let c: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| format!("Hive has no phone relay configured ({} is missing)", path.display()))?;
+        Ok((c["url"].as_str().unwrap_or("").trim_end_matches('/').to_string(), c["token"].as_str().unwrap_or("").to_string()))
     }
 
     fn raw(&self, path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<(u16, Value), String> {

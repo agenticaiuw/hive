@@ -1,0 +1,14 @@
+[Unit]
+Description=The VM agent's screen (Xvfb :99)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/vm-xvfb
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

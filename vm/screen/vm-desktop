@@ -1,9 +1,7 @@
 #!/bin/sh
-# A light desktop on the VM agent's screen (the worker's Xvfb :99): openbox, a taskbar with Terminal
-# and Chrome, a plain background. Xvfb picks a new auth file each time it starts, so look it up.
-auth=$(ps -o args= -C Xvfb | grep " :99 " | grep -o "\-auth [^ ]*" | cut -d" " -f2 | head -1)
-[ -n "$auth" ] || { echo "no Xvfb on :99 yet" >&2; exit 1; }
-export DISPLAY=:99 XAUTHORITY="$auth" HOME=/home/ubuntu
+# A light desktop on the VM agent's screen (vm-xvfb's :99): openbox, a taskbar with Terminal and Chrome,
+# a plain background.
+export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99 HOME=/home/ubuntu
 xsetroot -solid "#1e2229"
 # Again once openbox is up: when it starts with the screen it can paint the background black.
 (sleep 3; xsetroot -solid "#1e2229") &

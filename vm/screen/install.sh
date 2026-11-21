@@ -1,6 +1,6 @@
 #!/bin/sh
-# Sets up the VM agent's screen: a desktop (openbox, a taskbar with Terminal and Chrome) on the
-# worker's Xvfb :99, x11vnc sharing it on loopback port 5901 for the owner's "VM Screen" app
+# Sets up the VM agent's screen: Xvfb :99 (vm-xvfb), a desktop (openbox, a taskbar with Terminal and
+# Chrome, the Chromium build in /opt/chromium) on it, x11vnc sharing it on loopback port 5901 for the owner's "VM Screen" app
 # (through an SSH tunnel), and vm-shot, which the Mac's "VM Screenshot" app runs over SSH.
 # Run on the VM as root: sudo sh screen/install.sh
 # Safe to run again: it keeps the screen-share password, and restarts a service only when its own
@@ -13,11 +13,12 @@ as_user() { runuser -u "$user" -- "$@"; }
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
   openbox tint2 xfce4-terminal x11-xserver-utils x11vnc adwaita-icon-theme humanity-icon-theme python3 \
-  x11-apps xdotool
+  x11-apps xdotool xvfb xauth
 
 # Which services' files change with this install (checked before anything is replaced).
 differs() { ! cmp -s "$1" "$2"; }
-desktop_changed=; share_changed=
+desktop_changed=; share_changed=; xvfb_changed=
+if differs "$here/vm-xvfb" /usr/local/bin/vm-xvfb || differs "$here/vm-xvfb.service" /etc/systemd/system/vm-xvfb.service; then xvfb_changed=1; fi
 if differs "$here/vm-desktop" /usr/local/bin/vm-desktop || differs "$here/vm-desktop.service" /etc/systemd/system/vm-desktop.service \
   || differs "$here/tint2rc" "$home/.config/tint2/tint2rc"; then desktop_changed=1; fi
 if differs "$here/vm-screen-share" /usr/local/bin/vm-screen-share || differs "$here/vm-screen-share.service" /etc/systemd/system/vm-screen-share.service; then
@@ -25,8 +26,8 @@ if differs "$here/vm-screen-share" /usr/local/bin/vm-screen-share || differs "$h
 fi
 rc_before=$(cat "$home/.config/openbox/rc.xml" 2>/dev/null || true)
 
-install -m 755 "$here/vm-desktop" "$here/vm-chrome" "$here/vm-screen-share" "$here/vm-shot" /usr/local/bin/
-install -m 644 "$here/vm-desktop.service" "$here/vm-screen-share.service" /etc/systemd/system/
+install -m 755 "$here/vm-xvfb" "$here/vm-desktop" "$here/vm-chrome" "$here/vm-screen-share" "$here/vm-shot" /usr/local/bin/
+install -m 644 "$here/vm-xvfb.service" "$here/vm-desktop.service" "$here/vm-screen-share.service" /etc/systemd/system/
 
 as_user mkdir -p "$home/.config/tint2" "$home/.config/openbox" "$home/.local/share/applications" "$home/.vnc"
 install -o "$user" -g "$user" -m 644 "$here/tint2rc" "$home/.config/tint2/tint2rc"
@@ -52,6 +53,7 @@ fi
 [ "$(cat "$home/.config/openbox/rc.xml")" = "$rc_before" ] || desktop_changed=1
 
 systemctl daemon-reload
-systemctl enable --now vm-screen-share vm-desktop
+systemctl enable --now vm-xvfb vm-screen-share vm-desktop
+if [ -n "$xvfb_changed" ]; then systemctl restart vm-xvfb; fi
 if [ -n "$desktop_changed" ]; then systemctl restart vm-desktop; fi
 if [ -n "$share_changed" ]; then systemctl restart vm-screen-share; fi

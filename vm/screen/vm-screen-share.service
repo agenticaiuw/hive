@@ -1,6 +1,7 @@
 [Unit]
 Description=Screen sharing of the VM agent desktop (:99), reachable only through SSH
-After=network.target
+After=vm-xvfb.service
+Wants=vm-xvfb.service
 StartLimitIntervalSec=0
 
 [Service]
