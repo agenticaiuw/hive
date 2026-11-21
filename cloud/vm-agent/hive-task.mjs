@@ -94,6 +94,7 @@ or otherwise cannot be undone, and use the same One-way: step quoting the owner'
 partial effects: inspect before retrying, especially a send. Use mac.transfer_file with direction=to_vm and mac_path
 to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy it back. Both paths are absolute.
 Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
+Check the directly exposed mac and desktop tool namespaces before searching ALL_TOOLS.
 Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
 If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
 Hive exposes both namespaces as direct tools, outside functions.exec; call those direct tools when available.
@@ -181,6 +182,11 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     // The owner's models use code_mode_only. MCP registration alone did not prove that
     // code mode exposed these tools. Like Hive on the Mac, give them a direct callable surface.
     '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]',
+    // A registered MCP catalog does not mean the model can discover its tools. Keep the
+    // transfer servers directly callable, including in the first turn after a repair.
+    // Strict third-party deferral would ignore these servers' exposure settings.
+    '-c', 'features.code_mode_only_strict_3p_tools=false',
+    ...['desktop', 'mac'].flatMap(name => ['-c', `mcp_servers.${name}.omit_tools_from=["code_mode","deferred"]`]),
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     // The desktop catalog includes the Mac file fallback. Load it before the first turn,
     // and fail startup instead of letting a task run with missing file tools.
