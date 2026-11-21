@@ -23,7 +23,8 @@ pub struct Node {
 }
 
 pub fn conf_path(name: &str) -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hive").join(format!("{name}.json"))
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    PathBuf::from(home).join(".config").join("hive").join(format!("{name}.json"))
 }
 
 pub fn load(name: &str) -> Option<Conf> {
@@ -133,8 +134,11 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
     let fetched = run(&["git", "fetch", &b, "HEAD"]).and_then(|_| run(&["git", "merge", "--ff-only", "FETCH_HEAD"]));
     std::fs::remove_file(&bundle).ok();
     fetched?;
+    let exe = PathBuf::from(&c.repo).join("target").join("release").join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
+    // Windows won't overwrite a running program, but it lets it be renamed.
+    #[cfg(windows)]
+    { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).ok(); }
     run(&["cargo", "build", "--release", "-p", package])?;
-    let exe = PathBuf::from(&c.repo).join("target/release").join(package);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -142,5 +146,8 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
         return Err(e.to_string());
     }
     #[allow(unreachable_code)]
-    Ok(())
+    {
+        std::process::Command::new(exe).args(std::env::args().skip(1)).spawn().map_err(|e| e.to_string())?;
+        std::process::exit(0)
+    }
 }

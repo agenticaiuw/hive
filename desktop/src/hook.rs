@@ -13,7 +13,7 @@ pub fn run() {
     let event = e["hook_event_name"].as_str().unwrap_or("");
     let mut out = String::new();
     if event == "UserPromptSubmit" {
-        let body = json!({ "text": e["prompt"], "node": "mac", "agent": format!("claude:{session}"), "context": { "folder": e["cwd"] } });
+        let body = json!({ "text": e["prompt"], "node": crate::os::KIND, "agent": format!("claude:{session}"), "context": { "folder": e["cwd"] } });
         if let Ok((200, r)) = hive_protocol::call(&c, "POST", "/api/requests?wait=1", Some(&body), 180) {
             out += &format!("Hive (the owner's orchestrator) saved this prompt as request #{}. It says: {}\n", r["id"], r["reply"].as_str().unwrap_or(""));
             let rules: Vec<String> = r["rules"].as_array().into_iter().flatten().filter(|x| x["code"].is_null())
@@ -39,7 +39,7 @@ pub fn run() {
 
 /// `hive end <task> done <outcome>` | `hive end <task> needs <why> <need>`
 pub fn end(args: &[String]) -> Result<(), String> {
-    let c = hive_protocol::load("node").ok_or("This Mac isn't paired with Hive.")?;
+    let c = hive_protocol::load("node").ok_or("This computer isn't paired with Hive.")?;
     let body = match (args.first(), args.get(1).map(|s| s.as_str())) {
         (Some(_), Some("done")) => json!({ "done": true, "outcome": args[2..].join(" ") }),
         (Some(_), Some("needs")) if args.len() >= 4 => json!({ "done": false, "why": args[2], "need": args[3..].join(" ") }),

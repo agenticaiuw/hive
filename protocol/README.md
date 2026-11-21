@@ -6,9 +6,9 @@ Every call is HTTPS to the server with `Authorization: Bearer <token>`. JSON in,
 
 ## Nodes
 
-A node is anything agents can use: the Mac, the iPhone, a browser, a wearable. It needs four calls, and `src/lib.rs` makes them for nodes written in Rust.
+A node is anything agents can use: a Mac or Windows computer, the iPhone, a browser, a wearable. It needs four calls, and `src/lib.rs` makes them for nodes written in Rust.
 
-1. **Pair once.** `POST /api/pair {code, kind, name}` → `{token}`. The code comes from the dashboard's "Pair a device" and lasts 10 minutes. `kind` is the node's type (`mac`, `phone`, `browser`, …) and prefixes its tool names.
+1. **Pair once.** `POST /api/pair {code, kind, name}` → `{token}`. The code comes from the dashboard's "Pair a device" and lasts 10 minutes. `kind` is the node's type (`mac`, `windows`, `phone`, `browser`, …) and prefixes its tool names.
 2. **Say hello every minute.** `POST /api/node/hello {id, kind, name, version, notes, tools}` → `{version}`, the server's version (a node with a checkout of this repo updates itself when they differ: `GET /api/git/bundle?have=<its version>`).
    - `notes`: a sentence or two agents should know about this node.
    - `tools`: `[{name, description, inputSchema, lock?, timeout?}]`, everything agents can do with it. Tools sharing a `lock` (say `"input"`) go to one agent at a time; the rest run in parallel. `timeout` is in seconds (default 120).
@@ -23,7 +23,7 @@ What the dashboard, the extension's pages and any node can call. Every request f
 
 | Call | What it does |
 |---|---|
-| `POST /api/requests[?wait=1] {text, node, agent?, context?}` | Give Hive a request. `context` is `{site?, app?, folder?}`. With `wait=1` the answer comes back: `{status, reply, tasks, rules}`. |
+| `POST /api/requests[?wait=1] {text, node, agent?, context?}` | Give Hive a request. `context` is `{site?, app?, folder?, url?, title?}`. With `wait=1` the answer comes back: `{status, reply, tasks, rules}`. |
 | `GET /api/state` | Open tasks, working agents, nodes, recent requests, locks. |
 | `GET /api/tasks[?status=]`, `GET /api/tasks/:id` | Tasks (done ones unless `status` says otherwise), and one task with its log. |
 | `POST /api/tasks/:id/message {text}` | Tell the agent on a task something. |
