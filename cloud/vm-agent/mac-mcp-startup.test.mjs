@@ -85,6 +85,8 @@ globalThis.fetch = async (url, options) => {
   const env = { PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--import=${preload}`, HIVE_TEST_SOURCE: source };
   for (const resumed of [false, true]) {
     rmSync(connected, { force: true });
+    const verdict = join(dir, 'runtime-catalog.json');
+    rmSync(verdict, { force: true });
     const args = codexArgs({ model: 'm', effort: 'low', workDir: dir, appDir: import.meta.dirname,
       stateDir: dir, filesDir: files, stepsFile: join(dir, 'steps.log'), label: 'R42-1', user: 'test', tasksConfig,
       improveFile: resumed ? join(dir, 'improve.json') : '' });
@@ -97,9 +99,14 @@ globalThis.fetch = async (url, options) => {
     if (namespace === 'mac') assert.deepEqual(catalog.result.tools.map(tool => tool.name), ['run_command', 'transfer_file']);
     const transfer = catalog.result.tools.find(tool => tool.name === 'transfer_file');
     assert.equal(transfer?.inputSchema.properties.recovery_key.type, 'string');
-    const offline = await mcp.request('tools/call', { name: transfer.name, arguments: {
+    let answered = false;
+    const pending = mcp.request('tools/call', { name: transfer.name, arguments: {
       direction: 'to_vm', mac_path: '/Users/test/Desktop/clip.mov', step: 'Checking the offline Mac.',
-    } });
+    } }).then(result => { answered = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(answered, false, 'the actual server must not act before the model catalog is verified');
+    writeFileSync(verdict, JSON.stringify({ ok: true, thread_id: resumed ? 'retry' : 'first' }));
+    const offline = await pending;
     assert.equal(offline.result.isError, true);
     assert.match(offline.result.content[0].text, /Mac isn't connected/);
     writeFileSync(connected, 'yes');
@@ -128,6 +135,7 @@ globalThis.fetch = async (url, options) => {
 test('desktop lists transfers without board configuration and reports a call error', { timeout: 5000 }, async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hive-desktop-config-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify({ ok: true, thread_id: 'fixture' }));
   const args = codexArgs({ model: 'm', effort: 'low', workDir: dir, appDir: import.meta.dirname, stateDir: dir,
     filesDir: dir, stepsFile: join(dir, 'steps.log'), user: 'test', tasksConfig: join(dir, 'missing.json') });
   const mcp = client(t, args, { PATH: process.env.PATH }, 'desktop');

@@ -28,6 +28,9 @@ test('new and repaired tasks require both transfer catalogs and a probe in the c
   }
   assert.match(GUIDE, /in ALL_TOOLS and check that the matching tools property is a function/);
   assert.match(GUIDE, /When functions.exec is unavailable, use the directly exposed/);
+  assert.match(GUIDE, /missing name in ALL_TOOLS alone does not prove the tool is absent/);
+  assert.match(GUIDE, /Search ALL_TOOLS for transfer_file/);
+  assert.match(GUIDE, /search deferred tools with tool_search/);
   assert.match(GUIDE, /check_only=true[\s\S]*Require ready=true/);
 });
 
@@ -86,6 +89,7 @@ function fixture(t) {
   const expected = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
   const source = join(dir, 'source.mov');
   writeFileSync(source, bytes);
+  writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify({ thread_id: 'fixture-dispatch', ok: true }));
   writeFileSync(join(dir, 'board.json'), JSON.stringify({ url: 'https://board.invalid', token: 'fixture' }));
   // Emulate the VM's sudo user change; credentials and external programs remain fixtures.
   writeFileSync(join(dir, 'bin', 'sudo'), '#!/bin/sh\n[ "$1" = "-n" ] && [ "$2" = "-u" ] || exit 1\nshift 3\nexec "$@"\n', { mode: 0o755 });

@@ -36,6 +36,26 @@ test('code mode requires the transfer in exec itself, including Responses Lite',
   }
 });
 
+test('code-mode evidence requires the callable declaration in exec, not a mention or prompt', () => {
+  const declaration = `declare const tools: { mcp__desktop__transfer_file(args: {
+  check_only?: boolean;
+  direction: "to_vm" | "to_mac";
+  mac_path: string;
+  step: string;
+}): Promise<CallToolResult>; };`;
+  const request = description => ({ input: [{ type: 'additional_tools', tools: [
+    { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description }] },
+  ] }] });
+  assert.equal(requestCatalog(request(declaration), 'current').ok, true);
+  for (const description of ['tools.mcp__desktop__transfer_file exists',
+    declaration.replace('check_only?: boolean;', 'check_only?: string;'),
+    declaration.replace('"to_vm"', '"from_vm"'),
+    declaration.replace('check_only?: boolean;', '// check_only?: boolean;')]) {
+    assert.equal(requestCatalog(request(description), 'current').ok, false);
+  }
+  assert.equal(requestCatalog({ input: [{ type: 'message', content: declaration }] }, 'current').ok, false);
+});
+
 test('only a model-visible transfer schema verifies the catalog, including Responses Lite', () => {
   for (const request of [{ tools }, { input: [{ type: 'additional_tools', tools }] },
     { tools: [{ ...transfer, name: 'mcp__desktop__transfer_file' }] }]) {

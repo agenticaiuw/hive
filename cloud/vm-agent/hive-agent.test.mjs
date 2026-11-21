@@ -198,23 +198,23 @@ test('Codex runs on its own home with its five tool servers, as the VM user, rea
   const desktop = JSON.parse(config.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
   const phone = JSON.parse(config.find(c => c.startsWith('mcp_servers.phone.args=')).split('=').slice(1).join('='));
   assert.deepEqual(desktop.slice(0, 3), ['-n', '-u', 'ubuntu']);
-  assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/phone-mcp.mjs']);
+  assert.deepEqual(phone, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/phone-mcp.mjs']);
   assert.ok(desktop.includes('HIVE_TASK_LABEL=vm-task') && !desktop.includes('HIVE_KEEP_OPEN=1'));
   const kept = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', label: 'R40-1', keepOpen: true });
   const keptDesktop = JSON.parse(kept.find(c => c.startsWith('mcp_servers.desktop.args=')).split('=').slice(1).join('='));
   assert.ok(keptDesktop.includes('HIVE_TASK_LABEL=R40-1') && keptDesktop.includes('HIVE_KEEP_OPEN=1'));
   assert.throws(() => codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s', label: 'R1 && x' }), /unsupported/);
   const browser = JSON.parse(config.find(c => c.startsWith('mcp_servers.browser.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/browser-mcp.mjs']);
+  assert.deepEqual(browser, ['-n', '-u', 'ubuntu', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/browser-mcp.mjs']);
   const knowledge = JSON.parse(config.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/knowledge-mcp.mjs'], 'its name, for the team tools');
+  assert.deepEqual(knowledge, ['-n', '-u', 'ubuntu', 'env', 'HIVE_TASK_FILE=/s/tasks/1/task.txt', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/knowledge-mcp.mjs'], 'its name, for the team tools');
   const improving = codexArgs({ model: 'gpt-6.1-terra', effort: 'low', workDir: '/s/tasks/1', appDir: '/app', stateDir: '/s', filesDir: '/f', stepsFile: '/s/tasks/1/steps.log', node: '/usr/bin/node', user: 'ubuntu', improveFile: '/s/r7/improve-1.json' });
   const improvingKnowledge = JSON.parse(improving.find(c => c.startsWith('mcp_servers.knowledge.args=')).split('=').slice(1).join('='));
   assert.ok(improvingKnowledge.includes('HIVE_IMPROVE_FILE=/s/r7/improve-1.json'), 'the orchestrator\'s file reaches improve_hive');
   assert.throws(() => codexArgs({ model: 'm', effort: 'low', workDir: '/w', appDir: '/a', stateDir: '/s', filesDir: '/f', stepsFile: '/f/s', improveFile: '/x y' }), /unsupported/);
   assert.match(GUIDE, /improve_hive/);
   const mac = JSON.parse(config.find(c => c.startsWith('mcp_servers.mac.args=')).split('=').slice(1).join('='));
-  assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_FILES_DIR=/f', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/mac-mcp.mjs']);
+  assert.deepEqual(mac, ['-n', '-u', 'ubuntu', 'env', 'HIVE_VM_STATE=/s', 'HIVE_FILES_DIR=/f', 'HIVE_TASK_LABEL=vm-task', '/usr/bin/node', '/app/task-mcp.mjs', '/s/tasks/1/runtime-catalog.json', '/app/mac-mcp.mjs']);
   assert.equal(mac.find(arg => arg.startsWith('HIVE_FILES_DIR=')), desktop.find(arg => arg.startsWith('HIVE_FILES_DIR=')),
     'Mac transfers land where the desktop tools look for files');
   assert.ok(config.includes('mcp_servers.mac.required=true'), 'a failed Mac server cannot silently disappear');

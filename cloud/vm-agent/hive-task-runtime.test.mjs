@@ -7,33 +7,38 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 
-for (const evidence of ['current', 'code-mode', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'code']) {
+for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'code']) {
   test(`owner task completion checks its own runtime catalog: ${evidence}`, { timeout: 10000 }, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hive-task-runtime-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const bin = join(dir, 'bin');
     mkdirSync(bin);
-    // Emulate only the two sudo commands used by the task: its Codex launch and trace cleanup.
+    // Emulate the task's sudo commands: Codex, the privileged catalog reader and cleanup.
     // The model's success message is deliberately untrustworthy unless its catalog agrees.
     const tools = evidence === 'missing-tool' ? [] : [
       { type: 'namespace', name: 'mcp__desktop', tools: [
         { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema },
       ] },
     ];
-    if (['code-mode', 'direct-only'].includes(evidence)) {
-      if (evidence === 'code-mode') tools.length = 0;
+    if (['code-mode', 'code-mode-lite', 'direct-only'].includes(evidence)) {
+      if (evidence !== 'direct-only') tools.length = 0;
       tools.push({ type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec',
         description: evidence === 'direct-only' ? '' : `declare const tools: { mcp__desktop__transfer_file(args: {
           check_only?: boolean;
           direction: "to_vm" | "to_mac";
+          mac_path: string;
+          step: string;
         }): Promise<CallToolResult>; };`,
       }] });
     }
-    writeFileSync(join(dir, 'request.json'), JSON.stringify({ model: 'fixture', tools }));
+    writeFileSync(join(dir, 'request.json'), JSON.stringify({ model: 'fixture',
+      ...(evidence === 'code-mode-lite' ? { input: [{ type: 'additional_tools', tools }] } : { tools }),
+    }));
     writeFileSync(join(dir, 'event.json'), JSON.stringify({ thread_id: evidence === 'other-thread' ? 'old' : 'current',
       payload: { type: 'inference_started', request_payload: { path: 'payloads/1.json' } } }));
     writeFileSync(join(bin, 'sudo'), `#!/bin/sh
 if [ "$2" = rm ]; then shift; exec "$@"; fi
+case "$3" in */task-catalog.mjs) shift; exec "$@" ;; esac
 [ "$2" = env ] || exit 2
 for arg do
   case "$arg" in CODEX_ROLLOUT_TRACE_ROOT=*) trace="\${arg#*=}" ;; esac
@@ -60,7 +65,7 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     for (const fd of fds) closeSync(fd);
     const output = readFileSync(join(dir, 'output'), 'utf8');
     const errors = readFileSync(join(dir, 'errors'), 'utf8');
-    const verified = ['current', 'code-mode'].includes(evidence);
+    const verified = ['current', 'code-mode', 'code-mode-lite'].includes(evidence);
     assert.equal(code, verified || evidence === 'code' ? 0 : 1, `${output}\n${errors}`);
     const work = join(state, 'tasks', readdirSync(join(state, 'tasks'))[0]);
     if (evidence === 'code') {
@@ -73,6 +78,8 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
     assert.equal(catalog.ok, verified);
     assert.equal(catalog.thread_id, 'current');
     assert.match(catalog.sources['hive-task.mjs'], /^[a-f0-9]{64}$/);
+    assert.match(catalog.sources['task-mcp.mjs'], /^[a-f0-9]{64}$/);
+    assert.equal(existsSync(join(work, 'catalog-read.json')), false);
     assert.equal(existsSync(join(work, 'runtime-trace')), false);
     if (verified) assert.match(output, /Callable transfer catalog verified[\s\S]*✅ Done/);
     else {
