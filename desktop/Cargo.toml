@@ -4,5 +4,5 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+hive-node = { path = "../cloud/node" }
 serde_json = "1"
-ureq = "2"

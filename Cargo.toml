@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "node"]
+members = ["cloud", "cloud/node", "desktop", "mobile"]
 resolver = "2"
 
 [workspace.package]

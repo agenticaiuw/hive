@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-const DASHBOARD: &str = include_str!("../dashboard.html");
+const DASHBOARD: &str = include_str!("../../dashboard/index.html");
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_default() }
 pub fn hash(t: &str) -> String { Sha256::digest(t.as_bytes()).iter().map(|b| format!("{b:02x}")).collect() }
@@ -109,6 +109,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Ok(()) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(409, &e),
         },
+        ("POST", ["api", "tasks", _, "end"]) => match hive.end_task(id(2), &b) {
+            Ok(()) => Res::json(&json!({ "ok": true })),
+            Err(e) => Res::err(400, &e),
+        },
         ("POST", ["api", "tasks", _, "drop"]) => { hive.drop_task(id(2)); Res::json(&json!({ "ok": true })) }
         ("GET", ["api", "log"]) => Res::json(&json!(hive.db.all(
             "select * from log where id > ? and (?=0 or request_id=?) order by id desc limit ?",
@@ -153,17 +157,30 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!(hive.db.all(&format!("select * from {table} order by rowid desc limit ? offset ?"),
                 args!(req.q("limit").parse::<i64>().unwrap_or(100), req.q("offset").parse::<i64>().unwrap_or(0)))))
         }
-        ("GET", ["api", "tools"]) => Res::json(&json!(["vm", "mac", "browser", "phone", "hive"].iter()
-            .map(|n| json!({ "node": n, "tools": crate::tools::for_node(n) })).chain([json!({ "node": "every agent", "tools": crate::tools::common() })]).collect::<Vec<_>>())),
+        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()]) })].into_iter()
+            .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
+                .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
+            .collect::<Vec<_>>())),
+        ("GET", ["api", "git", "bundle"]) => {
+            // Only the commits the device lacks, when it says which one it has.
+            let have = req.q("have").chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>();
+            let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&hive.repo).args(a).output();
+            let known = !have.is_empty() && git(&["cat-file", "-e", &format!("{have}^{{commit}}")]).map(|o| o.status.success()).unwrap_or(false);
+            let range = if known { format!("{have}..HEAD") } else { "HEAD".into() };
+            match git(&["bundle", "create", "-", &range]) {
+                Ok(o) if o.status.success() => Res::new(200, "application/octet-stream", o.stdout),
+                _ => Res::err(500, "couldn't bundle Hive's code"),
+            }
+        }
         ("GET", ["api", "vm", "screen"]) => match crate::vm::screen() {
             Some(png) => Res::new(200, "image/png", png),
             None => Res::err(404, "The VM's screen isn't running."),
         },
         ("POST", ["api", "node", "hello"]) => {
             let nid = s(&b["id"]);
-            hive.db.run("insert into nodes(id, kind, name, tools, seen, version) values(?,?,?,?,?,?) on conflict(id) do update set kind=excluded.kind, \
-                name=excluded.name, tools=excluded.tools, seen=excluded.seen, version=excluded.version",
-                args!(nid, s(&b["kind"]), s(&b["name"]), b["tools"].clone(), now(), s(&b["version"])));
+            hive.db.run("insert into nodes(id, kind, name, notes, tools, seen, version) values(?,?,?,?,?,?,?) on conflict(id) do update set \
+                kind=excluded.kind, name=excluded.name, notes=excluded.notes, tools=excluded.tools, seen=excluded.seen, version=excluded.version",
+                args!(nid, s(&b["kind"]), s(&b["name"]), s(&b["notes"]), b["tools"].clone(), now(), s(&b["version"])));
             hive.bump();
             Res::json(&json!({ "ok": true, "version": hive.version }))
         }
