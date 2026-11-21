@@ -1,4 +1,4 @@
-//! The VM's own things: its screen, saved logins, and rebuilding Hive from its git checkout.
+//! The VM's own things: its screen, typing a saved login (cred.rs keeps them), and rebuilding Hive from its git checkout.
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
@@ -12,22 +12,14 @@ pub fn screen() -> Option<Vec<u8>> {
 }
 
 pub fn type_password(site: &str, username: &str) -> Result<String, String> {
-    let mut cmd = Command::new("hive-cred");
-    cmd.arg("secret").arg(site);
-    if !username.is_empty() { cmd.arg(username); }
-    let out = cmd.stderr(Stdio::piped()).output().map_err(|e| format!("couldn't run hive-cred: {e}"))?;
-    let v: Value = serde_json::from_slice(&out.stdout).map_err(|_| format!("No saved login for {site}: {}", String::from_utf8_lossy(&out.stderr).trim()))?;
-    if let Some(choices) = v["choices"].as_array() {
-        let names: Vec<String> = choices.iter().map(|c| c["username"].as_str().unwrap_or("?").to_string()).collect();
-        return Err(format!("{site} has several logins; give username, one of: {}", names.join(", ")));
-    }
-    let password = v["login"]["password"].as_str().ok_or(format!("No saved password for {site}"))?;
+    let login = crate::cred::pick(site, username)?;
+    let password = login["password"].as_str().ok_or(format!("No saved password for {site}"))?;
     let mut child = Command::new("xdotool").args(["type", "--delay", "40", "--file", "-"]).envs(x_env())
         .stdin(Stdio::piped()).spawn().map_err(|e| format!("couldn't run xdotool: {e}"))?;
     child.stdin.take().unwrap().write_all(password.as_bytes()).ok();
     let ok = child.wait().map(|s| s.success()).unwrap_or(false);
     if !ok { return Err("xdotool couldn't type on the VM's screen".into()); }
-    Ok(format!("Typed the password for {} ({}) into the focused field.", v["login"]["site"].as_str().unwrap_or(site), v["login"]["username"].as_str().unwrap_or("")))
+    Ok(format!("Typed the password for {} ({}) into the focused field.", login["url"].as_str().unwrap_or(site), login["username"].as_str().unwrap_or("")))
 }
 
 fn sh(cmd: &str, dir: &Path) -> (bool, String) {

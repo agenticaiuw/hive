@@ -1,0 +1,3 @@
+#!/bin/sh
+# The VM's saved logins (Hive's server keeps them; see server/src/cred.rs).
+exec sudo /opt/hive/target/release/hive-server cred "$@"
