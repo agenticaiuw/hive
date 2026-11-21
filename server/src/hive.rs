@@ -660,7 +660,7 @@ keep going. Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
 sends it on their behalf. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
-const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99 with a Chrome on it: \
-`export DISPLAY=:99 XAUTHORITY=$(ps -o args= -C Xvfb | grep -o -- '-auth [^ ]*' | cut -d' ' -f2)`, then `vm-shot > /tmp/s.png` and \
-view_image to see it, xdotool to click and type. Saved logins: `hive-cred list`, and vm_type_password types one. Hive's files \
+const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99: \
+`export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
+view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and vm_type_password types one. Hive's files \
 (shared with the dashboard and nodes) are in /var/lib/hive/files.";

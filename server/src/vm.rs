@@ -4,11 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-fn x_env() -> Vec<(String, String)> {
-    let ps = Command::new("ps").args(["-o", "args=", "-C", "Xvfb"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    let auth = ps.lines().find(|l| l.contains(" :99")).and_then(|l| l.split_whitespace().skip_while(|w| *w != "-auth").nth(1)).unwrap_or("").to_string();
-    vec![("DISPLAY".into(), ":99".into()), ("XAUTHORITY".into(), auth)]
-}
+fn x_env() -> [(&'static str, &'static str); 2] { [("DISPLAY", ":99"), ("XAUTHORITY", "/home/ubuntu/.Xauthority-99")] }
 
 pub fn screen() -> Option<Vec<u8>> {
     let out = Command::new("vm-shot").output().ok()?;

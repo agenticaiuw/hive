@@ -8,14 +8,7 @@ import { deflateSync, crc32 } from 'node:zlib';
 
 const run = (cmd, args, env) => execFileSync(cmd, args, { env, maxBuffer: 256 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
 
-// Xvfb picks a new auth file each time it starts, so look it up (as vm-screen-share does).
-const xvfb = run('ps', ['-o', 'args=', '-C', 'Xvfb']).toString().split('\n').find((line) => / :99( |$)/.test(line));
-const auth = xvfb?.match(/-auth (\S+)/)?.[1];
-if (!auth) {
-  process.stderr.write("The VM's screen (Xvfb :99) isn't running.\n");
-  process.exit(1);
-}
-const env = { ...process.env, DISPLAY: ':99', XAUTHORITY: auth };
+const env = { ...process.env, DISPLAY: ':99', XAUTHORITY: '/home/ubuntu/.Xauthority-99' };
 
 let target = ['-root'];
 if (process.argv.includes('--window')) {

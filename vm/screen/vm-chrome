@@ -1,6 +1,7 @@
 #!/bin/sh
-# The taskbar's Chrome: the worker's own browser and profile, the one Hive's agent signs in and works
-# in, opened with no remote control (ctl.mjs desktop-open). It closes when you close it or after 30
-# minutes; a Hive agent task that runs meanwhile gets a window of its own and leaves this one open.
-# The reply holds a one-time VNC password, so it is not kept anywhere.
-HIVE_VM_STATE=/home/ubuntu/hive-vm-agent/state exec /usr/local/bin/node /home/ubuntu/hive-vm-agent/app/ctl.mjs desktop-open >/dev/null 2>&1
+# The VM's Chrome on the agent's screen (:99), with its own profile: Hive's agent signs in and works in it, and the
+# taskbar opens it. It runs as ubuntu even when root starts it; a URL argument opens in the running one if there is one.
+[ "$(id -u)" = 0 ] && exec runuser -u ubuntu -- "$0" "$@"
+export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99 HOME=/home/ubuntu CHROME_DEVEL_SANDBOX=/opt/chromium/chrome_sandbox
+exec /opt/chromium/chrome --user-data-dir=/home/ubuntu/.config/vm-chrome --no-first-run --no-default-browser-check \
+  --password-store=basic --window-position=0,0 --window-size=1440,900 "$@" >/dev/null 2>&1

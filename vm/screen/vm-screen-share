@@ -1,9 +1,6 @@
 #!/bin/sh
 # Shares the VM agent's own desktop (Xvfb :99) for the owner's Mac. It listens only on the VM
 # itself, so the one way in is an SSH tunnel with the Mac's key ("VM Screen" app on the Mac).
-# Xvfb picks a new auth file each time it starts, so look it up instead of hard-coding it.
-auth=$(ps -o args= -C Xvfb | grep " :99 " | grep -o "\-auth [^ ]*" | cut -d" " -f2 | head -1)
-[ -n "$auth" ] || { echo "no Xvfb on :99 yet" >&2; exit 1; }
-exec /usr/bin/x11vnc -display :99 -auth "$auth" -localhost -rfbport 5901 \
+exec /usr/bin/x11vnc -display :99 -auth /home/ubuntu/.Xauthority-99 -localhost -rfbport 5901 \
   -passwdfile /home/ubuntu/.vnc/vm-screen.passwd -shared -forever -noxdamage -quiet \
   -o /home/ubuntu/.vnc/vm-screen.log
