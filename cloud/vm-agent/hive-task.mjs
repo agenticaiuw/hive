@@ -18,7 +18,8 @@
 //   node hive-task.mjs [--model m] [--effort e] [--keep-open] < task.txt   (or {"text"} as JSON)
 //   node hive-task.mjs --code DIR [--writable DIR]... [--env K=V]... [--effort e] < task.txt
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -26,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { call } from './ctl.mjs';
 import { Lease } from './devices.mjs';
 import { boardClient, boardConfig, runSender } from './orchestrator.mjs';
+import { readTaskCatalog } from './task-catalog.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAFE = /^[\w@%+=:,./~-]+$/;
@@ -94,6 +96,7 @@ to bring a Mac file here; use direction=to_mac with vm_path and mac_path to copy
 Tool discovery is local to this execution: a missing name in ALL_TOOLS alone does not prove the tool is absent.
 Also search deferred tools with tool_search for "mac transfer_file" when that search tool is available.
 If the mac tools are missing from your catalog, desktop.transfer_file provides the same file transfer.
+Hive exposes both namespaces as direct tools, outside functions.exec; call those direct tools when available.
 After Hive repairs a Mac file task, before retrying its work, discover transfer_file in this execution and call it
 with check_only=true and the intended direction and paths. Require ready=true in its result, then call again without
 check_only to copy. This checks the current tool route and Mac command support, not file existence or a completed copy.
@@ -175,6 +178,9 @@ export function codexArgs({ model, effort, workDir, appDir, stateDir, filesDir, 
     `HIVE_TASK_LABEL=${label}`, ...(tasksConfig ? [`HIVE_TASKS_CONFIG=${tasksConfig}`] : []), node, join(appDir, 'mac-mcp.mjs')];
   return ['exec', '--json', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check', '-s', 'read-only', '-C', workDir,
     '-m', model, '-c', `model_reasoning_effort=${toml(effort)}`, '-c', 'web_search="disabled"',
+    // The owner's models use code_mode_only. MCP registration alone did not prove that
+    // code mode exposed these tools. Like Hive on the Mac, give them a direct callable surface.
+    '-c', 'features.code_mode.direct_only_tool_namespaces=["mcp__desktop","mcp__mac"]',
     '-c', 'mcp_servers.desktop.command="sudo"', '-c', `mcp_servers.desktop.args=${toml(server)}`,
     // The desktop catalog includes the Mac file fallback. Load it before the first turn,
     // and fail startup instead of letting a task run with missing file tools.
@@ -298,8 +304,27 @@ async function main(argv) {
     ? codeArgs({ ...options, codeDir: options.code })
     : codexArgs({ ...options, workDir, appDir: here, stateDir, filesDir, stepsFile, label: taskLabel(id),
       improveFile: process.env.HIVE_IMPROVE_FILE ?? '' });
-  const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`, '/root/.local/bin/codex', ...args],
+  // A fresh task (including a repair retry) must supply its own evidence. A fixture app-server
+  // catalog, an earlier task's reply or an activated release is not proof of this exec's tools.
+  const traceDir = join(workDir, 'runtime-trace');
+  const catalogFile = join(workDir, 'runtime-catalog.json');
+  const sources = options.code ? null : Object.fromEntries(['hive-task.mjs', 'desktop-mcp.mjs', 'mac-mcp.mjs', 'mac-files.mjs']
+    .map(file => [file, createHash('sha256').update(readFileSync(join(here, file))).digest('hex')]));
+  if (!options.code) mkdirSync(traceDir, { mode: 0o700 });
+  const codex = spawn('sudo', ['-n', 'env', 'HOME=/root', `CODEX_HOME=${codexHome}`,
+    ...(!options.code ? [`CODEX_ROLLOUT_TRACE_ROOT=${traceDir}`] : []), '/root/.local/bin/codex', ...args],
     { stdio: ['pipe', 'pipe', 'pipe'] });
+  let threadId = '', catalog = null;
+  const audit = () => {
+    if (options.code || catalog) return;
+    catalog = readTaskCatalog(traceDir, threadId);
+    if (!catalog) return;
+    clearInterval(catalogTimer);
+    writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, sources })}\n`, { mode: 0o600 });
+    say(catalog.ok ? `Callable transfer catalog verified for thread ${threadId}.` : `❌ ${catalog.why}`);
+    if (!catalog.ok) codex.kill('SIGTERM');
+  };
+  const catalogTimer = options.code ? null : setInterval(audit, 250);
   // Stopped from outside (ssh hung up, a kill): the board says so instead of showing it working.
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     process.once(signal, async () => {
@@ -314,15 +339,36 @@ async function main(argv) {
   createInterface({ input: codex.stdout }).on('line', line => {
     appendFileSync(events, `${line}\n`);
     let event; try { event = JSON.parse(line); } catch { return; }
+    if (event.type === 'thread.started') threadId = event.thread_id;
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') last = event.item.text;
     const line2 = describe(event); if (line2) say(line2);
   });
   let errors = '';
   codex.stderr.on('data', chunk => { errors += chunk; appendFileSync(join(workDir, 'codex.err'), chunk); });
-  const status = await new Promise(resolve => codex.on('close', resolve));
+  const codexStatus = await new Promise(resolve => codex.on('close', resolve));
+  let status = codexStatus;
+  clearInterval(catalogTimer);
+  audit();
+  if (!options.code) {
+    if (!catalog?.ok) {
+      const why = catalog?.why ?? 'No model-visible transfer catalog was recorded for this owner task.';
+      writeFileSync(catalogFile, `${JSON.stringify({ ...catalog, thread_id: threadId, sources, ok: false, why })}\n`, { mode: 0o600 });
+      // runAgent reads the last agent_message, so the board must not retain a success claim
+      // from a process whose actual callable catalog failed verification.
+      appendFileSync(events, `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: why } })}\n`);
+      say(`❌ ${why}`);
+      status = 1;
+    }
+    // The raw trace includes prompts and tool results. Keep the compact verdict, not a second
+    // copy of the task history. Codex wrote these directories as root, so remove them as root.
+    await new Promise(resolve => {
+      const clean = spawn('sudo', ['-n', 'rm', '-rf', '--', traceDir], { stdio: 'ignore' });
+      clean.on('error', resolve); clean.on('close', resolve);
+    });
+  }
   if (!options.keepOpen && !options.code) await closeAfter(workDir, stateDir, taskLabel(id));
-  if (status !== 0) say(`❌ Codex exited with ${status}${errors.trim() ? `: ${errors.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
-  else say(`✅ Done. ${last ? '' : '(no report)'}`.trim());
+  if (codexStatus !== 0) say(`❌ Codex exited with ${codexStatus}${errors.trim() ? `: ${errors.trim().split('\n').slice(-3).join(' | ')}` : ''}`);
+  else if (status === 0) say(`✅ Done. ${last ? '' : '(no report)'}`.trim());
   await run?.done(status === 0 ? 'done' : 'failed');
   process.exit(status ?? 1);
 }
