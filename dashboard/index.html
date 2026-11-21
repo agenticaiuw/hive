@@ -75,7 +75,7 @@ async function login() {
   const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ secret: $('#secret').value }) });
   if (r.ok) { $('#login').hidden = true; start(); } else $('#loginerr').textContent = (await r.json()).error;
 }
-async function pairCode() { const r = await api('/api/pair/code', { method: 'POST' }); $('#code').textContent = `Code ${r.code} (10 min)`; }
+async function pairCode() { const r = await api('/api/pair/code', { method: 'POST' }); $('#code').textContent = `Address ${location.host} · code ${r.code} (10 min)`; }
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
   $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
