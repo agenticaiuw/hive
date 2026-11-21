@@ -1,0 +1,49 @@
+# Every push to main: GitHub builds what people download from agenticaiuw.com/hive (and what downloaded nodes update
+# themselves to), all under the release tagged `latest`.
+name: release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: true
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - run: |
+          cargo build --release -p hive --target aarch64-apple-darwin
+          cargo build --release -p hive --target x86_64-apple-darwin
+          mkdir out
+          lipo -create -output out/hive-macos target/aarch64-apple-darwin/release/hive target/x86_64-apple-darwin/release/hive
+          cp out/hive-macos hive && zip -q out/Hive-Mac.zip hive
+      - uses: actions/upload-artifact@v4
+        with: { name: mac, path: out }
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release -p hive
+      - shell: bash
+        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe && cp target/release/hive.exe out/Hive-Windows.exe
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: out }
+  publish:
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - run: cd browser && zip -qr ../out/Hive-Browser.zip . -x '.*'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f latest && git push -f origin latest
+          gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push. Get it from agenticaiuw.com/hive."
+          gh release upload latest out/* --clobber
+          gh release edit latest --notes "Built from main at ${GITHUB_SHA::12}. Get it from agenticaiuw.com/hive."
