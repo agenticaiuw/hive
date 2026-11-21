@@ -8,6 +8,33 @@ import { readTaskCatalog, requestCatalog } from './task-catalog.mjs';
 
 const transfer = { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema };
 const tools = [{ type: 'namespace', name: 'mcp__desktop', tools: [transfer] }];
+const exec = { type: 'custom', name: 'exec', description: `exec tool declaration:
+\`\`\`ts
+declare const tools: { mcp__desktop__transfer_file(args: {
+  check_only?: boolean;
+  direction: "to_vm" | "to_mac";
+  mac_path: string;
+  step: string;
+}): Promise<CallToolResult>; };
+\`\`\`` };
+const codeTools = [{ type: 'namespace', name: 'functions', tools: [exec] }];
+
+test('code mode requires the transfer in exec itself, including Responses Lite', () => {
+  for (const request of [{ tools: codeTools }, { input: [{ type: 'additional_tools', tools: codeTools }] }]) {
+    const catalog = requestCatalog(request, 'current');
+    assert.equal(catalog.ok, true);
+    assert.deepEqual(catalog.code_tools, ['mcp__desktop.transfer_file']);
+  }
+  for (const description of ['', 'mcp__desktop__transfer_file is available',
+    exec.description.replace('check_only?: boolean;', 'check_only?: string;'),
+    exec.description.replace('"to_vm" | ', ''),
+    exec.description.replace('mcp__desktop__transfer_file', 'mcp__mac__transfer_file')]) {
+    assert.equal(requestCatalog({ tools: [...tools,
+      { type: 'namespace', name: 'functions', tools: [{ ...exec, description }] }],
+      input: [{ type: 'message', content: [{ text: exec.description }] }],
+    }, 'current').ok, false, 'a direct schema or task words cannot prove code-mode exposure');
+  }
+});
 
 test('only a model-visible transfer schema verifies the catalog, including Responses Lite', () => {
   for (const request of [{ tools }, { input: [{ type: 'additional_tools', tools }] },
