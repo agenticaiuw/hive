@@ -15,11 +15,13 @@ const options = dir => ({ model: 'fixture', effort: 'low', workDir: dir, appDir:
   stateDir: dir, filesDir: join(dir, 'files'), stepsFile: join(dir, 'steps'), user: 'test', label: 'R42-1',
   tasksConfig: join(dir, 'board.json') });
 
-test('new and repaired tasks require the Mac catalog and a probe in the current execution', () => {
+test('new and repaired tasks require both transfer catalogs and a probe in the current execution', () => {
   for (const improveFile of ['', '/tmp/repair.json']) {
     const args = codexArgs({ ...options('/tmp/task'), improveFile });
-    assert.ok(args.includes('mcp_servers.mac.required=true'));
-    assert.ok(args.includes('mcp_servers.mac.startup_readiness="catalog"'));
+    for (const name of ['mac', 'desktop']) {
+      assert.ok(args.includes(`mcp_servers.${name}.required=true`));
+      assert.ok(args.includes(`mcp_servers.${name}.startup_readiness="catalog"`));
+    }
   }
   assert.match(GUIDE, /missing name in ALL_TOOLS alone does not prove the tool is absent/);
   assert.match(GUIDE, /search deferred tools with tool_search/);
@@ -88,10 +90,24 @@ test('Codex discovers, probes and transfers in each task thread, including a rep
   writeFileSync(join(dir, 'bin', 'sudo'), '#!/bin/sh\n[ "$1" = "-n" ] && [ "$2" = "-u" ] || exit 1\nshift 3\nexec "$@"\n', { mode: 0o755 });
   const preload = join(dir, 'fixture.mjs');
   writeFileSync(preload, `
-import { appendFileSync, existsSync, copyFileSync } from 'node:fs';
+import { appendFileSync, existsSync, copyFileSync, writeFileSync } from 'node:fs';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 const dir = ${JSON.stringify(dir)};
+// A connected process is not yet a usable catalog. Make that gap visible to thread/start.
+if (process.argv[1].endsWith('/desktop-mcp.mjs')) {
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...args) => {
+    if (String(chunk).includes('"tools":[')) {
+      setTimeout(() => {
+        writeFileSync(dir + '/desktop-listed', 'yes');
+        write(chunk, ...args);
+      }, 500);
+      return true;
+    }
+    return write(chunk, ...args);
+  };
+}
 globalThis.fetch = async (url, options) => {
   if (options.headers.authorization !== 'Bearer fixture') throw new Error('Wrong board config');
   if (url === 'https://board.invalid/v1/mac/status?tools=1') return Response.json({ macs: existsSync(dir + '/connected')
@@ -109,8 +125,9 @@ childProcess.execFile = (command, args, options, callback) => {
 };
 syncBuiltinESMExports();
 `);
-  for (const repaired of [false, true]) {
+  for (const [repaired, macEnabled] of [[false, true], [true, true], [true, false]]) {
     rmSync(join(dir, 'connected'), { force: true });
+    rmSync(join(dir, 'desktop-listed'), { force: true });
     const args = codexArgs({ ...options(dir), improveFile: repaired ? join(dir, 'repair.json') : '' });
     // Use every generated server setting. The empty home is the equivalent of exec's
     // --ignore-user-config; thread/start carries its cwd, sandbox, model and ephemeral flag.
@@ -121,38 +138,44 @@ syncBuiltinESMExports();
     }
     config.push('model_provider="fixture"', 'model_providers.fixture.name="Offline fixture"',
       'model_providers.fixture.base_url="http://127.0.0.1:1"', 'model_providers.fixture.wire_api="responses"');
+    // The fallback must remain callable when Codex has no Mac namespace at all.
+    if (!macEnabled) config.push('mcp_servers.mac.enabled=false');
     const rpc = client(t, config, dir);
     await rpc.request('initialize', { clientInfo: { name: 'hive-catalog-test', version: '1' }, capabilities: { experimentalApi: true } });
     const started = await rpc.request('thread/start', { cwd: dir, model: 'fixture', ephemeral: true,
       approvalPolicy: 'never', sandbox: 'read-only' });
+    assert.ok(existsSync(join(dir, 'desktop-listed')), 'thread/start must wait for the desktop catalog');
     const threadId = started.thread.id;
-    const catalog = await rpc.request('mcpServerStatus/list', { threadId, serverName: 'mac' });
-    const mac = catalog.data.find(s => s.name === 'mac');
-    assert.equal(mac?.runtimeStatus, 'connected');
-    assert.equal(mac.toolsError, null);
-    assert.deepEqual(Object.keys(mac.tools).sort(), ['run_command', 'transfer_file']);
-    assert.equal(mac.tools.transfer_file.inputSchema.properties.check_only.type, 'boolean');
-    const call = arguments_ => rpc.request('mcpServer/tool/call', { threadId, server: 'mac', tool: 'transfer_file', arguments: arguments_ });
-    const transfer = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Checking the fixture transfer.' };
-    const offline = await call({ ...transfer, check_only: true });
-    assert.equal(offline.isError, true, 'discovery is not proof the Mac is connected');
-    writeFileSync(join(dir, 'connected'), 'yes');
-    const before = existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '';
-    const probe = await call({ ...transfer, check_only: true });
-    assert.ok(!probe.isError, JSON.stringify(probe));
-    assert.deepEqual(JSON.parse(probe.content[0].text), { ready: true, copied: false, direction: 'to_vm', mac_path: '/Desktop/clip.mov' });
-    assert.equal(existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '', before);
-    const result = await call(transfer);
-    assert.ok(!result.isError, JSON.stringify(result));
-    const copied = JSON.parse(result.content[0].text);
-    assert.ok(copied.vm_path.startsWith(join(dir, 'files', 'transfers')));
-    assert.deepEqual(readFileSync(copied.vm_path), bytes);
-    assert.equal(copied.sha256, expected.sha256);
-    t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: thread catalog, live probe and verified copy passed`);
+    for (const namespace of macEnabled ? ['mac', 'desktop'] : ['desktop']) {
+      rmSync(join(dir, 'connected'), { force: true });
+      const catalog = await rpc.request('mcpServerStatus/list', { threadId, serverName: namespace });
+      const server = catalog.data.find(s => s.name === namespace);
+      assert.equal(server?.runtimeStatus, 'connected');
+      assert.equal(server.toolsError, null);
+      if (namespace === 'mac') assert.deepEqual(Object.keys(server.tools).sort(), ['run_command', 'transfer_file']);
+      assert.equal(server.tools.transfer_file.inputSchema.properties.check_only.type, 'boolean');
+      const call = arguments_ => rpc.request('mcpServer/tool/call', { threadId, server: namespace, tool: 'transfer_file', arguments: arguments_ });
+      const transfer = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', step: 'Checking the fixture transfer.' };
+      const offline = await call({ ...transfer, check_only: true });
+      assert.equal(offline.isError, true, 'discovery is not proof the Mac is connected');
+      writeFileSync(join(dir, 'connected'), 'yes');
+      const before = existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '';
+      const probe = await call({ ...transfer, check_only: true });
+      assert.ok(!probe.isError, JSON.stringify(probe));
+      assert.deepEqual(JSON.parse(probe.content[0].text), { ready: true, copied: false, direction: 'to_vm', mac_path: '/Desktop/clip.mov' });
+      assert.equal(existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '', before);
+      const result = await call(transfer);
+      assert.ok(!result.isError, JSON.stringify(result));
+      const copied = JSON.parse(result.content[0].text);
+      assert.ok(copied.vm_path.startsWith(join(dir, 'files', 'transfers')));
+      assert.deepEqual(readFileSync(copied.vm_path), bytes);
+      assert.equal(copied.sha256, expected.sha256);
+      t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace}${macEnabled ? '' : ' without mac MCP'} thread catalog, live probe and verified copy passed`);
+    }
     await rpc.close();
   }
   const calls = readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 10);
   assert.ok(calls.every(c => c.request === 42 && c.name === 'run_command'));
   assert.deepEqual(readFileSync(source), bytes);
 });
