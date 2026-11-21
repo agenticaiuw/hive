@@ -10,7 +10,7 @@ import { readTaskCatalog, transferProbeRequired, transferProbeSucceeded } from '
 
 const tools = [
   { type: 'function', name: 'mcp__desktop__transfer_file', parameters: TRANSFER_TOOL.inputSchema },
-  { type: 'function', name: 'mcp__mac__transfer_file', parameters: TRANSFER_TOOL.inputSchema },
+  { type: 'function', name: 'hivefiles__transfer_file', parameters: TRANSFER_TOOL.inputSchema },
   { type: 'function', name: 'mcp__mac__run_command', parameters: { type: 'object' } },
 ];
 const brief = "Continue the unfinished draft.\n\nHive just changed itself for this task, because it couldn't make a Mac-to-VM transfer callable:\nfixture on main\nCarry on from where the last run stopped, with the change.";

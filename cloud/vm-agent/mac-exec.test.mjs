@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { codexArgs, GUIDE } from './hive-task.mjs';
 import { requestCatalog } from './task-catalog.mjs';
-import { runRuntime } from './task-runtime.mjs';
+import { CATALOG_PROBE, STARTUP_PROBE, runRuntime } from './task-runtime.mjs';
 
 const codex = process.env.HIVE_TEST_CODEX ?? '/root/.local/bin/codex';
 const releaseCheck = process.env.HIVE_UPDATE_CHECK === '1';
@@ -73,7 +73,7 @@ globalThis.fetch = async (url, options) => {
     rmSync(join(dir, 'runtime-catalog.json.probe'), { force: true });
     rmSync(join(dir, 'transfer-probe.json'), { force: true });
     const namespace = 'hivefiles';
-    let requests = 0, failure, probed = false, codeMode = false;
+    let requests = 0, failure, probed = false, codeMode = false, activeThread = 'fixture-model-request';
     const respond = (res, item) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const events = [
@@ -91,32 +91,41 @@ globalThis.fetch = async (url, options) => {
         const chunks = []; for await (const chunk of req) chunks.push(chunk);
         const body = JSON.parse(Buffer.concat(chunks));
         requests++;
-        if (requests === 1) {
+        if (requests === 1 || (repaired && requests === 3)) {
+          if (repaired && requests === 1) {
+            assert.ok(JSON.stringify(body).includes(CATALOG_PROBE.split('\n')[0]));
+            assert.ok(!JSON.stringify(body).includes('Continue after the repair.'));
+          }
+          if (repaired && requests === 3) {
+            assert.ok(probed, 'the model probe must finish before the owner prompt');
+            assert.ok(JSON.stringify(body).includes('Continue after the repair.'));
+          }
           // Support both flat function names and namespaced tool definitions. Only accept
           // tools actually present without discovery; the MCP status endpoint isn't evidence.
           const functions = [...(body.tools ?? []),
             ...(body.input ?? []).filter(item => item.type === 'additional_tools').flatMap(item => item.tools ?? [])]
             .flatMap(tool => tool.type === 'namespace'
             ? tool.tools.map(fn => ({ ...fn, namespace: tool.name })) : [tool]);
-          const catalog = requestCatalog(body, 'fixture-model-request');
+          const catalog = requestCatalog(body, activeThread);
           assert.equal(catalog.ok, true, JSON.stringify(catalog));
+          if (repaired) assert.ok(![...catalog.tools, ...catalog.code_tools]
+            .some(name => /^mcp__(mac|hivefiles|desktop)\./.test(name)), 'exercise the missing MCP catalog');
           writeFileSync(join(dir, 'runtime-catalog.json'), JSON.stringify({ ...catalog, probe_required: repaired }));
-          const probe = { direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
+          const probe = repaired && requests === 1 ? STARTUP_PROBE : { direction: 'to_vm', mac_path: '/Desktop/clip.mov', check_only: true,
             step: 'Checking transfer before continuing the fixture task.' };
           const exec = functions.find(tool => tool.namespace === 'functions' && tool.name === 'exec');
           if (repaired) assert.ok(exec, 'the repaired task must exercise code mode');
           if (exec) {
             codeMode = true;
-            assert.ok(catalog.code_tools.includes(`mcp__${namespace}.transfer_file`));
-            const name = `mcp__${namespace}__transfer_file`;
+            const name = repaired ? 'hivefiles__transfer_file' : `mcp__${namespace}__transfer_file`;
+            assert.ok(catalog.code_tools.includes(repaired ? 'hivefiles.transfer_file' : `mcp__${namespace}.transfer_file`));
             assert.ok(exec.description.includes(`declare const tools: { ${name}(`));
-            respond(res, { id: 'call-fixture', type: 'custom_tool_call', call_id: 'transfer-probe',
+            respond(res, { id: `call-fixture-${requests}`, type: 'custom_tool_call', call_id: `transfer-${requests}`,
               name: exec.name, namespace: exec.namespace,
               input: `const name = ${JSON.stringify(name)};
                 if (!ALL_TOOLS.some(t => t.name === name) || typeof tools[name] !== 'function')
                   throw new Error('Transfer is missing from this execution');
-                text(await tools[name]({ direction: 'to_vm', mac_path: '/Desktop/clip.mov',
-                  check_only: true, step: 'Checking transfer before continuing the fixture task.' }));` });
+                text(await tools[name](${JSON.stringify(probe)}));` });
             return;
           }
           const transfer = functions.find(tool => tool.name === `mcp__${namespace}__transfer_file`
@@ -129,8 +138,9 @@ globalThis.fetch = async (url, options) => {
             arguments: JSON.stringify(probe) });
           return;
         }
-        assert.equal(requests, 2);
-        const output = body.input.find(item => ['function_call_output', 'custom_tool_call_output'].includes(item.type) && item.call_id === 'transfer-probe');
+        assert.ok(requests === 2 || (repaired && requests === 4));
+        const output = body.input.find(item => ['function_call_output', 'custom_tool_call_output'].includes(item.type)
+          && item.call_id === (codeMode ? `transfer-${requests - 1}` : 'transfer-probe'));
         assert.ok(output, 'the same agent turn must receive the probe result');
         assert.match(JSON.stringify(output.output), /ready[^a-z]+true/);
         assert.match(JSON.stringify(output.output), /copied[^a-z]+false/);
@@ -151,7 +161,14 @@ globalThis.fetch = async (url, options) => {
       '-c', `model_providers.fixture.base_url="http://127.0.0.1:${server.address().port}"`,
       '-c', 'model_providers.fixture.wire_api="responses"', '-c', 'model_providers.fixture.request_max_retries=0',
       '-c', 'model_providers.fixture.stream_max_retries=0');
-    if (repaired) args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
+    if (repaired) {
+      args.push('-c', `model_catalog_json=${JSON.stringify(models)}`);
+      // Reproduce the reported runtime: MCP registration works but none of its Mac
+      // or transfer namespaces reach ALL_TOOLS. The thread-bound tool must still work.
+      for (const name of ['mac', 'hivefiles', 'desktop']) {
+        args.push('-c', `mcp_servers.${name}.omit_tools_from=["code_mode","deferred","direct"]`);
+      }
+    }
     if (!macEnabled) args.push('-c', 'mcp_servers.mac.enabled=false');
     args.push('-');
     let errors = '', events = '';
@@ -164,7 +181,10 @@ globalThis.fetch = async (url, options) => {
       runtime = runRuntime({ command: codex,
         args: ['app-server', ...args.flatMap((arg, i) => args[i - 1] === '-c' ? ['-c', arg] : [])],
         env, model: 'fixture', effort: 'low', workDir: dir, prompt,
-        emit: event => { events += `${JSON.stringify(event)}\n`; },
+        emit: event => {
+          if (event.type === 'thread.started') activeThread = event.thread_id;
+          events += `${JSON.stringify(event)}\n`;
+        },
         spawnProcess: (command, argv, options) => (child = spawn(command, argv, { ...options, cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] })),
       });
     } else child = spawn(codex, args, { cwd: dir, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -205,7 +225,7 @@ globalThis.fetch = async (url, options) => {
     const calls = events.trim().split('\n').map(JSON.parse).filter(e => e.type === 'item.completed' && e.item?.type === 'mcp_tool_call');
     if (!codeMode) assert.ok(calls.some(e => e.item.tool === 'transfer_file' && e.item.status === 'completed'), events);
     else assert.deepEqual(JSON.parse(readFileSync(join(dir, 'runtime-catalog.json.probe'), 'utf8')),
-      { thread_id: 'fixture-model-request', ready: true }, 'code mode must leave server evidence for task completion');
+      { thread_id: activeThread, ready: true }, 'code mode must leave server evidence for task completion');
     t.diagnostic(`${repaired ? 'repair retry' : 'new task'}: ${namespace} ${codeMode ? 'found in ALL_TOOLS and invoked through functions.exec' : 'visible directly and probe invoked'}`);
   }
 });

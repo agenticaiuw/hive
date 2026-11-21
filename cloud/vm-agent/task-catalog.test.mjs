@@ -20,6 +20,23 @@ declare const tools: { mcp__hivefiles__transfer_file(args: {
 \`\`\`` };
 const codeTools = [{ type: 'namespace', name: 'functions', tools: [exec] }];
 
+test('a thread-bound transfer is callable without any model-visible MCP namespace', () => {
+  const direct = [{ type: 'namespace', name: 'hivefiles', tools: [transfer] }];
+  const declaration = exec.description.replace('mcp__hivefiles__', 'hivefiles__');
+  const code = [{ type: 'namespace', name: 'functions', tools: [{ ...exec, description: declaration }] }];
+  for (const catalog of [direct, code, [{ ...transfer, name: 'hivefiles__transfer_file' }]]) {
+    for (const request of [{ tools: catalog }, { input: [{ type: 'additional_tools', tools: catalog }] }]) {
+      const verdict = requestCatalog(request, 'current');
+      assert.equal(verdict.ok, true);
+      assert.ok([...verdict.tools, ...verdict.code_tools].includes('hivefiles.transfer_file'));
+    }
+  }
+  assert.equal(requestCatalog({ tools: [...direct, { type: 'namespace', name: 'functions',
+    tools: [{ ...exec, description: '' }] }] }, 'current').ok, false);
+  assert.equal(requestCatalog({ tools: [{ type: 'namespace', name: 'functions',
+    tools: [{ ...exec, description: declaration.replace('check_only?: boolean;', '') }] }] }, 'current').ok, false);
+});
+
 test('only transfer repair continuations need a live probe before acting', () => {
   assert.equal(needsTransferProbe('Use the VM browser.'), false);
   assert.equal(needsTransferProbe(againBrief('Continue.', { what: 'Fix browser zoom' }, 'fixture')), false);

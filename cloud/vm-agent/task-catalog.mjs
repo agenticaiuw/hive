@@ -5,6 +5,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+const toolName = name => name.replace(/^(mcp__[^_]+|hivefiles)__(.+)$/, '$1.$2');
+
 export function requestCatalog(request, threadId) {
   const tools = new Map();
   for (const tool of [...(request.tools ?? []),
@@ -13,7 +15,7 @@ export function requestCatalog(request, threadId) {
       for (const child of tool.tools ?? []) tools.set(`${tool.name}.${child.name}`, child);
     } else if (tool.name) {
       // Older runtimes flatten an MCP namespace into the function name.
-      tools.set(tool.name.replace(/^(mcp__[^_]+)__(.+)$/, '$1.$2'), tool);
+      tools.set(toolName(tool.name), tool);
     }
   }
   // Code mode declares its callable methods inside exec, not as top-level tools. Only
@@ -21,11 +23,11 @@ export function requestCatalog(request, threadId) {
   const exec = tools.get('functions.exec') ?? tools.get('exec');
   const codeTools = new Map();
   for (const match of (exec?.description ?? '').matchAll(/declare const tools: \{ (\w+)\(args: \{([\s\S]*?)\}\): Promise<[^;]+>; \};/g)) {
-    codeTools.set(match[1].replace(/^(mcp__[^_]+)__(.+)$/, '$1.$2'), match[2].replace(/^\s*\/\/.*$/gm, ''));
+    codeTools.set(toolName(match[1]), match[2].replace(/^\s*\/\/.*$/gm, ''));
   }
   // When exec is present, a direct-only schema cannot prove the route the task uses.
   // The stable desktop fallback remains callable alongside the dedicated server.
-  const ok = ['mcp__hivefiles.transfer_file', 'mcp__desktop.transfer_file'].some(name => {
+  const ok = ['hivefiles.transfer_file', 'mcp__hivefiles.transfer_file', 'mcp__desktop.transfer_file'].some(name => {
     const transfer = tools.get(name);
     const schema = transfer?.parameters ?? transfer?.inputSchema;
     const declaration = codeTools.get(name) ?? '';

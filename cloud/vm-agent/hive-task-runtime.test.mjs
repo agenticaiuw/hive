@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TRANSFER_TOOL } from './mac-files.mjs';
 
-for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'probe', 'no-probe', 'stale-probe', 'missing-mac', 'startup-failed', 'code']) {
+for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only', 'missing-tool', 'other-thread', 'no-trace', 'probe', 'no-probe', 'stale-probe', 'missing-bound-tool', 'startup-failed', 'code']) {
   test(`owner task completion checks its own runtime catalog: ${evidence}`, { timeout: 10000 }, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hive-task-runtime-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -36,12 +36,11 @@ for (const evidence of ['current', 'code-mode', 'code-mode-lite', 'direct-only',
     }));
     writeFileSync(join(dir, 'event.json'), JSON.stringify({ thread_id: evidence === 'other-thread' ? 'old' : 'current',
       payload: { type: 'inference_started', request_payload: { path: 'payloads/1.json' } } }));
-    const repaired = ['probe', 'no-probe', 'stale-probe', 'missing-mac', 'startup-failed'].includes(evidence);
-    if (repaired && evidence !== 'missing-mac') {
+    const repaired = ['probe', 'no-probe', 'stale-probe', 'missing-bound-tool', 'startup-failed'].includes(evidence);
+    if (repaired && evidence !== 'missing-bound-tool') {
       const request = JSON.parse(readFileSync(join(dir, 'request.json'), 'utf8'));
-      request.tools.push({ type: 'namespace', name: 'mcp__mac', tools: [
+      request.tools.push({ type: 'namespace', name: 'hivefiles', tools: [
         { type: 'function', name: 'transfer_file', parameters: TRANSFER_TOOL.inputSchema },
-        { type: 'function', name: 'run_command', parameters: { type: 'object' } },
       ] });
       writeFileSync(join(dir, 'request.json'), JSON.stringify(request));
     }
