@@ -210,3 +210,14 @@ mod tests {
         assert_eq!(super::modifier("cmd"), Some(0x5B));
     }
 }
+
+#[link(name = "kernel32")]
+extern "system" { fn SetThreadExecutionState(flags: u32) -> u32; }
+
+/// A home Hive stays up: Windows doesn't sleep while the app runs, and the app opens at sign-in.
+pub fn stay_on() {
+    std::thread::spawn(|| { unsafe { SetThreadExecutionState(0x8000_0001) }; loop { std::thread::park() } });
+    let exe = std::env::current_exe().unwrap_or_default();
+    Command::new("reg").args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Hive", "/t", "REG_SZ", "/d",
+        &format!("\"{}\"", exe.display()), "/f"]).creation_flags(NO_WINDOW).status().ok();
+}

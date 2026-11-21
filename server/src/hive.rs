@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 pub struct Hive {
     pub db: Db,
     pub state: PathBuf,
-    pub repo: PathBuf,
+    /// On the VM, Hive's checkout, which Hive changes itself from; None on a home computer.
+    pub repo: Option<PathBuf>,
     pub codex_cmd: String,
     pub codex_env: Vec<(String, String)>,
     pub owner_key: String,
@@ -48,7 +49,7 @@ pub fn list(v: &Value) -> Vec<String> {
 }
 
 impl Hive {
-    pub fn new(db: Db, state: PathBuf, repo: PathBuf, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String) -> Arc<Hive> {
+    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String) -> Arc<Hive> {
         Arc::new(Hive {
             db, state, repo, codex_cmd, codex_env, owner_key, version,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
@@ -178,7 +179,8 @@ impl Hive {
         for r in self.db.all("select id, text, scope from rules where active=1 order by id", &[]) {
             t += &format!("R{} [{}] {}\n", r["id"], s(&r["scope"]), s(&r["text"]));
         }
-        t += "\nNodes: vm (the VM's shell and its own Chrome; always there), hive (changing Hive's own code)";
+        t += if self.repo.is_some() { "\nNodes: vm (the VM's shell and its own Chrome; always there), hive (changing Hive's own code)" }
+            else { "\nNodes: vm (the shell of the computer Hive runs on; always there)" };
         for n in self.db.all("select kind, name, notes, seen from nodes order by kind", &[]) {
             let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline now" };
             t += &format!(", {} ({}, {on}: {})", s(&n["kind"]), s(&n["name"]), s(&n["notes"]));
@@ -271,10 +273,16 @@ impl Hive {
             t += &if scope.is_empty() { format!("- R{} {}\n", r["id"], s(&r["text"])) } else { format!("- R{} [{scope}] {}\n", r["id"], s(&r["text"])) };
         }
         t += "\nWhere you work:\n";
-        t += VM_NOTES;
-        if nodes.iter().any(|n| n == "hive") {
-            t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. \
-                Commit with a clear message, then call reinstall; devices with a checkout of Hive pick the commit up from here.", self.repo.display());
+        match &self.repo {
+            Some(repo) => {
+                t += VM_NOTES;
+                if nodes.iter().any(|n| n == "hive") {
+                    t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. \
+                        Commit with a clear message, then call reinstall; devices with a checkout of Hive pick the commit up from here.", repo.display());
+                }
+            }
+            None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
+                with the dashboard and nodes) are in {}.", self.state.join("files").display()),
         }
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
             if nodes.contains(&s(&n["kind"])) && !s(&n["notes"]).is_empty() { t += &format!("\n- {}", s(&n["notes"])); }
@@ -290,7 +298,7 @@ impl Hive {
         let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, 'codex', ?, 'working', ?, ?)",
             args!(task_id, short(&s(&task["title"]), 60), now(), now()));
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
-        let cwd = if nodes.iter().any(|n| n == "hive") { self.repo.clone() } else { self.state.join("work").join(task_id.to_string()) };
+        let cwd = match &self.repo { Some(r) if nodes.iter().any(|n| n == "hive") => r.clone(), _ => self.state.join("work").join(task_id.to_string()) };
         std::fs::create_dir_all(&cwd).ok();
         let result = (|| {
             let codex = self.codex()?;
@@ -489,14 +497,15 @@ impl Hive {
 
     /// The device kinds Hive knows, for the planner.
     fn kinds(&self) -> Vec<String> {
-        let mut k = vec!["vm".to_string(), "hive".to_string()];
+        let mut k = vec!["vm".to_string()];
+        if self.repo.is_some() { k.push("hive".into()); }
         k.extend(self.db.all("select distinct kind from nodes order by kind", &[]).iter().map(|r| s(&r["kind"])));
         k
     }
 
     /// Every tool a task on these devices gets: the cloud's, then each device's (the most recently seen device of a kind wins).
     fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
-        let mut out: Vec<Value> = tools::cloud(kinds);
+        let mut out: Vec<Value> = tools::cloud(kinds, self.repo.is_some());
         let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
         for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
             if !kinds.contains(&s(&n["kind"])) { continue; }
@@ -568,7 +577,7 @@ impl Hive {
                 return Ok(json!(rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")));
             }
             "vm_type_password" => return crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
-            "reinstall" => return crate::vm::reinstall(&self.repo),
+            "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
             "page_code" => {
                 let code = json!({ "css": s(&a["css"]), "js": s(&a["js"]) }).to_string();
                 let rule = a["rule"].as_i64().unwrap_or(0);
@@ -591,7 +600,7 @@ impl Hive {
         if let (Some(data), Some(fname)) = (r["data"].as_str(), r["name"].as_str()) {
             let bytes = b64::decode(data).ok_or("the device sent a broken file")?;
             let path = self.save_file(fname, &bytes, &s(&node["kind"]));
-            r = json!({ "text": format!("{}Saved on the VM at {}", r["text"].as_str().map(|t| format!("{t}\n")).unwrap_or_default(), path.display()) });
+            r = json!({ "text": format!("{}Saved at {}", r["text"].as_str().map(|t| format!("{t}\n")).unwrap_or_default(), path.display()) });
         }
         Ok(r)
     }
@@ -653,7 +662,7 @@ independent. A site rule about what its pages show or do also needs a browser ta
 session become tasks that session does itself.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
-server runs on this VM (where you run, as root) and reaches the owner's devices. Work until the task is \
+server runs on the computer you run on and reaches the owner's devices. Work until the task is \
 done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
 what you need from the owner. Done means every part of what the owner asked for is done; if any part isn't, it's not done. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
 keep going. Never send a message \

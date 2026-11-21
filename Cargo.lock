@@ -1007,9 +1007,11 @@ version = "0.1.0"
 dependencies = [
  "global-hotkey",
  "hive-protocol",
+ "hive-server",
  "muda",
  "serde_json",
  "tao",
+ "ureq",
  "wry",
 ]
 

@@ -10,14 +10,13 @@ use std::sync::Arc;
 const DASHBOARD: &str = include_str!("../../dashboard/index.html");
 const ICON: &[u8] = include_bytes!("../../dashboard/icon.png");
 /// Lets a phone keep the dashboard on its home screen as the Hive app.
-const MANIFEST: &str = r##"{"name":"Hive","short_name":"Hive","start_url":"/","display":"standalone","background_color":"#161412","theme_color":"#161412","icons":[{"src":"/icon.png","sizes":"180x180","type":"image/png"}]}"##;
+const MANIFEST: &str = r##"{"name":"Hive","short_name":"Hive","start_url":"./","display":"standalone","background_color":"#161412","theme_color":"#161412","icons":[{"src":"icon.png","sizes":"180x180","type":"image/png"}]}"##;
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_default() }
 pub fn hash(t: &str) -> String { Sha256::digest(t.as_bytes()).iter().map(|b| format!("{b:02x}")).collect() }
 pub fn random(n: usize) -> String {
     let mut b = vec![0u8; n];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).ok();
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).ok();
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -171,14 +170,15 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!(hive.db.all(&format!("select * from {table} order by rowid desc limit ? offset ?"),
                 args!(req.q("limit").parse::<i64>().unwrap_or(100), req.q("offset").parse::<i64>().unwrap_or(0)))))
         }
-        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()]) })].into_iter()
+        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()], hive.repo.is_some()) })].into_iter()
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
         ("GET", ["api", "git", "bundle"]) => {
             // Only the commits the device lacks, when it says which one it has.
             let have = req.q("have").chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>();
-            let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&hive.repo).args(a).output();
+            let Some(repo) = &hive.repo else { return Res::err(404, "This Hive has no checkout to share") };
+            let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(repo).args(a).output();
             let known = !have.is_empty() && git(&["cat-file", "-e", &format!("{have}^{{commit}}")]).map(|o| o.status.success()).unwrap_or(false);
             let range = if known { format!("{have}..HEAD") } else { "HEAD".into() };
             match git(&["bundle", "create", "-", &range]) {
@@ -224,7 +224,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let tasks = hive.db.all("select id, title, status from tasks where agent_id=? and status in ('working','needs')", args!(agent));
             Res::json(&json!({ "messages": rows, "tasks": tasks }))
         }
-        ("POST", ["api", "reinstall"]) => match crate::vm::reinstall(&hive.repo) { Ok(v) => Res::json(&v), Err(e) => Res::err(500, &e) },
+        ("POST", ["api", "reinstall"]) => match hive.repo.as_ref().ok_or("Hive isn't on a VM here".to_string()).and_then(|r| crate::vm::reinstall(r)) { Ok(v) => Res::json(&v), Err(e) => Res::err(500, &e) },
         ("GET", ["api", "sites", name, "data"]) => Res::new(200, "application/json",
             std::fs::read(hive.state.join("sites").join(clean(name)).join("data.json")).unwrap_or(b"{}".to_vec())),
         ("PUT", ["api", "sites", name, "data"]) => {
