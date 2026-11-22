@@ -130,9 +130,13 @@ fn update(c: &Conf, package: &str) -> Result<(), String> {
     r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let bundle = std::env::temp_dir().join(format!("hive-{}.bundle", std::process::id()));
     std::fs::write(&bundle, bytes).map_err(|e| e.to_string())?;
+    // An app started from Finder or at login gets only the system PATH, without rustup's ~/.cargo/bin.
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(PathBuf::from(&home).join(".cargo").join("bin"))
+        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap_or_default();
     let run = |args: &[&str]| -> Result<(), String> {
         let o = std::process::Command::new(args[0]).args(&args[1..]).current_dir(&c.repo).env("CARGO_TARGET_DIR", PathBuf::from(&c.repo).join("target"))
-            .output().map_err(|e| e.to_string())?;
+            .env("PATH", &path).output().map_err(|e| e.to_string())?;
         if o.status.success() { Ok(()) } else { Err(format!("{}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim())) }
     };
     let b = bundle.to_string_lossy().into_owned();
