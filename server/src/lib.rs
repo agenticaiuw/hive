@@ -61,7 +61,13 @@ pub fn setup(state: &Path, say: &dyn Fn(&str)) -> Result<PathBuf, String> {
         _ => format!("{arch}-unknown-linux-musl.tar.gz"),
     };
     say("Getting Codex, the AI behind Hive's agents…");
-    let codex = fetch(&bin, "codex", &format!("https://github.com/openai/codex/releases/latest/download/codex-{target}"))?;
+    // Codex runs agents' tool calls through its code-mode host, which sits beside it: both come from one release.
+    let latest = |name: &str| fetch(&bin, name, &format!("https://github.com/openai/codex/releases/latest/download/{name}-{target}"));
+    if !bin.join(if cfg!(windows) { "codex-code-mode-host.exe" } else { "codex-code-mode-host" }).exists() {
+        std::fs::remove_file(bin.join(if cfg!(windows) { "codex.exe" } else { "codex" })).ok();
+    }
+    let codex = latest("codex")?;
+    latest("codex-code-mode-host")?;
     if !codex_home.join("auth.json").exists() {
         say("Sign in to ChatGPT (Hive's agents work with your ChatGPT account): open the link below on any device and enter the code.");
         Command::new(&codex).args(["login", "--device-auth"]).env("CODEX_HOME", &codex_home).status().ok();

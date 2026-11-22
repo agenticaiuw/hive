@@ -1,6 +1,16 @@
 // What the worker and the popup share: this browser's connection to Hive's server (protocol/README.md).
 
-export const conf = async () => (await chrome.storage.local.get('hive')).hive || null;
+export const conf = async () => (await chrome.storage.local.get('hive')).hive || (joining ||= fromApp().catch(() => null).finally(() => { joining = null; }));
+
+/** Hive for Safari comes inside the Mac app: it asks the app's extension handler for the Mac's pairing and connects as a
+ * device of its own, with no link and even with the app closed. Elsewhere there is no handler, so it waits for a link. */
+let joining;
+async function fromApp() {
+  const mac = await chrome.runtime.sendNativeMessage?.('app.hive.mac', {});
+  if (!mac?.server || !mac?.token) return null;
+  const { code } = await api(mac, '/api/pair/code', {});
+  return pair(`${mac.server}/#pair=${code}`);
+}
 
 /** Call Hive's server. JSON in and out; null for 204. */
 export async function api(c, path, body, method) {

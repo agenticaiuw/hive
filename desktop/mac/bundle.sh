@@ -29,20 +29,29 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$tmp/Hive.iconset" -o "$new/Contents/Resources/Hive.icns"
 
-# Hive for Safari: the same extension as Chrome's, which Safari loads through this do-nothing class.
+# Hive for Safari: the same extension as Chrome's. Its one native piece hands it the Mac's pairing (read-only), so it connects
+# to Hive by itself, with the app open or not.
 cp -R browser/ "$ext/Contents/Resources/"
 plist app.hive.mac.safari HiveSafari XPC! '<key>NSExtension</key><dict><key>NSExtensionPointIdentifier</key><string>com.apple.Safari.web-extension</string><key>NSExtensionPrincipalClass</key><string>SafariWebExtensionHandler</string></dict>' > "$ext/Contents/Info.plist"
 cat > "$tmp/Safari.swift" <<'EOF'
 import Foundation
+import SafariServices
 @objc(SafariWebExtensionHandler) class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
-    func beginRequest(with context: NSExtensionContext) { context.completeRequest(returningItems: nil) }
+    func beginRequest(with context: NSExtensionContext) {
+        let home = String(cString: getpwuid(getuid())!.pointee.pw_dir)
+        let data = (try? Data(contentsOf: URL(fileURLWithPath: home + "/.config/hive/node.json"))) ?? Data()
+        let conf = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let item = NSExtensionItem()
+        item.userInfo = [SFExtensionMessageKey: ["server": conf["server"] ?? "", "token": conf["token"] ?? ""]]
+        context.completeRequest(returningItems: [item])
+    }
 }
 EOF
 for a in arm64 x86_64; do
   swiftc -O -parse-as-library -application-extension -module-name HiveSafari -target $a-apple-macos13 "$tmp/Safari.swift" -Xlinker -e -Xlinker _NSExtensionMain -o "$tmp/$a"
 done
 lipo -create -output "$ext/Contents/MacOS/HiveSafari" "$tmp/arm64" "$tmp/x86_64"
-printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>' > "$tmp/sandbox.plist"
+printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/><key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key><array><string>/.config/hive/</string></array></dict></plist>' > "$tmp/sandbox.plist"
 
 id=$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID Application/ { print $2; exit }')
 sign() { if [ -n "$id" ]; then codesign -f -s "$id" -o runtime --timestamp "$@"; else codesign -f -s - "$@"; fi; }
