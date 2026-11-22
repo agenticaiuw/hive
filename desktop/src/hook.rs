@@ -13,10 +13,10 @@ pub fn run() {
     let session = e["session_id"].as_str().unwrap_or("");
     let event = e["hook_event_name"].as_str().unwrap_or("");
     let mut out = String::new();
-    // Claude Code also delivers its own events (a background job finished, another session reported) as prompts: those
+    // Claude Code also delivers its own events (a background job finished, another session wrote) as prompts: those
     // aren't the owner's words, so they don't go to the orchestrator.
     let prompt = e["prompt"].as_str().unwrap_or("").trim_start();
-    let from_owner = !["<task-notification>", "<side-sessions-event>", "<ci-monitor-event>"].iter().any(|t| prompt.starts_with(t));
+    let from_owner = !["<task-notification>", "<side-sessions-event>", "<ci-monitor-event>", "<cross-session-message"].iter().any(|t| prompt.starts_with(t));
     if event == "UserPromptSubmit" && from_owner {
         let body = json!({ "text": e["prompt"], "node": crate::os::KIND, "agent": format!("claude:{session}"), "context": { "folder": e["cwd"] } });
         if let Ok((200, r)) = hive_protocol::call(&c, "POST", "/api/requests?wait=1", Some(&body), 180) {
