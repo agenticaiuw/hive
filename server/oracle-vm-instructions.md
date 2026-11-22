@@ -6,7 +6,13 @@
 
 You will need to connect a credit card, verify your email, and set up two factor authentication.
 
+TODO: the free tier / trial has issues creating the ampere ARM VM (always free) with region limitations. It seems that using a pay as you go account gives better region/datacenter availability and a higher rate of success to get an always free VM provisioned without the unavailability error.
+
+- Reference: [see conversations on this github gist](https://gist.github.com/rssnyder/51e3cfedd730e7dd5f4a816143b25dbd?permalink_comment_id=6341439)
+
 ## Create a VM Instance
+
+TODO: investigate approach using cloud shell (and terraform) to automate provisioning using IaC.
 
 [Navigate to the Compute Instances section of Oracle cloud dashboard](https://cloud.oracle.com/compute/instances)
 Click "create instance"
@@ -38,3 +44,11 @@ Click next, and continue through the storage section with the default option for
 Finally, select create.
 
 You might have an issue with there not being any available VMs. You will need to be patient
+
+## TODO: Configuration management with Ansible
+
+The goal is that all of our VMs across the multiple club memebers' Oracle cloud accounts configured to have the same exact state (no config drift).
+
+There's some operational friction to getting a centralized ansiblie deployment going -- mainly how do we manage secrets/API keys across multiple accounts.
+
+Maybe we investigate how we can have different Oracle cloud accounts into a single Oracle cloud organization? Or, putting everyone's keys as secrets in some secret database... but since everyone has their credit card attatched to their (personal) accounts, we need to be highly scrutionous with our security and minimizing any attack surface, and establishing lowest possible level of trust (i.e. cloud team leads only can access keys, and multiple step approval process before any action using API keys)
