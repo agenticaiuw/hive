@@ -24,7 +24,8 @@ button { margin-top: 8px; padding: 8px 16px; font: inherit; border-radius: 8px; 
 <main><h2>Set up Hive</h2><p>Hive's agents use your computers, phone and browser for you, with your ChatGPT account.</p>
 <button onclick="go('home')">Make this computer my Hive</button>
 <p class="muted">Best on a computer that can stay on and plugged in, like an old laptop. You sign in to ChatGPT once; Hive then
-opens whenever this computer starts.</p><hr>
+opens whenever this computer starts. Your Hive gets its secure address from Let's Encrypt: choosing this agrees to their
+<a href="https://letsencrypt.org/repository/">terms</a>.</p><hr>
 <p>Already have a Hive? On its dashboard choose <b>Pair a device</b>, then paste the link here.</p>
 <form onsubmit="event.preventDefault(); go(l.value)"><input id="l" placeholder="Pairing link"><button>Connect</button></form>
 <p id="m"></p></main><script>function go(x) { m.textContent = '…'; ipc.postMessage(x) } function say(t) { m.textContent = t }</script>"#;

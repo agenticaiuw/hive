@@ -1,9 +1,0 @@
-// Deploy: npx wrangler deploy (from relay/), on the club's Cloudflare account.
-{
-  "name": "hive-relay",
-  "main": "worker.js",
-  "compatibility_date": "2026-11-01",
-  "routes": [{ "pattern": "home.agenticaiuw.com", "custom_domain": true }],
-  "durable_objects": { "bindings": [{ "name": "HOME", "class_name": "Home" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Home"] }]
-}
