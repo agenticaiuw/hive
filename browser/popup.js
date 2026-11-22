@@ -46,9 +46,4 @@ $('pair').onsubmit = async (e) => {
     $('pairNote').textContent = err.message;
   }
 };
-$('disconnect').onclick = async (e) => {
-  e.preventDefault();
-  await chrome.storage.local.remove('hive');
-  show();
-};
 show();

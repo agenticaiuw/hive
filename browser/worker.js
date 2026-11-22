@@ -175,4 +175,4 @@ const pageJs = async ({ tabId, frameId, url }) => {
   for (const { js } of await pageCode(url)) if (js) runJs(tabId, js).catch((e) => console.warn('Hive rule:', e.message));
 };
 chrome.webNavigation.onCompleted.addListener(pageJs);
-chrome.webNavigation.onHistoryStateUpdated.addListener(pageJs);
+chrome.webNavigation.onHistoryStateUpdated?.addListener(pageJs); // Safari has no onHistoryStateUpdated

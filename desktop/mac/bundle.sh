@@ -1,6 +1,6 @@
 #!/bin/sh
 # Hive.app for Mac: the hive program (desktop/) with Hive for Safari (browser/) inside, signed with this Mac's Developer ID
-# if it has one (ad hoc if not). Usage: desktop/mac/bundle.sh [where, default target/Hive.app] [program, default target/release/hive]
+# if it has one (ad hoc if not) and notarized if it can be. Usage: desktop/mac/bundle.sh [where, default target/Hive.app] [program, default target/release/hive]
 set -e
 cd "$(dirname "$0")/../.."
 out=${1:-target/Hive.app}; bin=${2:-target/release/hive}
@@ -57,5 +57,8 @@ id=$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID A
 sign() { if [ -n "$id" ]; then codesign -f -s "$id" -o runtime --timestamp "$@"; else codesign -f -s - "$@"; fi; }
 sign --entitlements "$tmp/sandbox.plist" "$ext"
 sign "$new"
+# Safari loads Hive for Safari only from a notarized app: notarize with this Mac's "hive" notarytool profile, if it has one.
+ditto -c -k --keepParent "$new" "$tmp/Hive.zip"
+xcrun notarytool submit "$tmp/Hive.zip" --keychain-profile hive --wait > /dev/null 2>&1 && xcrun stapler staple -q "$new" || true
 rm -rf "$tmp" "$out.old"; if [ -e "$out" ]; then mv "$out" "$out.old"; fi; mv "$new" "$out"; rm -rf "$out.old"
 echo "$out"
