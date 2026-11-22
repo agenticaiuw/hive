@@ -156,10 +156,13 @@ fn app() -> Option<PathBuf> {
     std::env::current_exe().ok()?.ancestors().find(|d| d.extension().is_some_and(|x| x == "app")).map(PathBuf::from)
 }
 
-/// A downloaded node: fetch GitHub's build of the server's version and swap it in for this program.
-fn download(package: &str, want: &str) -> Result<(), String> {
+/// A downloaded program (a node, or a server with no checkout): fetch GitHub's build of version `want` and swap it in for this one.
+pub fn download(package: &str, want: &str) -> Result<(), String> {
     if let Some(app) = app() { return download_app(&app, package, want); }
-    let name = match std::env::consts::OS { "macos" => format!("{package}-macos"), "windows" => format!("{package}-windows.exe"), os => return Err(format!("no downloads for {os}")) };
+    let name = match std::env::consts::OS {
+        "macos" => format!("{package}-macos"), "windows" => format!("{package}-windows.exe"),
+        "linux" => format!("{package}-linux-{}", std::env::consts::ARCH), os => return Err(format!("no downloads for {os}")),
+    };
     let r = ureq::get(&format!("{RELEASES}/{name}")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
