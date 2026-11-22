@@ -650,8 +650,9 @@ fn plan_schema(kinds: &[String]) -> Value {
 const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
 Claude Code session) comes to you first. Turn it into:
 - rules: standing instructions for the future (\"always…\", \"never…\", \"from now on…\", preferences). text = the rule, short; \
-quote = the owner's exact words; scope = '' for everywhere, or node:<one of the nodes below>, site:<host>, app:<name>, \
-folder:<path> when it's only about that.
+quote = the owner's exact words; scope = node:<one of the nodes below>, site:<host>, app:<name> or folder:<path> when it's only \
+about that. A rule said while working on one project (the request's context folder) is about that project only: folder:<that \
+folder>. '' (everywhere) only when the owner clearly means everything they do.
 - tasks: work to do now. title = short imperative; quote = the owner's exact words for it; nodes = where the work happens (the \
 nodes listed below); level = easy|normal|hard|hardest; project = a short project name, the same as an open task's when related.
 - messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent \
