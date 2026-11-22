@@ -45,7 +45,9 @@ jobs:
           ditto -c -k out/hive-server-macos server.zip
           xcrun notarytool submit server.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait && rm server.zip
       # People download Hive-Mac.dmg (Hive.app beside a shortcut to Applications, to drag it into); installed apps update from Hive-Mac.zip.
+      # The server goes out zipped too, since a browser drops a bare program's permission to run; servers update from hive-server-macos.
       - run: |
+          mkdir s && cp out/hive-server-macos s/hive-server && ditto -c -k s/hive-server out/hive-server-macos.zip && rm -rf s
           mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg && rm -rf dmg
       - if: env.MAC_CERT != ''
