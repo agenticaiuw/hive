@@ -2,7 +2,7 @@
 
 The club's one project: agents that use your computer, phone and browser the way you do.
 
-**Get Hive:** download the Hive app for [Mac](https://github.com/agenticaiuw/hive/releases/download/latest/Hive-Mac.zip) or Windows from [Releases](https://github.com/agenticaiuw/hive/releases/tag/latest) and open it. On a computer that can stay on (an old laptop at home or a VM, it's the same) choose **Make this computer my Hive**; on any other device, open the pairing link from its dashboard. On a Mac, Hive for Safari comes inside the app: turn it on in Safari's Settings, under Extensions.
+**Get Hive:** download the Hive app for [Mac](https://github.com/agenticaiuw/hive/releases/download/latest/Hive-Mac.dmg) (drag it into Applications) or Windows from [Releases](https://github.com/agenticaiuw/hive/releases/tag/latest) and open it. On a computer that can stay on (an old laptop at home or a VM, it's the same) choose **Make this computer my Hive**; on any other device, open the pairing link from its dashboard. On a Mac, Hive for Safari comes inside the app: turn it on in Safari's Settings, under Extensions.
 
 ## How it fits together
 
