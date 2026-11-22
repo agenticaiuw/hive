@@ -688,8 +688,8 @@ here; then just reply.
 - reply: one short sentence to the owner saying what happens next.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
-server runs on the computer you run on and reaches the owner's devices. Work until the task is \
-done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
+server runs on the computer you run on and reaches the owner's devices. Your first message tells the owner what you'll do and \
+about how long it will take. Work until the task is done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
 what you need from the owner. Done means every part of what the owner asked for is done; if any part isn't, it's not done. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
 keep going. You heard the owner in context, so you write what follows from their words: a standing instruction \
 (always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \

@@ -41,13 +41,15 @@ async function show() {
   }
 }
 
-// The tasks the last thing sent from here went to, each with its status and what its agent said last.
+// The tasks the last thing sent from here went to, each with its status, its agent's first line (what it will do and about
+// how long it will take) and what it said last.
 async function work(c) {
   const { last = [] } = await chrome.storage.local.get('last');
   const tasks = (await Promise.all(last.map((id) => api(c, `/api/tasks/${id}`).catch(() => null)))).filter(Boolean);
   $('work').replaceChildren(...tasks.map(({ task, log }) => {
-    const said = log.filter((l) => l.who === 'agent' || l.who === 'needs you').at(-1)?.text ?? '';
-    return Object.assign(document.createElement('li'), { textContent: `#${task.id} ${task.title} (${task.status})${said && `: ${said.slice(0, 240)}`}` });
+    const said = log.filter((l) => l.who === 'agent' || l.who === 'needs you');
+    const lines = [...new Set([said[0]?.text, said.at(-1)?.text])].filter(Boolean).map((t) => t.slice(0, 240));
+    return Object.assign(document.createElement('li'), { textContent: `#${task.id} ${task.title} (${task.status})${lines.length ? `: ${lines.join(' … ')}` : ''}` });
   }));
   $('workBox').hidden = !tasks.length;
 }
