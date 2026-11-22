@@ -1,5 +1,6 @@
-# Every push to main: GitHub builds what people download from Releases (and what downloaded nodes update
-# themselves to), all under the release tagged `latest`.
+# Every push to main: GitHub builds what people download from Releases, all under the release tagged `latest`: the server
+# (hive-server, its own download) and the devices (the desktop app and the browser extension). `version` goes up last:
+# downloaded servers update themselves to it, and their devices follow them.
 name: release
 on:
   push:
@@ -20,10 +21,10 @@ jobs:
         with: { fetch-depth: 0 }
       - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - run: |
-          cargo build --release -p hive --target aarch64-apple-darwin
-          cargo build --release -p hive --target x86_64-apple-darwin
+          cargo build --release -p hive -p hive-server --target aarch64-apple-darwin
+          cargo build --release -p hive -p hive-server --target x86_64-apple-darwin
           mkdir out
-          lipo -create -output out/hive-macos target/aarch64-apple-darwin/release/hive target/x86_64-apple-darwin/release/hive
+          for p in hive hive-server; do lipo -create -output out/$p-macos target/{aarch64,x86_64}-apple-darwin/release/$p; done
       - if: env.MAC_CERT != ''
         env: { MAC_CERT_PASSWORD: "${{ secrets.MAC_CERT_PASSWORD }}" }
         run: |
@@ -37,6 +38,12 @@ jobs:
         run: |
           xcrun notarytool submit out/Hive-Mac.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait
           xcrun stapler staple out/Hive.app && rm out/Hive-Mac.zip && ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
+      - if: env.MAC_CERT != ''
+        env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
+        run: |
+          codesign -s "Developer ID Application" --options runtime --timestamp out/hive-server-macos
+          ditto -c -k out/hive-server-macos server.zip
+          xcrun notarytool submit server.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait && rm server.zip
       # People download Hive-Mac.dmg (Hive.app beside a shortcut to Applications, to drag it into); installed apps update from Hive-Mac.zip.
       - run: |
           mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
@@ -53,13 +60,22 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo build --release -p hive
+      - run: cargo build --release -p hive -p hive-server
       - shell: bash
-        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe
+        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe && cp target/release/hive-server.exe out/hive-server-windows.exe
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: out }
+  linux:
+    strategy:
+      matrix: { os: [ubuntu-22.04, ubuntu-22.04-arm] }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release -p hive-server && mkdir out && cp target/release/hive-server out/hive-server-linux-$(uname -m)
+      - uses: actions/upload-artifact@v4
+        with: { name: "linux-${{ matrix.os }}", path: out }
   publish:
-    needs: [mac, windows]
+    needs: [mac, windows, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,4 +88,5 @@ jobs:
           git tag -f latest && git push -f origin latest
           gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push."
           gh release upload latest out/* --clobber
+          echo "${GITHUB_SHA::12}" > version && gh release upload latest version --clobber
           gh release edit latest --notes "Built from main at ${GITHUB_SHA::12}."
