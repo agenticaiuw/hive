@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=xfce4-terminal --working-directory=/home/ubuntu
+Icon=/usr/share/icons/Humanity/apps/48/utilities-terminal.svg

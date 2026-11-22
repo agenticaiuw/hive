@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hive</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --muted: #888; }
+  body { width: 340px; margin: 0; padding: 12px; font: 13px/1.4 -apple-system, system-ui, sans-serif; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  input, textarea { box-sizing: border-box; width: 100%; margin: 0 0 6px; padding: 6px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  textarea { height: 64px; resize: vertical; }
+  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
+  ul { margin: 4px 0 0; padding-left: 18px; }
+  .muted, footer { color: var(--muted); }
+  footer { margin-top: 10px; }
+  a { color: inherit; }
+  [hidden] { display: none; }
+</style>
+<form id="pair" hidden>
+  <h1>Connect this browser to Hive</h1>
+  <p class="muted">On your Hive dashboard, choose Pair a device, then paste the link here.</p>
+  <input id="link" placeholder="Pairing link" required>
+  <button>Connect</button>
+  <p id="pairNote" class="muted"></p>
+</form>
+<div id="main" hidden>
+  <form id="ask">
+    <textarea id="text" placeholder="Ask Hive about this page, or anything"></textarea>
+    <button>Send</button> <span id="reply" class="muted"></span>
+  </form>
+  <div id="workBox" hidden><ul id="work"></ul><p class="muted">Sending again about this goes to the same agent; anything else starts a new one.</p></div>
+  <div id="rulesBox" hidden><p><b>Rules on <span id="site"></span></b></p><ul id="rules"></ul></div>
+  <footer><a id="dash" href="#" target="_blank">Dashboard</a></footer>
+</div>
+<script type="module" src="popup.js"></script>

@@ -1,0 +1,6 @@
+#!/bin/sh
+# The VM agent's screen: Xvfb :99 at 1440x900, open only to programs holding the cookie in /home/ubuntu/.Xauthority-99 (no TCP).
+auth=/home/ubuntu/.Xauthority-99
+umask 077
+rm -f "$auth"; xauth -q -f "$auth" add :99 . "$(mcookie)"
+exec Xvfb :99 -screen 0 1440x900x24 -nolisten tcp -auth "$auth"

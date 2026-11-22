@@ -1,0 +1,16 @@
+name: check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: node --test .github/privacy.test.mjs
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build -p hive
+      - run: cargo test -p hive -p hive-protocol

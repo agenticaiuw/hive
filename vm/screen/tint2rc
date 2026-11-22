@@ -1,0 +1,58 @@
+# The VM agent desktop taskbar (vm-desktop.service): launchers, open windows, clock.
+rounded = 0
+border_width = 0
+background_color = #15181d 100
+border_color = #000000 0
+rounded = 4
+border_width = 0
+background_color = #2b313b 100
+border_color = #000000 0
+background_color_hover = #39414e 100
+background_color_pressed = #4a5465 100
+
+panel_items = LTC
+panel_size = 100% 36
+panel_margin = 0 0
+panel_padding = 6 4 8
+panel_background_id = 1
+panel_position = bottom center horizontal
+panel_layer = top
+panel_monitor = all
+strut_policy = follow_size
+panel_dock = 0
+wm_menu = 1
+font_shadow = 0
+
+launcher_padding = 2 0 6
+launcher_background_id = 0
+launcher_icon_size = 26
+launcher_item_app = /home/ubuntu/.local/share/applications/hive-terminal.desktop
+launcher_item_app = /home/ubuntu/.local/share/applications/hive-chrome.desktop
+launcher_tooltip = 1
+
+taskbar_mode = single_desktop
+taskbar_padding = 4 0 6
+taskbar_background_id = 0
+taskbar_name = 0
+task_text = 1
+task_icon = 1
+task_centered = 0
+task_maximum_size = 220 30
+task_padding = 8 4 6
+task_font_color = #d8dee9 100
+task_active_background_id = 2
+task_background_id = 0
+mouse_left = toggle_iconify
+
+time1_format = %H:%M
+time2_format = %a %b %d
+time1_font = sans 10
+time2_font = sans 8
+clock_font_color = #d8dee9 100
+clock_padding = 8 0
+clock_background_id = 0
+tooltip_show_timeout = 0.4
+tooltip_hide_timeout = 0.1
+tooltip_padding = 6 4
+tooltip_background_id = 2
+tooltip_font_color = #d8dee9 100

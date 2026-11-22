@@ -1,0 +1,16 @@
+[package]
+name = "hive-server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+serde_json = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
+sha2 = "0.10"
+hive-protocol = { path = "../protocol" }
+hive-phone = { path = "../phone" }
+ureq = "2"
+ring = "0.17"
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+igd-next = "0.16"

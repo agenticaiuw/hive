@@ -1,0 +1,8 @@
+#!/bin/sh
+# The VM's Chrome on the agent's screen (:99), with its own profile: Hive's agent signs in and works in it, and the
+# taskbar opens it. It runs as ubuntu even when root starts it; a URL argument opens in the running one if there is one.
+exec </dev/null >/dev/null 2>&1  # so whoever started it (a shell, the taskbar) isn't held open
+[ "$(id -u)" = 0 ] && exec runuser -u ubuntu -- "$0" "$@"
+export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99 HOME=/home/ubuntu
+exec /opt/chromium/chrome --user-data-dir=/home/ubuntu/.config/vm-chrome --no-first-run --no-default-browser-check \
+  --password-store=basic --window-position=0,0 --window-size=1440,900 "$@"

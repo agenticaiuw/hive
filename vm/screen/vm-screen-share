@@ -1,0 +1,6 @@
+#!/bin/sh
+# Shares the VM agent's own desktop (Xvfb :99) for the owner's Mac. It listens only on the VM
+# itself, so the one way in is an SSH tunnel with the Mac's key ("VM Screen" app on the Mac).
+exec /usr/bin/x11vnc -display :99 -auth /home/ubuntu/.Xauthority-99 -localhost -rfbport 5901 \
+  -passwdfile /home/ubuntu/.vnc/vm-screen.passwd -shared -forever -noxdamage -quiet \
+  -o /home/ubuntu/.vnc/vm-screen.log

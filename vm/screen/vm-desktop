@@ -1,0 +1,9 @@
+#!/bin/sh
+# A light desktop on the VM agent's screen (vm-xvfb's :99): openbox, a taskbar with Terminal and Chrome,
+# a plain background.
+export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99 HOME=/home/ubuntu
+xsetroot -solid "#1e2229"
+# Again once openbox is up: when it starts with the screen it can paint the background black.
+(sleep 3; xsetroot -solid "#1e2229") &
+(while :; do tint2; sleep 2; done) &
+exec openbox

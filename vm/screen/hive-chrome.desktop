@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Chrome
+Comment=The VM browser Hive uses, signed in to your accounts
+Exec=/usr/local/bin/vm-chrome
+Icon=/usr/share/icons/Humanity/apps/48/internet-web-browser.svg
