@@ -285,3 +285,39 @@ pub fn stay_on() {
     std::fs::write(dir.join("app.hive.mac.plist"), format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
         <key>Label</key><string>app.hive.mac</string><key>ProgramArguments</key><array>{run}</array><key>RunAtLoad</key><true/></dict></plist>\n")).ok();
 }
+
+/// Hive.app opened from anywhere else (Downloads, the zip) puts itself in Applications, in place of an older copy, and reopens
+/// from there: that's where Spotlight finds it and Safari finds Hive for Safari.
+pub fn install() {
+    let dest = std::path::Path::new("/Applications/Hive.app");
+    let app = std::env::current_exe().ok().and_then(|e| e.ancestors().nth(3).map(|a| a.to_path_buf()));
+    if let Some(app) = app.filter(|a| a.extension().is_some_and(|e| e == "app") && a.as_path() != dest) {
+        if copy_app(&app, dest) && Command::new("open").arg(dest).status().is_ok_and(|s| s.success()) { std::process::exit(0) }
+    }
+}
+
+/// Copies the app to `dest` whole, or leaves `dest` as it was. No quarantine on the copy: the owner already opened this app.
+fn copy_app(app: &std::path::Path, dest: &std::path::Path) -> bool {
+    let new = dest.with_extension("app.new");
+    std::fs::remove_dir_all(&new).ok();
+    let done = Command::new("ditto").arg("--noqtn").arg(app).arg(&new).status().is_ok_and(|s| s.success())
+        && (!dest.exists() || std::fs::remove_dir_all(dest).is_ok()) && std::fs::rename(&new, dest).is_ok();
+    if !done { std::fs::remove_dir_all(&new).ok(); }
+    done
+}
+
+#[cfg(test)]
+#[test]
+fn copy_app_replaces_an_older_copy() {
+    let t = std::env::temp_dir().join(format!("hive-install-{}", std::process::id()));
+    let (app, dest) = (t.join("Downloads/Hive.app"), t.join("Applications/Hive.app"));
+    for (d, v) in [(&app, "new"), (&dest, "old")] {
+        std::fs::create_dir_all(d.join("Contents/MacOS")).unwrap();
+        std::fs::write(d.join("Contents/MacOS/hive"), v).unwrap();
+    }
+    std::fs::write(dest.join("Contents/stale"), "").unwrap();
+    assert!(copy_app(&app, &dest));
+    assert_eq!(std::fs::read_to_string(dest.join("Contents/MacOS/hive")).unwrap(), "new");
+    assert!(!dest.join("Contents/stale").exists() && !dest.with_extension("app.new").exists() && app.exists());
+    std::fs::remove_dir_all(&t).ok();
+}
