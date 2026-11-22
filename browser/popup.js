@@ -29,7 +29,8 @@ async function show() {
   };
   $('text').onkeydown = (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $('ask').requestSubmit(); };
   if (site) {
-    const rules = await api(c, `/api/rules?site=${encodeURIComponent(site)}&node=browser`).catch(() => []);
+    // Only this site's own rules: the owner's general rules apply everywhere and aren't about this page.
+    const rules = (await api(c, `/api/rules?site=${encodeURIComponent(site)}`).catch(() => [])).filter((r) => r.scope?.startsWith('site:'));
     $('site').textContent = site;
     $('rules').replaceChildren(...rules.map((r) => Object.assign(document.createElement('li'), { textContent: r.text })));
     $('rulesBox').hidden = !rules.length;
