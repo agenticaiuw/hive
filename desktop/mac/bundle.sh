@@ -21,7 +21,7 @@ EOF
 }
 
 cp "$bin" "$new/Contents/MacOS/hive"
-plist app.hive.mac hive APPL '<key>CFBundleIconFile</key><string>Hive</string><key>NSHighResolutionCapable</key><true/>' > "$new/Contents/Info.plist"
+plist app.hive.mac hive APPL '<key>CFBundleIconFile</key><string>Hive</string><key>LSUIElement</key><true/>' > "$new/Contents/Info.plist"
 mkdir "$tmp/Hive.iconset"
 for s in 16 32 128 256 512; do
   sips -z $s $s desktop/mac/icon.png --out "$tmp/Hive.iconset/icon_${s}x${s}.png" > /dev/null

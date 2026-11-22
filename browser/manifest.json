@@ -8,5 +8,6 @@
   "permissions": ["alarms", "nativeMessaging", "scripting", "storage", "tabs", "userScripts", "webNavigation"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "worker.js", "type": "module" },
-  "action": { "default_title": "Hive", "default_popup": "popup.html" }
+  "action": { "default_title": "Hive", "default_popup": "popup.html" },
+  "commands": { "_execute_action": { "suggested_key": { "default": "Alt+Shift+H", "mac": "MacCtrl+Shift+H" }, "description": "Ask Hive" } }
 }
