@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 pub use api::random;
-pub use tls::address;
+pub use tls::{address, why};
 
 pub struct Config {
     /// Everything this computer's Hive keeps: its database, files, owner key, Codex and certificate.

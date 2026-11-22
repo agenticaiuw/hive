@@ -11,6 +11,8 @@ pub struct Req {
     pub query: HashMap<String, String>,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    /// The address the request came from.
+    pub peer: String,
 }
 
 pub struct Res {
@@ -100,7 +102,7 @@ pub fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
         let (k, v) = p.split_once('=').unwrap_or((p, ""));
         (decode(k), decode(v))
     }).collect();
-    Some(Req { method, path: decode(path), query, headers, body })
+    Some(Req { method, path: decode(path), query, headers, body, peer: String::new() })
 }
 
 fn reason(status: u16) -> &'static str {
@@ -134,7 +136,7 @@ pub fn serve(addr: &str, handler: Arc<dyn Fn(Req) -> Res + Send + Sync>) -> std:
 /// `socket` is the connection's TCP socket (for its timeouts), under `stream` (which may be TLS).
 pub fn handle(mut stream: impl hive_phone::Conn + 'static, socket: TcpStream, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
     let mut res = match parse(&mut stream, 512 << 20) {
-        Some(req) => handler(req),
+        Some(mut req) => { req.peer = socket.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default(); handler(req) }
         None => Res::err(400, "bad request"),
     };
     if write(&mut stream, &res).is_ok() { if let Some(up) = res.upgrade.take() { up(Box::new(stream), socket) } }
