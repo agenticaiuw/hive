@@ -87,6 +87,18 @@ async function pairCode() {
   navigator.clipboard?.writeText(link).catch(() => {});
   $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · open it on the device, or paste it into the Hive app or extension (10 min)`;
 }
+// Hive Phone picks the pairing up from the iPhone's clipboard: copy it on the iPhone, or on a Mac with Universal Clipboard.
+async function pairPhone() {
+  const r = await api('api/phone/pair', { method: 'POST' });
+  if (r.pairing) navigator.clipboard?.writeText(r.pairing).catch(() => {});
+  phonePairing = r.pairing || '';
+  phoneNote = r.pairing ? 'Copied (or copy it from the box). Open Hive Phone on the iPhone: it connects from the clipboard; on a Mac, Universal Clipboard carries it over.' : r.error;
+  render();
+}
+async function savePin() {
+  const r = await api('api/phone/passcode', { method: 'POST', body: { passcode: $('#pin').value } });
+  $('#pin').value = ''; if (r.error) alert(r.error); else render();
+}
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
   $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
@@ -96,7 +108,7 @@ async function send() {
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 
 const TABS = ['Agents', 'Tasks', 'Past', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
-let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null;
+let tab = location.hash.slice(1) || 'Agents', phoneNote = '', phonePairing = '', state = null, chat = null, chatAfter = 0, timer = null;
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 addEventListener('hashchange', () => { tab = location.hash.slice(1); chat = null; tabs(); render(); });
 
@@ -156,6 +168,9 @@ async function render() {
       ${files.map(f => `<div class="card row"><a href="api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
   } else if (tab === 'Nodes') {
     v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
+    const phone = await api('api/phone');
+    v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span><button class="plain" onclick="pairPhone()">Connect an iPhone</button></div>
+      ${phonePairing ? `<input readonly value="${esc(phonePairing)}" onclick="this.select()">` : ''}<p class="muted">${esc(phoneNote)}</p><div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div></div>`;
     v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
     v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="api/vm/screen?t=${Date.now()}">`;

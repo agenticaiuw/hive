@@ -1,52 +1,49 @@
-//! The iPhone through its relay (WebDriverAgent on the phone behind it).
+//! The iPhone's tools, through Hive Phone's WebSocket (link.rs) to WebDriverAgent on the phone.
+use crate::link;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Phone {
+    state: PathBuf,
     sid: Mutex<Option<String>>,
     scale: Mutex<Option<f64>>,
 }
 
-const DOWN: &str = "The iPhone isn't connected to its relay: Hive Phone has to be open on it. The owner needs to open Hive Phone on the iPhone.";
+const DOWN: &str = "The iPhone isn't connected to Hive: Hive Phone has to be open on it. The owner needs to open Hive Phone on the iPhone.";
+const PROMPT: &str = "type == 'XCUIElementTypeStaticText' AND visible == 1 AND (label CONTAINS[c] 'enter passcode' OR label CONTAINS[c] 'enter iphone passcode')";
+const NOT_THE_LOCK_SCREEN: [&str; 13] = ["incorrect", "try again", "failed", "attempts remaining", "unavailable", "disabled", "new passcode",
+    "change passcode", "reset", "erase", "payment", "pay ", "purchase"];
+pub const PASSCODE: &str = "phone-passcode";
+pub const PAUSED: &str = "phone-unlock-paused";
+
+fn nothing_entered(why: &str) -> String { format!("{why} No passcode was entered.") }
+fn sleep(ms: u64) { std::thread::sleep(Duration::from_millis(ms)) }
+
+/// A WebDriverAgent call's JSON, or what went wrong in words.
+pub fn wda(path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<Value, String> {
+    let fail = match link::call(method, path, &body.map(|b| b.to_string()).unwrap_or_default(), secs) {
+        Err(e) => Err(e),
+        Ok((st, text)) => {
+            let v: Value = serde_json::from_str(&text).unwrap_or(json!({}));
+            if !v["value"]["error"].is_null() { Err(v["value"]["message"].as_str().or(v["value"]["error"].as_str()).unwrap_or("phone error").to_string()) }
+            else if st >= 400 { Err(v["error"].as_str().unwrap_or("phone command failed").to_string()) } else { Ok(v) }
+        }
+    };
+    fail.map_err(|f| {
+        let l = f.to_lowercase();
+        if ["offline", "disconnected", "not connected", "unavailable", "timed out"].iter().any(|w| l.contains(w)) { return DOWN.into(); }
+        f.lines().next().unwrap_or("").chars().take(300).collect()
+    })
+}
 
 impl Phone {
-    pub fn new() -> Phone {
-        Phone { sid: Mutex::new(None), scale: Mutex::new(None) }
+    pub fn new(state: PathBuf) -> Phone {
+        Phone { state, sid: Mutex::new(None), scale: Mutex::new(None) }
     }
 
-    fn config(&self) -> Result<(String, String), String> {
-        let path = hive_protocol::conf_path("phone-relay");
-        let c: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok())
-            .ok_or_else(|| format!("Hive has no phone relay configured ({} is missing)", path.display()))?;
-        Ok((c["url"].as_str().unwrap_or("").trim_end_matches('/').to_string(), c["token"].as_str().unwrap_or("").to_string()))
-    }
-
-    fn raw(&self, path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<(u16, Value), String> {
-        let (url, token) = self.config()?;
-        let req = ureq::request(method, &format!("{url}{path}")).timeout(Duration::from_secs(secs))
-            .set("authorization", &format!("Bearer {token}"));
-        let res = match body { Some(b) => req.set("content-type", "application/json").send_string(&b.to_string()), None => req.call() };
-        let parse = |r: ureq::Response| serde_json::from_str(&r.into_string().unwrap_or_default()).unwrap_or(json!({}));
-        match res {
-            Ok(r) => { let st = r.status(); Ok((st, parse(r))) }
-            Err(ureq::Error::Status(st, r)) => Ok((st, parse(r))),
-            Err(e) => Err(format!("Couldn't reach the phone relay: {e}")),
-        }
-    }
-
-    fn wda(&self, path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<Value, String> {
-        let (st, v) = self.raw(&format!("/api{path}"), method, body, secs)?;
-        let fail = if !v["value"]["error"].is_null() {
-            Some(v["value"]["message"].as_str().or(v["value"]["error"].as_str()).unwrap_or("phone error").to_string())
-        } else if st >= 400 { Some(v["error"].as_str().unwrap_or("phone command failed").to_string()) } else { None };
-        if let Some(f) = fail {
-            let l = f.to_lowercase();
-            if ["offline", "disconnected", "not connected", "unavailable", "timed out"].iter().any(|w| l.contains(w)) { return Err(DOWN.into()); }
-            return Err(f.lines().next().unwrap_or("").chars().take(300).collect());
-        }
-        Ok(v)
-    }
+    fn wda(&self, path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<Value, String> { wda(path, method, body, secs) }
 
     fn session(&self) -> Result<String, String> {
         if let Some(s) = self.sid.lock().unwrap().clone() { return Ok(s); }
@@ -103,6 +100,66 @@ impl Phone {
             "parameters": { "pointerType": "touch" }, "actions": moves }] })), 30).map(|_| ())
     }
 
+    /// The passcode the owner saved on the dashboard, if it's for this iPhone and the last try didn't go unconfirmed.
+    fn passcode(&self) -> Result<String, String> {
+        let saved: Value = std::fs::read(self.state.join(PASSCODE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| nothing_entered("No passcode is saved for this iPhone; the owner saves it on the dashboard (Nodes)."))?;
+        if self.state.join(PAUSED).exists() {
+            return Err(nothing_entered("Unlocking is paused after a try the iPhone didn't confirm: the owner checks the phone, then saves the passcode again on the dashboard (Nodes)."));
+        }
+        if self.wda("/wda/device/info", "GET", None, 30)?["value"]["uuid"] != saved["device"] {
+            return Err(nothing_entered("Hive Phone was installed again since the passcode was saved; the owner saves it again on the dashboard (Nodes)."));
+        }
+        Ok(saved["passcode"].as_str().unwrap_or("").to_string())
+    }
+
+    /// Wake with the home button, swipe up from just above the bottom edge, wait for "Enter Passcode", check it's the system's
+    /// plain unlock prompt with one secure field, then write the passcode into that field once. A try the phone doesn't
+    /// confirm pauses unlocking, so it's never repeated unseen.
+    fn unlock(&self) -> Result<(), String> {
+        if !self.locked()? { return Ok(()); }
+        let pin = self.passcode()?;
+        let find = |q: &str| -> Result<Vec<Value>, String> {
+            Ok(self.in_session("/elements", "POST", Some(json!({ "using": "predicate string", "value": q })), 30)?["value"].as_array().cloned().unwrap_or_default())
+        };
+        if find(PROMPT)?.is_empty() {
+            self.in_session("/wda/pressButton", "POST", Some(json!({ "name": "home" })), 30)?;
+            sleep(400);
+            let size = self.in_session("/window/size", "GET", None, 30)?;
+            let (w, h) = (size["value"]["width"].as_f64().unwrap_or(0.0), size["value"]["height"].as_f64().unwrap_or(0.0));
+            if !(w > 0.0 && h > 0.0) { return Err(nothing_entered("The iPhone gave no screen size.")); }
+            let x = (w / 2.0).round();
+            self.touch(vec![json!({ "type": "pointerMove", "duration": 0, "x": x, "y": (h - 11.0).round() }), json!({ "type": "pointerDown", "button": 0 }),
+                json!({ "type": "pointerMove", "duration": 300, "x": x, "y": (h * 0.2).round() }), json!({ "type": "pointerUp", "button": 0 })])?;
+            let until = Instant::now() + Duration::from_secs(6);
+            loop {
+                if !find(PROMPT)?.is_empty() { break; }
+                if !self.locked()? { return Ok(()); }
+                if Instant::now() > until { return Err(nothing_entered("The passcode keypad didn't come up after waking the iPhone and swiping up.")); }
+                sleep(200);
+            }
+        }
+        if self.wda("/wda/activeAppInfo", "GET", None, 30)?["value"]["bundleId"] != "com.apple.springboard" {
+            return Err(nothing_entered("The iPhone isn't showing its system passcode screen."));
+        }
+        let labels = visible_labels(self.in_session("/source", "GET", None, 60)?["value"].as_str().unwrap_or(""));
+        if NOT_THE_LOCK_SCREEN.iter().any(|w| labels.contains(w)) || !(labels.contains("enter passcode") || labels.contains("enter iphone passcode")) {
+            return Err(nothing_entered("This isn't the plain unlock passcode prompt, or it shows a failed try."));
+        }
+        let fields = find("type == 'XCUIElementTypeSecureTextField' AND visible == 1")?;
+        if fields.len() != 1 { return Err(nothing_entered("The passcode screen doesn't show exactly one passcode field.")); }
+        let field = fields[0]["ELEMENT"].as_str().or(fields[0]["element-6066-11e4-a52e-4f735466cecf"].as_str())
+            .filter(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .ok_or_else(|| nothing_entered("Couldn't address the passcode field."))?.to_string();
+        std::fs::write(self.state.join(PAUSED), "").map_err(|e| nothing_entered(&format!("Couldn't note the try ({e}).")))?;
+        self.in_session(&format!("/element/{field}/value"), "POST", Some(json!({ "value": [pin] })), 30)?;
+        for _ in 0..12 {
+            sleep(500);
+            if !self.locked()? { std::fs::remove_file(self.state.join(PAUSED)).ok(); return Ok(()); }
+        }
+        Err("The iPhone hasn't confirmed it's unlocked. Unlocking is paused: the owner checks the phone, then saves the passcode again on the dashboard (Nodes)".into())
+    }
+
     pub fn call(&self, tool: &str, a: &Value) -> Result<Value, String> {
         let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
         let shot = |msg: &str| -> Result<Value, String> {
@@ -111,10 +168,10 @@ impl Phone {
         };
         match tool {
             "phone_unlock" => {
-                let (st, v) = self.raw("/agent/unlock-now", "POST", Some(json!({})), 150)?;
+                let r = self.unlock();
                 *self.sid.lock().unwrap() = None;
-                if v["unlocked"].as_bool() == Some(true) { return Ok(json!({ "text": "The iPhone is unlocked." })); }
-                Err(format!("The phone didn't unlock ({}). Don't retry; stop using the phone and say why.", v["error"].as_str().map(String::from).unwrap_or(format!("relay said {st}"))))
+                r.map(|_| json!({ "text": "The iPhone is unlocked." }))
+                    .map_err(|e| format!("The phone didn't unlock ({e}). Don't retry; stop using the phone and say why."))
             }
             "phone_screenshot" => Ok(json!({ "text": "The iPhone's screen.", "images": [self.screenshot()?] })),
             "phone_tap" => {
@@ -147,5 +204,25 @@ impl Phone {
             }
             _ => Err(format!("no phone tool {tool}")),
         }
+    }
+}
+
+/// The labels of the visible elements in WebDriverAgent's page source, lowercased.
+fn visible_labels(tree: &str) -> String {
+    let mut out = String::new();
+    for tag in tree.split("<XCUIElementType").skip(1) {
+        let tag = tag.split('>').next().unwrap_or("");
+        let attr = |k: &str| tag.split(&format!(" {k}=\"")).nth(1).and_then(|v| v.split('"').next()).unwrap_or("").to_string();
+        if attr("visible") == "true" { out += &attr("label").to_lowercase(); out.push(' '); }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_visible_labels() {
+        let tree = r#"<XCUIElementTypeStaticText type="x" label="Enter Passcode" visible="true"/><XCUIElementTypeButton label="Erase" visible="false"/>"#;
+        assert_eq!(super::visible_labels(tree), "enter passcode ");
     }
 }

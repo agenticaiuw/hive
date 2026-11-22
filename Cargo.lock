@@ -1044,8 +1044,8 @@ name = "hive-phone"
 version = "0.1.0"
 dependencies = [
  "hive-protocol",
+ "ring",
  "serde_json",
- "ureq",
 ]
 
 [[package]]
@@ -1060,6 +1060,7 @@ dependencies = [
 name = "hive-server"
 version = "0.1.0"
 dependencies = [
+ "hive-phone",
  "hive-protocol",
  "igd-next",
  "rcgen",

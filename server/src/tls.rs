@@ -71,8 +71,8 @@ pub fn start(state: PathBuf, handler: Handler) {
     let config = Arc::new(rustls::ServerConfig::builder_with_provider(provider).with_safe_default_protocol_versions()
         .expect("tls versions").with_no_client_auth().with_cert_resolver(current));
     std::thread::spawn(move || listen("0.0.0.0:443", move |s| {
-        let Ok(conn) = rustls::ServerConnection::new(config.clone()) else { return };
-        http::handle(rustls::StreamOwned::new(conn, s), &*handler);
+        let (Ok(conn), Ok(socket)) = (rustls::ServerConnection::new(config.clone()), s.try_clone()) else { return };
+        http::handle(rustls::StreamOwned::new(conn, s), socket, &*handler);
     }));
 }
 

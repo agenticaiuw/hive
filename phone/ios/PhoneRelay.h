@@ -6,11 +6,11 @@
 // nowhere else; nothing can reach in.
 //
 // Pairing: the dashboard's "Connect an iPhone" copies "hive-phone:" + base64url(JSON {url, token}).
-// While Hive Phone has no working pairing it watches the clipboard (the change count, which asks
-// nothing) and reads a new copy once; a valid pairing is kept in Documents/phone-relay.json and the
-// clipboard is cleared. A paired phone never reads the clipboard again unless the board refuses it.
+// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it watches the
+// clipboard (the change count, which asks nothing) and reads a new copy once; a valid pairing is kept
+// in Documents/phone-relay.json and the clipboard is cleared. A connected phone never reads it.
 
-// The board's routes this was written against: cloud/shared/protocol.json (cloud/tests/nodes.test.mjs).
+// The other end: Hive's server, phone/src/link.rs.
 static NSInteger const HivePhoneProtocol = 1;
 static NSString *const HivePairingPrefix = @"hive-phone:";
 
@@ -22,6 +22,7 @@ static NSString *const HivePairingPrefix = @"hive-phone:";
 @property(nonatomic,strong) dispatch_source_t watch;
 @property(nonatomic,assign) BOOL stopped;
 @property(nonatomic,assign) BOOL refused;
+@property(nonatomic,assign) BOOL failing;
 @property(nonatomic,assign) BOOL looking;
 @property(nonatomic,assign) NSInteger seenClipboard;
 @property(nonatomic,assign) NSUInteger retry;
@@ -85,14 +86,14 @@ static NSString *const HivePairingPrefix = @"hive-phone:";
     PhoneRelay *strongSelf=weakSelf;
     NSURLSessionWebSocketTask *ws=strongSelf.socket;
     [ws sendPingWithPongReceiveHandler:^(NSError *err){
-      dispatch_async(dispatch_get_main_queue(),^{PhoneRelay *owner=weakSelf;if(err)[owner reconnect:ws];else owner.retry=0;});
+      dispatch_async(dispatch_get_main_queue(),^{PhoneRelay *owner=weakSelf;if(err)[owner reconnect:ws];else{owner.retry=0;owner.failing=NO;}});
     }];
   });
   dispatch_resume(self.heartbeat);
 }
 
 - (void)lookForPairing {
-  if(self.stopped || self.looking || (self.config && !self.refused))return;
+  if(self.stopped || self.looking || (self.config && !self.failing))return;
   UIPasteboard *board=UIPasteboard.generalPasteboard;
   NSInteger count=board.changeCount;
   if(count==self.seenClipboard)return;
@@ -116,6 +117,7 @@ static NSString *const HivePairingPrefix = @"hive-phone:";
       if(!found || strongSelf.stopped)return;
       strongSelf.config=found;
       strongSelf.refused=NO;
+      strongSelf.failing=NO;
       strongSelf.retry=0;
       NSURLSessionWebSocketTask *old=strongSelf.socket;
       strongSelf.socket=nil;
@@ -145,6 +147,7 @@ static NSString *const HivePairingPrefix = @"hive-phone:";
 - (void)reconnect:(NSURLSessionWebSocketTask *)ws {
   if(self.stopped || self.socket!=ws)return;
   self.socket=nil;
+  self.failing=YES;
   NSInteger status=[ws.response isKindOfClass:NSHTTPURLResponse.class]?((NSHTTPURLResponse *)ws.response).statusCode:0;
   // The board turned this pairing down: take a new one from the clipboard when it comes.
   if(status==401 || status==403){self.refused=YES;self.seenClipboard=-1;}
@@ -161,6 +164,7 @@ static NSString *const HivePairingPrefix = @"hive-phone:";
       if(!strongSelf || strongSelf.stopped || ws!=strongSelf.socket)return;
       if(error){[strongSelf reconnect:ws];return;}
       strongSelf.refused=NO;
+      strongSelf.failing=NO;
       NSData *data=message.type==NSURLSessionWebSocketMessageTypeString?[message.string dataUsingEncoding:NSUTF8StringEncoding]:message.data;
       NSDictionary *command=data?[NSJSONSerialization JSONObjectWithData:data options:(NSJSONReadingOptions)0 error:nil]:nil;
       if([command isKindOfClass:NSDictionary.class])[strongSelf forward:command socket:ws];

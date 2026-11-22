@@ -20,6 +20,8 @@ pub struct Hive {
     pub codex_env: Vec<(String, String)>,
     pub owner_key: String,
     pub version: String,
+    /// Where this Hive's API answers on this computer.
+    pub local: String,
     codex: Mutex<Option<Arc<Codex>>>,
     events: Mutex<Option<mpsc::Sender<Event>>>,
     loaded: Mutex<HashSet<String>>,
@@ -49,13 +51,19 @@ pub fn list(v: &Value) -> Vec<String> {
 }
 
 impl Hive {
-    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String) -> Arc<Hive> {
+    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String, local: String) -> Arc<Hive> {
         Arc::new(Hive {
-            db, state, repo, codex_cmd, codex_env, owner_key, version,
+            db, state, repo, codex_cmd, codex_env, owner_key, version, local,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
         })
+    }
+
+    /// Runs the iPhone's node here once the owner has connected one (phone/).
+    pub fn start_phone(&self) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| hive_phone::start(self.state.clone(), self.local.clone(), self.owner_key.clone()));
     }
 
     // ---- change notification: one counter, everyone who waits re-checks when it moves ----

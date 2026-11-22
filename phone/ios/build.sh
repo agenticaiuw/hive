@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hive Phone, the app that lets Hive's agents use an iPhone. iOS lets an app see and touch the whole screen only as a UI test,
 # so it is WebDriverAgent's test runner (appium/WebDriverAgent, BSD license) plus PhoneRelay.h, which dials out to Hive's
-# phone relay and passes its calls to the runner on 127.0.0.1:8100; nothing can reach in.
+# server and passes its calls to the runner on 127.0.0.1:8100; nothing can reach in.
 # Makes target/HivePhone.ipa, unsigned (SideStore or the owner's Apple developer team signs it). Packaging follows
 # OpenMinis/iCTRL (Apache-2.0) so it starts from its icon while the phone's developer disk image is mounted.
 set -e
