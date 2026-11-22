@@ -31,9 +31,15 @@ jobs:
           security create-keychain -p ci ci.keychain && security default-keychain -s ci.keychain && security unlock-keychain -p ci ci.keychain
           security import cert.p12 -k ci.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign && rm cert.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k ci ci.keychain > /dev/null
-      # Hive-Mac.dmg: Hive.app beside a shortcut to Applications, to drag it into.
+      - run: desktop/mac/bundle.sh out/Hive.app out/hive-macos && ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
+      - if: env.MAC_CERT != ''
+        env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
+        run: |
+          xcrun notarytool submit out/Hive-Mac.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait
+          xcrun stapler staple out/Hive.app && rm out/Hive-Mac.zip && ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
+      # People download Hive-Mac.dmg (Hive.app beside a shortcut to Applications, to drag it into); installed apps update from Hive-Mac.zip.
       - run: |
-          desktop/mac/bundle.sh dmg/Hive.app out/hive-macos && ln -s /Applications dmg/Applications
+          mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg && rm -rf dmg
       - if: env.MAC_CERT != ''
         env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
