@@ -1,7 +1,7 @@
-//! Hive's one brain. Every computer runs it the same way, a laptop at home or a VM: `start` gets what it needs the first
-//! time (Codex and the owner's ChatGPT sign-in), then serves the dashboard and API on this computer and on its public
-//! address over HTTPS (tls.rs), which works anywhere. The Hive app starts it from "Make this computer my Hive"
-//! (desktop/src/home.rs); a computer with no screen runs `hive-server` (main.rs).
+//! Hive's one brain, its own download (`hive-server`, main.rs), apart from the desktop app and browser extension, which are
+//! only devices. Every computer runs it the same way, a laptop at home or a VM: `setup` gets Codex and the owner's ChatGPT
+//! sign-in the first time, then `start` serves the dashboard and API on this computer and on its public address over HTTPS
+//! (tls.rs), which works anywhere.
 mod api;
 mod codex;
 pub mod cred;
@@ -48,10 +48,10 @@ pub fn owner_key(state: &Path) -> String {
 /// A pairing code, good for 10 minutes.
 pub fn code(state: &Path) -> String { api::new_code(&db::Db::open(&state.join("hive.db").to_string_lossy())) }
 
-/// Sets Hive up the first time, saying how it's going, then runs it on its own thread (which ends only if Hive stops).
-/// Starting Hive agrees to Let's Encrypt's terms for its certificate (the setup page says so).
-pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()>, String> {
-    let (bin, codex_home) = (c.state.join("bin"), c.state.join("codex"));
+/// Gets Codex, and the first time signs it in to the owner's ChatGPT account with a link and a code, which works on a
+/// computer with no screen too. Returns Codex.
+pub fn setup(state: &Path, say: &dyn Fn(&str)) -> Result<PathBuf, String> {
+    let (bin, codex_home) = (state.join("bin"), state.join("codex"));
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&codex_home).map_err(|e| e.to_string())?;
     let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
@@ -63,10 +63,19 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
     say("Getting Codex, the AI behind Hive's agents…");
     let codex = fetch(&bin, "codex", &format!("https://github.com/openai/codex/releases/latest/download/codex-{target}"))?;
     if !codex_home.join("auth.json").exists() {
-        say("Sign in to ChatGPT in the browser window that opened: Hive's agents work with your ChatGPT account.");
-        Command::new(&codex).arg("login").env("CODEX_HOME", &codex_home).output().ok();
-        if !codex_home.join("auth.json").exists() { return Err("ChatGPT sign-in didn't finish. Try again.".into()); }
+        say("Sign in to ChatGPT (Hive's agents work with your ChatGPT account): open the link below on any device and enter the code.");
+        Command::new(&codex).args(["login", "--device-auth"]).env("CODEX_HOME", &codex_home).status().ok();
+        if !codex_home.join("auth.json").exists() { return Err("ChatGPT sign-in didn't finish. Run hive-server again.".into()); }
     }
+    Ok(codex)
+}
+
+/// Runs Hive on its own thread (which ends only if Hive stops). Starting Hive agrees to Let's Encrypt's terms for its
+/// certificate. Without a checkout it keeps itself at GitHub's latest build, and its devices follow it.
+pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()>, String> {
+    let codex = setup(&c.state, say)?;
+    let codex_home = c.state.join("codex");
+    if c.repo.is_none() { std::thread::spawn(update); }
     say("Starting your Hive…");
     let db = db::Db::open(&c.state.join("hive.db").to_string_lossy());
     let codex_env = vec![("CODEX_HOME".to_string(), codex_home.to_string_lossy().into_owned())];
@@ -80,6 +89,18 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
     std::thread::spawn(move || http::serve(&addr, handler).expect("listen"));
     if c.state.join("phone-token").exists() { hive.start_phone(); }
     Ok(std::thread::spawn(move || hive.run()))
+}
+
+/// Every hour: if GitHub's latest build isn't this one, swap it in and restart into it.
+fn update() {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+        let want = ureq::get(&format!("{}/version", hive_protocol::RELEASES)).call().ok().and_then(|r| r.into_string().ok()).unwrap_or_default();
+        let (want, have) = (want.trim(), hive_protocol::VERSION);
+        if want.len() >= 7 && !want.starts_with(have) && !have.starts_with(want) {
+            if let Err(e) = hive_protocol::download("hive-server", want) { eprintln!("update to {want}: {e}"); }
+        }
+    }
 }
 
 /// A program Hive runs, from its maker's latest release on GitHub, fetched once.

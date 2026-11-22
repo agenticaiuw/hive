@@ -1,12 +1,11 @@
 //! `hive`: the Hive app for Mac and Windows (desktop/src/app.rs), and Claude Code's way into Hive.
-//!   hive                        open the app: this computer works with Hive while it runs, or is the owner's Hive (home.rs)
+//!   hive                        open the app: this computer is one of a Hive's devices while it runs (the server is its own download)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
 //!   hive task <request> …       a Claude Code session writes a task for a prompt; `hive rule <scope> …` a rule
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
 mod common;
-mod home;
 mod hook;
 #[cfg(target_os = "macos")]
 #[path = "mac.rs"]
@@ -30,9 +29,10 @@ fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
 
 fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }
 
-/// What the setup page asked for: this computer as the owner's Hive, or joining the Hive a pairing link is from.
-fn act(what: &str, say: &dyn Fn(&str)) -> Result<String, String> {
-    let (url, c) = if what == "home" { home::start(say)? } else { let c = connect(what)?; (dashboard(&c), c) };
+/// The setup page's pairing link: join that Hive.
+fn act(link: &str) -> Result<String, String> {
+    let c = connect(link)?;
+    let url = dashboard(&c);
     std::thread::spawn(move || serve(c));
     Ok(url)
 }
@@ -57,7 +57,6 @@ fn main() {
             #[cfg(target_os = "macos")]
             os::install();
             app::run(match hive_protocol::load("node") {
-                _ if home::is_on() => app::Start::Home,
                 Some(c) => { let url = dashboard(&c); std::thread::spawn(move || serve(c)); app::Start::Dashboard(url) }
                 None => app::Start::Setup,
             }, act)

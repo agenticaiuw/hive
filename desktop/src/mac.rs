@@ -272,20 +272,6 @@ mod tests {
     }
 }
 
-/// A home Hive stays up: the Mac doesn't idle-sleep while the app runs, and the app opens at login.
-pub fn stay_on() {
-    Command::new("caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn().ok();
-    let exe = std::env::current_exe().unwrap_or_default();
-    let run = match exe.ancestors().find(|d| d.extension().is_some_and(|e| e == "app")) {
-        Some(app) => format!("<string>/usr/bin/open</string><string>-g</string><string>{}</string>", app.display()),
-        None => format!("<string>{}</string>", exe.display()),
-    };
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/LaunchAgents");
-    std::fs::create_dir_all(&dir).ok();
-    std::fs::write(dir.join("app.hive.mac.plist"), format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
-        <key>Label</key><string>app.hive.mac</string><key>ProgramArguments</key><array>{run}</array><key>RunAtLoad</key><true/></dict></plist>\n")).ok();
-}
-
 /// Hive.app opened from anywhere else (Downloads, the zip) puts itself in Applications, in place of an older copy, and reopens
 /// from there: that's where Spotlight finds it and Safari finds Hive for Safari.
 pub fn install() {

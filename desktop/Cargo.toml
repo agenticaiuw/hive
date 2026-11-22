@@ -5,7 +5,6 @@ version.workspace = true
 
 [dependencies]
 hive-protocol = { path = "../protocol" }
-hive-server = { path = "../server" }
 ureq = "2"
 serde_json = "1"
 tao = "0.37"

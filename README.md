@@ -2,7 +2,7 @@
 
 The club's one project: agents that use your computer, phone and browser the way you do.
 
-**Get Hive:** download the Hive app for [Mac](https://github.com/agenticaiuw/hive/releases/download/latest/Hive-Mac.dmg) (drag it into Applications) or Windows from [Releases](https://github.com/agenticaiuw/hive/releases/tag/latest) and open it. On a computer that can stay on (an old laptop at home or a VM, it's the same) choose **Make this computer my Hive**; on any other device, open the pairing link from its dashboard. On a Mac, Hive for Safari comes inside the app: turn it on in Safari's Settings, under Extensions.
+**Get Hive:** your Hive is the server, its own download for a computer that stays on (a VM or an old laptop at home, it's the same): [Linux](https://github.com/agenticaiuw/hive/releases/download/latest/hive-server-linux-x86_64), [Linux on ARM](https://github.com/agenticaiuw/hive/releases/download/latest/hive-server-linux-aarch64), [Mac](https://github.com/agenticaiuw/hive/releases/download/latest/hive-server-macos) or [Windows](https://github.com/agenticaiuw/hive/releases/download/latest/hive-server-windows.exe). Run it once: it signs in to ChatGPT with a code, starts with the computer from then on, and gives you your dashboard's link. Then add your devices from the dashboard's **Pair a device**: the Hive app for [Mac](https://github.com/agenticaiuw/hive/releases/download/latest/Hive-Mac.dmg) (drag it into Applications; Hive for Safari comes inside, turn it on in Safari's Settings, under Extensions) or [Windows](https://github.com/agenticaiuw/hive/releases/download/latest/hive-windows.exe), and the [browser extension](https://github.com/agenticaiuw/hive/releases/download/latest/Hive-Browser.zip) for Chrome, Edge and Brave. The server keeps itself at the latest build, and the apps follow their server.
 
 ## How it fits together
 
@@ -20,10 +20,10 @@ Folders follow the parts of Hive, not the club's teams: parts last longer than t
 | Folder | What it is | Looked after by |
 |---|---|---|
 | `protocol/` | The one agreement between the server and everything that connects to it, and the Rust library nodes use to speak it | Cloud, with every team that uses it |
-| `server/` | The brain: orchestrator, agents, database, API | Cloud |
+| `server/` | The brain, its own download (`hive-server`): orchestrator, agents, database, API | Cloud |
 | `vm/` | How the VM runs Hive: its services, installer and screen | Cloud |
 | `dashboard/` | The dashboard the server shows at `/` | Product Design |
-| `desktop/` | The Hive app for Mac and Windows (`hive`): the computer as a node (screen, mouse, keyboard, shell, files), or as the owner's whole Hive; also Claude Code's hook | Automation |
+| `desktop/` | The Hive app for Mac and Windows (`hive`): the computer as a node (screen, mouse, keyboard, shell, files); also Claude Code's hook | Automation |
 | `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive | Automation |
 | `phone/` | The iPhone as a node: Hive Phone (`ios/`) dials in to the server over a WebSocket, and the server runs the phone's tools (this crate), on any computer | Automation |
 
