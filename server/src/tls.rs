@@ -1,7 +1,8 @@
 //! Hive's address: HTTPS on this computer's public address, the same on a VM or a laptop at home. Hive finds the address
 //! itself (STUN), asks a home router to send ports 80 and 443 to this computer (UPnP; a VM has no router and skips it), and
 //! gets a Let's Encrypt certificate (ACME, RFC 8555) for the address, renewing it and following the address when it changes.
-//! Port 80 answers Let's Encrypt's checks and sends everything else to HTTPS.
+//! Port 80 answers Let's Encrypt's checks and sends everything else to HTTPS. When Let's Encrypt can't reach it, `why` says
+//! exactly what to do, from what it found: a cloud VM's closed firewall, a router to open, or a provider sharing one address.
 use crate::http::{self, Req, Res};
 use hive_protocol::b64;
 use ring::rand::SystemRandom;
@@ -33,6 +34,9 @@ pub fn address(state: &Path) -> Option<String> {
     state.join("tls").join("cert.pem").exists().then(|| format!("https://{}", host.trim()))
 }
 
+/// What to do when the internet can't reach this computer, once Let's Encrypt has said so.
+pub fn why(state: &Path) -> Option<String> { std::fs::read_to_string(state.join("tls").join("why")).ok() }
+
 pub fn start(state: PathBuf, handler: Handler) {
     let dir = state.join("tls");
     std::fs::create_dir_all(&dir).ok();
@@ -54,14 +58,14 @@ pub fn start(state: PathBuf, handler: Handler) {
 
     let (cur, file) = (current.clone(), state.join("host"));
     std::thread::spawn(move || loop {
-        open_ports();
+        let router = open_ports();
         let old = std::fs::read_to_string(&file).unwrap_or_default().trim().to_string();
         let host = public_ip().unwrap_or(old.clone());
         if host != old { std::fs::write(&file, &host).ok(); std::fs::remove_file(dir.join("cert.pem")).ok(); }
         if !host.is_empty() && due(&host, &dir) {
             match issue(&host, &dir, &tokens) {
-                Ok(()) => { *cur.0.write().unwrap() = load(&dir); eprintln!("certificate for {host} renewed") }
-                Err(e) => eprintln!("certificate: {e}"),
+                Ok(()) => { *cur.0.write().unwrap() = load(&dir); std::fs::remove_file(dir.join("why")).ok(); eprintln!("certificate for {host} renewed") }
+                Err(e) => { eprintln!("certificate: {e}"); std::fs::write(dir.join("why"), guide(&host, router, &e)).ok(); }
             }
         }
         std::thread::sleep(Duration::from_secs(3600));
@@ -98,13 +102,63 @@ fn public_ip() -> Option<String> {
     None
 }
 
-/// Asks a home router to send ports 80 and 443 to this computer, for two hours (asked again every hour).
-fn open_ports() {
-    let Ok(gw) = igd_next::search_gateway(igd_next::SearchOptions { timeout: Some(Duration::from_secs(3)), ..Default::default() }) else { return };
-    let Some(local) = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect(gw.addr).is_ok()).and_then(|s| s.local_addr().ok()) else { return };
+/// What a home router said to UPnP: its own internet address, and why it wouldn't send the ports here, if it wouldn't.
+struct Router { gateway: String, wan: String, refused: String }
+
+/// Asks a home router to send ports 80 and 443 to this computer, for two hours (asked again every hour). None when no
+/// router answered: a VM has none, and a home router may have UPnP off.
+fn open_ports() -> Option<Router> {
+    let gw = igd_next::search_gateway(igd_next::SearchOptions { timeout: Some(Duration::from_secs(3)), ..Default::default() }).ok()?;
+    let local = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect(gw.addr).is_ok()).and_then(|s| s.local_addr().ok())?;
+    let mut refused = String::new();
     for port in [80, 443] {
-        if let Err(e) = gw.add_port(igd_next::PortMappingProtocol::TCP, port, SocketAddr::new(local.ip(), port), 7200, "Hive") { eprintln!("router: {e}") }
+        if let Err(e) = gw.add_port(igd_next::PortMappingProtocol::TCP, port, SocketAddr::new(local.ip(), port), 7200, "Hive") { refused = e.to_string() }
     }
+    Some(Router { gateway: gw.addr.ip().to_string(), wan: gw.get_external_ip().map(|i| i.to_string()).unwrap_or_default(), refused })
+}
+
+/// Step by step, what to do when Let's Encrypt couldn't reach this computer at `host`.
+fn guide(host: &str, router: Option<Router>, error: &str) -> String {
+    let local = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect("1.1.1.1:80").is_ok()).and_then(|s| s.local_addr().ok())
+        .map(|a| a.ip().to_string()).unwrap_or_else(|| "this computer".into());
+    // Every big cloud answers on this address inside its VMs; a home network doesn't.
+    let cloud = std::net::TcpStream::connect_timeout(&"169.254.169.254:80".parse().unwrap(), Duration::from_secs(1)).is_ok();
+    let again = if cfg!(target_os = "linux") { "Run sudo ./hive-server again" } else { "Open hive-server again" };
+    let open = "allow incoming TCP on ports 80 and 443 from anywhere (0.0.0.0/0). Oracle Cloud: Networking > Virtual cloud networks > \
+        the VM's network > Security Lists > Default Security List > Add Ingress Rules. AWS: EC2 > Security Groups > the VM's group > \
+        Edit inbound rules. Google Cloud: VPC network > Firewall > Create firewall rule. Azure: the VM > Networking > Add inbound port rule.";
+    let vm = format!("1. Make an Ubuntu VM with a public IPv4 address at a cloud provider (Oracle Cloud's Always Free tier is enough).\n\
+        2. In the provider's console, for that VM, {open}\n\
+        3. On the VM, run: curl -fLo hive-server {}/hive-server-linux-$(uname -m) && chmod +x hive-server && sudo ./hive-server\n\
+        4. Then take Hive off this computer: {}", hive_protocol::RELEASES,
+        if cfg!(target_os = "macos") { "launchctl unload -w ~/Library/LaunchAgents/app.hive.server.plist" } else { "sudo systemctl disable --now hive-server" });
+    let steps = match router {
+        _ if cloud => format!("This is a cloud VM, and its provider's firewall keeps the internet out:\n1. In the provider's console, for this VM, {open}\n2. {again}."),
+        Some(r) if !r.wan.is_empty() && r.wan != host => format!("The router's internet address is {}, but the internet sees {host}: the provider \
+            shares one address among many homes, or another router (often the provider's modem) sits in front of this one. Run Hive on a cloud \
+            VM instead:\n{vm}", r.wan),
+        Some(r) if r.refused.is_empty() => format!("The router opened ports 80 and 443 to {local}, so the internet provider blocks them. Run Hive on a cloud VM instead:\n{vm}"),
+        r => format!("To keep Hive on this computer:\n\
+            1. On a device on this network, open http://{} (the router) and sign in; the password is often on the router's label.\n\
+            2. {} forward TCP ports 80 and 443 to {local} (often under Advanced, NAT or Port forwarding).\n\
+            3. {again}.\n\
+            If it still can't be reached, the provider blocks those ports or shares one address among many homes. A cloud VM always works, \
+            and it's safer, since nothing at home is opened to the internet:\n{vm}",
+            r.as_ref().map_or_else(|| gateway().unwrap_or_else(|| "192.168.1.1".into()), |r| r.gateway.clone()),
+            r.as_ref().map_or("Turn on UPnP, or".into(), |r| format!("The router wouldn't open the ports itself ({}), so", r.refused))),
+    };
+    format!("The internet can't reach this computer at {host} on ports 80 and 443, so Hive can't get its secure address yet.\n\
+        Let's Encrypt said: {error}\n\n{steps}\n")
+}
+
+/// The router's address on this network, from the default route.
+fn gateway() -> Option<String> {
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") { ("route", &["-n", "get", "default"]) } else { ("ip", &["route", "show", "default"]) };
+    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    let out = String::from_utf8_lossy(&out.stdout);
+    let mut w = out.split_whitespace();
+    w.find(|x| *x == "via" || *x == "gateway:")?;
+    w.next().map(String::from)
 }
 
 fn listen(addr: &str, each: impl Fn(std::net::TcpStream) + Send + Sync + 'static) {
@@ -174,7 +228,10 @@ impl Acme {
             let (v, _, _) = self.post(url, None)?;
             let s = v["status"].as_str().unwrap_or("");
             if done.contains(&s) { return Ok(v) }
-            if s == "invalid" { return Err(format!("Let's Encrypt said no: {}", v)) }
+            if s == "invalid" {
+                let why = v["challenges"].as_array().into_iter().flatten().chain([&v]).find_map(|c| c["error"]["detail"].as_str());
+                return Err(why.unwrap_or("it couldn't check this address").to_string());
+            }
             std::thread::sleep(Duration::from_secs(2));
         }
         Err(format!("Let's Encrypt didn't finish checking {url}"))

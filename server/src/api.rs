@@ -5,7 +5,7 @@ use crate::hive::Hive;
 use crate::http::{Req, Res};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const DASHBOARD: &str = include_str!("../../dashboard/index.html");
 const ICON: &[u8] = include_bytes!("../../dashboard/icon.png");
@@ -30,15 +30,27 @@ fn valid(hive: &Hive, t: &str) -> bool {
 }
 fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
 
-/// A new device token for a pairing code (or the whole pairing link) or the owner key; None if neither matches.
-fn pair(hive: &Hive, secret: &str, node: &str) -> Option<String> {
+/// Wrong keys and codes in the last 10 minutes, with the address each came from.
+static MISSES: Mutex<Vec<(i64, String)>> = Mutex::new(Vec::new());
+
+/// A new device token for a pairing code (or the whole pairing link) or the owner key. After 10 wrong tries from one
+/// address, or 100 from all, codes stop working for 10 minutes, so an 8-digit code can't be guessed; the owner key still works.
+fn pair(hive: &Hive, secret: &str, node: &str, peer: &str) -> Result<String, &'static str> {
     let secret = secret.trim().rsplit("#pair=").next().unwrap_or_default();
-    let code_ok = secret.len() >= 6 && hive.db.get("select 1 from tokens where hash=? and node='code' and at > ?", args!(hash(&format!("code:{secret}")), now() - 600_000)).is_some();
-    if !(code_ok || (!secret.is_empty() && secret == hive.owner_key)) { return None; }
-    if code_ok { hive.db.run("delete from tokens where hash=?", args!(hash(&format!("code:{secret}")))); }
+    if secret.is_empty() || secret != hive.owner_key {
+        let mut misses = MISSES.lock().unwrap();
+        misses.retain(|(at, _)| *at > now() - 600_000);
+        if misses.len() >= 100 || misses.iter().filter(|(_, p)| p == peer).count() >= 10 { return Err("Too many wrong codes. Try again in 10 minutes."); }
+        let code = hash(&format!("code:{secret}"));
+        if secret.len() < 6 || hive.db.get("select 1 from tokens where hash=? and node='code' and at > ?", args!(code.clone(), now() - 600_000)).is_none() {
+            misses.push((now(), peer.to_string()));
+            return Err("That key or code isn't right, or it expired (codes last 10 minutes).");
+        }
+        hive.db.run("delete from tokens where hash=?", args!(code));
+    }
     let t = random(24);
     hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), node, now()));
-    Some(t)
+    Ok(t)
 }
 
 pub fn new_code(db: &crate::db::Db) -> String {
@@ -59,10 +71,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("POST", ["api", "login"]) => {
             // A device's own token (the desktop app opening the dashboard), the owner key, or a pairing code.
             let secret = s(&req.json()["secret"]);
-            let t = if secret != hive.owner_key && valid(hive, &secret) { Some(secret) } else { pair(hive, &secret, "dashboard") };
+            let t = if secret != hive.owner_key && valid(hive, &secret) { Ok(secret) } else { pair(hive, &secret, "dashboard", &req.peer) };
             return match t {
-                Some(t) => Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000")),
-                None => Res::err(401, "That key or code isn't right (codes last 10 minutes)."),
+                Ok(t) => Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000")),
+                Err(e) => Res::err(401, e),
             };
         }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
@@ -76,9 +88,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("POST", ["api", "pair"]) => {
             let b = req.json();
-            return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"]))) {
-                Some(t) => Res::json(&json!({ "token": t })),
-                None => Res::err(401, "That pairing code isn't right or has expired."),
+            return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"])), &req.peer) {
+                Ok(t) => Res::json(&json!({ "token": t })),
+                Err(e) => Res::err(401, e),
             };
         }
         _ => {}
@@ -283,5 +295,20 @@ fn mime(name: &str) -> &'static str {
         "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif", "svg" => "image/svg+xml", "webp" => "image/webp",
         "mp4" => "video/mp4", "mov" => "video/quicktime", "webm" => "video/webm", "mp3" => "audio/mpeg", "wav" => "audio/wav",
         "pdf" => "application/pdf", "txt" | "md" | "log" => "text/plain; charset=utf-8", _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn codes_pair_once_and_guessing_stops() {
+        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, String::new(), vec![], "owner".into(), String::new(), String::new());
+        let code = new_code(&hive.db);
+        assert!(pair(&hive, &code, "x", "192.0.2.1").is_ok() && pair(&hive, &code, "x", "192.0.2.1").is_err());
+        for _ in 0..10 { assert!(pair(&hive, "12345678", "x", "192.0.2.2").is_err()); }
+        let code = new_code(&hive.db);
+        assert_eq!(pair(&hive, &code, "x", "192.0.2.2"), Err("Too many wrong codes. Try again in 10 minutes."));
+        assert!(pair(&hive, &code, "x", "192.0.2.1").is_ok() && pair(&hive, "owner", "x", "192.0.2.2").is_ok());
     }
 }
