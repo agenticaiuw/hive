@@ -85,7 +85,7 @@ async function forget(id, name) {
 async function pairCode() {
   const link = `${location.origin}/#pair=${(await api('api/pair/code', { method: 'POST' })).code}`;
   navigator.clipboard?.writeText(link).catch(() => {});
-  $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · open it on the device, or paste it into the Hive app or extension (10 min)`;
+  $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · on this computer just open the Hive app; elsewhere open the link there or paste it into the extension (10 min)`;
 }
 // Hive Phone picks the pairing up from the iPhone's clipboard: copy it on the iPhone, or on a Mac with Universal Clipboard.
 async function pairPhone() {

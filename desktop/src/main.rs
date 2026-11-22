@@ -1,10 +1,10 @@
-//! `hive`: the Hive app for Mac and Windows (desktop/src/app.rs), and Claude Code's way into Hive.
+//! `hive`: the Hive app for Mac and Windows, and Claude Code's way into Hive. The app has no window (the dashboard is the web
+//! page): it makes this computer one of a Hive's devices, and on a Mac it carries Hive for Safari.
 //!   hive                        open the app: this computer is one of a Hive's devices while it runs (the server is its own download)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
 //!   hive task <request> …       a Claude Code session writes a task for a prompt; `hive rule <scope> …` a rule
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
-mod app;
 mod common;
 mod hook;
 #[cfg(target_os = "macos")]
@@ -29,12 +29,19 @@ fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
 
 fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }
 
-/// The setup page's pairing link: join that Hive.
-fn act(link: &str) -> Result<String, String> {
-    let c = connect(link)?;
-    let url = dashboard(&c);
-    std::thread::spawn(move || serve(c));
-    Ok(url)
+/// Not paired yet: join with the link the dashboard's Pair a device just copied, and open that dashboard in the browser.
+fn join() -> Result<hive_protocol::Conf, String> {
+    let (paste, open) = if cfg!(windows) { ("Get-Clipboard", "Start-Process") } else { ("pbpaste", "open") };
+    let link = os::shell(paste).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let c = connect(&link)?;
+    os::shell(&format!("{open} '{}'", dashboard(&c))).status().ok();
+    Ok(c)
+}
+
+/// The app's one message, when there's nothing to join with.
+fn say(text: &str) {
+    os::shell(&if cfg!(windows) { format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{text}', 'Hive')") }
+        else { format!("osascript -e 'display alert \"Hive\" message \"{text}\"'") }).status().ok();
 }
 
 fn serve(c: hive_protocol::Conf) {
@@ -56,10 +63,10 @@ fn main() {
         None => {
             #[cfg(target_os = "macos")]
             os::install();
-            app::run(match hive_protocol::load("node") {
-                Some(c) => { let url = dashboard(&c); std::thread::spawn(move || serve(c)); app::Start::Dashboard(url) }
-                None => app::Start::Setup,
-            }, act)
+            match hive_protocol::load("node").map(Ok).unwrap_or_else(join) {
+                Ok(c) => serve(c),
+                Err(_) => say("To connect this computer, click Pair a device on your Hive dashboard, then open Hive again within 10 minutes."),
+            }
         }
         _ => fail("usage: hive | hive hook | hive task … | hive rule … | hive end <task> …".into()),
     }
