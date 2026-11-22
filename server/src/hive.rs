@@ -218,22 +218,9 @@ impl Hive {
     }
 
     pub fn apply_plan(self: &Arc<Self>, id: i64, req: &Value, plan: &Value) -> String {
-        for r in plan["rules"].as_array().into_iter().flatten() {
-            let rid = self.db.run("insert into rules(text, quote, scope, at) values(?,?,?,?)", args!(s(&r["text"]), s(&r["quote"]), s(&r["scope"]), now()));
-            self.log(0, 0, id, "hive", &format!("New rule R{rid}: {}", s(&r["text"])));
-        }
-        let requester = s(&req["agent"]);
-        for t in plan["tasks"].as_array().into_iter().flatten() {
-            let level = s(&t["level"]);
-            let level = if LEVELS.iter().any(|l| l.0 == level) { level } else { "normal".into() };
-            let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, at, updated) values(?,?,?,?,?,?,?,?)",
-                args!(id, s(&t["project"]), s(&t["title"]), s(&t["quote"]), t["nodes"].clone(), level, now(), now()));
-            if let Some(session) = requester.strip_prefix("claude:") {
-                // A Claude Code session's tasks are its own: it works on them itself.
-                let agent = self.agent_for_session(session, tid);
-                self.db.run("update tasks set agent_id=?, status='working' where id=?", args!(agent, tid));
-            }
-            self.log(0, tid, id, "hive", &format!("New task #{tid}: {}", s(&t["title"])));
+        // A Claude Code session writes its own tasks (`hive task`): it has the context the orchestrator lacks.
+        if !s(&req["agent"]).starts_with("claude:") {
+            for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
         }
         for m in plan["messages"].as_array().into_iter().flatten() {
             let tid = m["task"].as_i64().unwrap_or(0);
@@ -243,6 +230,36 @@ impl Hive {
         }
         self.bump();
         s(&plan["reply"])
+    }
+
+    /// A task for a request, written by the orchestrator or by the agent that took the request. A Claude Code session's
+    /// tasks are its own: it works on them itself; any other task gets a new agent.
+    pub fn add_task(self: &Arc<Self>, request: i64, t: &Value) -> i64 {
+        let level = s(&t["level"]);
+        let level = if LEVELS.iter().any(|l| l.0 == level) { level } else { "normal".into() };
+        let nodes = if t["nodes"].is_array() { t["nodes"].clone() } else { json!(["vm"]) };
+        let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, at, updated) values(?,?,?,?,?,?,?,?)",
+            args!(request, s(&t["project"]), s(&t["title"]), s(&t["quote"]), nodes, level, now(), now()));
+        let requester = self.db.get("select agent from requests where id=?", args!(request)).map(|r| s(&r["agent"])).unwrap_or_default();
+        if let Some(session) = requester.strip_prefix("claude:") {
+            let agent = self.agent_for_session(session, tid);
+            self.db.run("update tasks set agent_id=?, status='working' where id=?", args!(agent, tid));
+        }
+        self.log(0, tid, request, "hive", &format!("New task #{tid}: {}", s(&t["title"])));
+        self.bump();
+        tid
+    }
+
+    /// A standing instruction, saved by the agent that heard it (it knows how far the owner meant it to reach).
+    pub fn add_rule(&self, text: &str, quote: &str, scope: &str) -> Result<i64, String> {
+        if text.trim().is_empty() || quote.trim().is_empty() { return Err("give the rule and the owner's exact words".into()); }
+        if !(scope.is_empty() || ["node:", "site:", "app:", "folder:"].iter().any(|p| scope.starts_with(p))) {
+            return Err("scope is node:<kind>, site:<host>, app:<name>, folder:<path>, or empty for everywhere".into());
+        }
+        let rid = self.db.run("insert into rules(text, quote, scope, at) values(?,?,?,?)", args!(text, quote, scope, now()));
+        self.log(0, 0, 0, "hive", &format!("New rule R{rid}: {text}"));
+        self.bump();
+        Ok(rid)
     }
 
     fn agent_for_session(&self, session: &str, task: i64) -> i64 {
@@ -578,6 +595,11 @@ impl Hive {
             }
             "vm_type_password" => return crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
             "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
+            "rule" => return self.add_rule(&s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
+            "task" => {
+                let request = self.db.get("select request_id from tasks where id=?", args!(task)).map(|r| r["request_id"].clone()).unwrap_or(json!(0));
+                return Ok(json!(format!("Task #{} made; another agent takes it.", self.add_task(request.as_i64().unwrap_or(0), a))));
+            }
             "page_code" => {
                 let code = json!({ "css": s(&a["css"]), "js": s(&a["js"]) }).to_string();
                 let rule = a["rule"].as_i64().unwrap_or(0);
@@ -631,11 +653,9 @@ fn ended(text: &str) -> Option<Value> {
 fn plan_schema(kinds: &[String]) -> Value {
     let st = json!({ "type": "string" });
     json!({
-        "type": "object", "additionalProperties": false, "required": ["reply", "rules", "tasks", "messages"],
+        "type": "object", "additionalProperties": false, "required": ["reply", "tasks", "messages"],
         "properties": {
             "reply": st,
-            "rules": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["text", "quote", "scope"],
-                "properties": { "text": st, "quote": st, "scope": st } } },
             "tasks": { "type": "array", "items": { "type": "object", "additionalProperties": false,
                 "required": ["title", "quote", "nodes", "level", "project"],
                 "properties": { "title": st, "quote": st, "project": st,
@@ -648,25 +668,24 @@ fn plan_schema(kinds: &[String]) -> Value {
 }
 
 const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
-Claude Code session) comes to you first. Turn it into:
-- rules: standing instructions for the future (\"always…\", \"never…\", \"from now on…\", preferences). text = the rule, short; \
-quote = the owner's exact words; scope = node:<one of the nodes below>, site:<host>, app:<name> or folder:<path> when it's only \
-about that. A rule said while working on one project (the request's context folder) is about that project only: folder:<that \
-folder>. '' (everywhere) only when the owner clearly means everything they do.
-- tasks: work to do now. title = short imperative; quote = the owner's exact words for it; nodes = where the work happens (the \
-nodes listed below); level = easy|normal|hard|hardest; project = a short project name, the same as an open task's when related.
-- messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent \
-instead of making a new task: task = its id, text = the owner's words.
-- reply: one short sentence to the owner saying what happens next.
-Build exactly what the owner said: no extra variants or features. Don't split a request into many tasks unless the parts are truly \
-independent. A site rule about what its pages show or do also needs a browser task that makes the pages follow it. A question is a task too (vm, easy) unless the answer is right here; then just reply. Requests from a Claude Code \
-session become tasks that session does itself.";
+Claude Code session) comes to you first, and you route it. You don't write rules or break work down: the agent that takes the \
+request does, since it has the context.
+- messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent: \
+task = its id, text = the owner's words.
+- tasks: otherwise one new task, for a new agent: title = short imperative; quote = the owner's exact words; nodes = where the \
+work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level = \
+easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. None for a request from a \
+Claude Code session (claude:…): that session writes its own. A question is a task too (vm, easy) unless the answer is right \
+here; then just reply.
+- reply: one short sentence to the owner saying what happens next.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
 server runs on the computer you run on and reaches the owner's devices. Work until the task is \
 done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
 what you need from the owner. Done means every part of what the owner asked for is done; if any part isn't, it's not done. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
-keep going. Never send a message \
+keep going. You heard the owner in context, so you write what follows from their words: a standing instruction \
+(always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \
+that's truly separate from yours becomes a task (the task tool). Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
 sends it on their behalf. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 

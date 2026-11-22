@@ -8,6 +8,14 @@ pub fn cloud(nodes: &[String], vm: bool) -> Vec<Value> {
             json!({ "task": n("The other task's id."), "text": s("The message.") }), &["task", "text"]),
         tool("info", "The owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, \
             neither to list all.", json!({ "key": s("e.g. home_address"), "value": s("Value to save; empty to read.") }), &["key", "value"]),
+        tool("rule", "Save a standing instruction the owner just gave (always, never, from now on, a preference) as one of their rules.",
+            json!({ "text": s("The rule, short."), "quote": s("The owner's exact words."), "scope": s("How far it reaches: \
+            folder:<path>, site:<host>, app:<name> or node:<kind> when it's about that; empty only when they clearly mean everything they do.") }),
+            &["text", "quote", "scope"]),
+        tool("task", "Make a task for work that's truly separate from yours; a new agent takes it.",
+            json!({ "title": s("Short imperative."), "quote": s("The owner's exact words for it."), "project": s("Short project name."),
+            "nodes": { "type": "array", "items": { "type": "string" }, "description": "Where the work happens: vm, hive, browser, phone, mac…" },
+            "level": s("easy, normal, hard or hardest.") }), &["title", "quote", "project", "nodes", "level"]),
     ];
     if vm {
         t.push(tool("vm_type_password", "Type a saved password into the focused field of the VM's screen (:99) without you seeing it.",
