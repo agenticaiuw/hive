@@ -1,10 +1,12 @@
 //! `hive`: the Hive app for Mac and Windows, and Claude Code's way into Hive. The app has no window (the dashboard is the web
-//! page): it makes this computer one of a Hive's devices, and on a Mac it carries Hive for Safari.
+//! page): it makes this computer one of a Hive's devices, and on a Mac it carries Hive for Safari and the fn key's type bar.
 //!   hive                        open the app: this computer is one of a Hive's devices while it runs (the server is its own download)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
 //!   hive task <request> …       a Claude Code session writes a task for a prompt; `hive rule <scope> …` a rule
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#[cfg(target_os = "macos")]
+mod bar;
 mod common;
 mod hook;
 #[cfg(target_os = "macos")]
@@ -46,7 +48,7 @@ fn say(text: &str) {
 
 fn serve(c: hive_protocol::Conf) {
     hive_protocol::run(c, hive_protocol::Node { kind: os::KIND, name: os::host(), package: "hive", tools: common::tools(),
-        notes: format!("The owner's {}: {}_* tools. One agent at a time drives its keyboard and mouse; the shell ({}) and files work alongside.",
+        notes: format!("The owner's {}: {}_* tools. One agent at a time drives its input; the shell ({}) and files work alongside.",
             os::NAME, os::KIND, os::SHELL) },
         common::run)
 }
@@ -64,6 +66,9 @@ fn main() {
             #[cfg(target_os = "macos")]
             os::install();
             match hive_protocol::load("node").map(Ok).unwrap_or_else(join) {
+                #[cfg(target_os = "macos")]
+                Ok(c) => { std::thread::spawn(move || serve(c)); bar::run() }
+                #[cfg(windows)]
                 Ok(c) => serve(c),
                 Err(_) => say("To connect this computer, click Pair a device on your Hive dashboard, then open Hive again within 10 minutes."),
             }
