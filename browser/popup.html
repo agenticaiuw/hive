@@ -10,7 +10,7 @@
   button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
   ul { margin: 4px 0 0; padding-left: 18px; }
   .muted, footer { color: var(--muted); }
-  footer { margin-top: 10px; display: flex; justify-content: space-between; }
+  footer { margin-top: 10px; }
   a { color: inherit; }
   [hidden] { display: none; }
 </style>
@@ -27,6 +27,6 @@
     <button>Send</button> <span id="reply" class="muted"></span>
   </form>
   <div id="rulesBox" hidden><p><b>Rules on <span id="site"></span></b></p><ul id="rules"></ul></div>
-  <footer><a id="dash" href="#" target="_blank">Dashboard</a><a id="disconnect" href="#">Disconnect</a></footer>
+  <footer><a id="dash" href="#" target="_blank">Dashboard</a></footer>
 </div>
 <script type="module" src="popup.js"></script>
