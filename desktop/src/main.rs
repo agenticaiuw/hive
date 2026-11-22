@@ -1,6 +1,7 @@
 //! `hive`: the Hive app for Mac and Windows (desktop/src/app.rs), and Claude Code's way into Hive.
 //!   hive                        open the app: this computer works with Hive while it runs, or is the owner's Hive (home.rs)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
+//!   hive task <request> …       a Claude Code session writes a task for a prompt; `hive rule <scope> …` a rule
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod app;
@@ -49,12 +50,14 @@ fn main() {
     match args.first().map(|s| s.as_str()) {
         Some("hook") => hook::run(),
         Some("end") => hook::end(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("task") => hook::task(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("rule") => hook::rule(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("--version") => println!("{}", hive_protocol::VERSION),
         None => app::run(match hive_protocol::load("node") {
             _ if home::is_on() => app::Start::Home,
             Some(c) => { let url = dashboard(&c); std::thread::spawn(move || serve(c)); app::Start::Dashboard(url) }
             None => app::Start::Setup,
         }, act),
-        _ => fail("usage: hive | hive hook | hive end <task> …".into()),
+        _ => fail("usage: hive | hive hook | hive task … | hive rule … | hive end <task> …".into()),
     }
 }

@@ -112,6 +112,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
             "log": hive.db.all("select * from log where task_id=? and id > ? order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
         })),
+        ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
         ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), &s(&b["text"]), "owner") {
             Ok(()) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(409, &e),
@@ -131,11 +132,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 Res::json(&json!(rules_for(hive, &[req.q("node").to_string()], req.q("site"), req.q("app"), req.q("folder"))))
             }
         }
-        ("POST", ["api", "rules"]) => {
-            let rid = hive.db.run("insert into rules(text, quote, scope, at) values(?,?,?,?)", args!(s(&b["text"]), s(&b["quote"]), s(&b["scope"]), now()));
-            hive.bump();
-            Res::json(&json!({ "id": rid }))
-        }
+        ("POST", ["api", "rules"]) => match hive.add_rule(&s(&b["text"]), &s(&b["quote"]), &s(&b["scope"])) {
+            Ok(rid) => Res::json(&json!({ "id": rid })),
+            Err(e) => Res::err(400, &e),
+        },
         ("DELETE", ["api", "nodes", node]) => {
             hive.db.run("delete from tokens where node=?", args!(node));
             hive.db.run("delete from nodes where id=?", args!(node));
