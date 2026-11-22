@@ -65,6 +65,15 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 None => Res::err(401, "That key or code isn't right (codes last 10 minutes)."),
             };
         }
+        // Hive Phone's WebSocket (phone/), with the phone's own key.
+        ("GET", ["phone", "device"]) => {
+            let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
+            if key.is_empty() || token(&req) != key { return Res::err(401, "Connect the iPhone again from the dashboard."); }
+            let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
+            let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
+            res.upgrade = Some(Box::new(hive_phone::device));
+            return res;
+        }
         ("POST", ["api", "pair"]) => {
             let b = req.json();
             return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"]))) {
@@ -132,6 +141,21 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 Res::json(&json!(rules_for(hive, &[req.q("node").to_string()], req.q("site"), req.q("app"), req.q("folder"))))
             }
         }
+        ("GET", ["api", "phone"]) => Res::json(&hive_phone::status(&hive.state)),
+        // "Connect an iPhone": what Hive Phone takes from the clipboard ("hive-phone:" + base64url of {url, token}).
+        ("POST", ["api", "phone", "pair"]) => {
+            let Some(address) = crate::tls::address(&hive.state) else { return Res::err(409, "Hive has no secure address yet; try again in a minute.") };
+            let file = hive.state.join("phone-token");
+            let key = std::fs::read_to_string(&file).ok().filter(|k| k.len() >= 40).unwrap_or_else(|| { let k = random(32); crate::private(&file, &k); k });
+            hive.start_phone();
+            let json = json!({ "url": format!("{}/phone/device", address.replacen("https://", "wss://", 1)), "token": key }).to_string();
+            let b64 = hive_protocol::b64::encode(json.as_bytes()).replace('+', "-").replace('/', "_").replace('=', "");
+            Res::json(&json!({ "pairing": format!("hive-phone:{b64}") }))
+        }
+        ("POST", ["api", "phone", "passcode"]) => match hive_phone::save_passcode(&hive.state, &s(&b["passcode"])) {
+            Ok(()) => Res::json(&hive_phone::status(&hive.state)),
+            Err(e) => Res::err(409, &e),
+        },
         ("POST", ["api", "rules"]) => match hive.add_rule(&s(&b["text"]), &s(&b["quote"]), &s(&b["scope"])) {
             Ok(rid) => Res::json(&json!({ "id": rid })),
             Err(e) => Res::err(400, &e),

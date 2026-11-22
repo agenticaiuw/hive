@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 /// A file only this user can read.
-fn private(file: &Path, text: impl AsRef<[u8]>) {
+pub(crate) fn private(file: &Path, text: impl AsRef<[u8]>) {
     std::fs::write(file, text).ok();
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).ok(); }
@@ -71,12 +71,14 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
     let db = db::Db::open(&c.state.join("hive.db").to_string_lossy());
     let codex_env = vec![("CODEX_HOME".to_string(), codex_home.to_string_lossy().into_owned())];
     let key = owner_key(&c.state);
-    let hive = hive::Hive::new(db, c.state.clone(), c.repo, codex.to_string_lossy().into(), codex_env, key, hive_protocol::VERSION.into());
+    let hive = hive::Hive::new(db, c.state.clone(), c.repo, codex.to_string_lossy().into(), codex_env, key, hive_protocol::VERSION.into(),
+        format!("http://{}", c.addr));
     let h = hive.clone();
     let handler: Arc<dyn Fn(http::Req) -> http::Res + Send + Sync> = Arc::new(move |req| api::handle(&h, req));
-    tls::start(c.state, handler.clone());
+    tls::start(c.state.clone(), handler.clone());
     let addr = c.addr;
     std::thread::spawn(move || http::serve(&addr, handler).expect("listen"));
+    if c.state.join("phone-token").exists() { hive.start_phone(); }
     Ok(std::thread::spawn(move || hive.run()))
 }
 

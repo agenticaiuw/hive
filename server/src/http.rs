@@ -1,7 +1,7 @@
-//! A small HTTP/1.1 server on std: one thread per connection, one request per connection.
+//! A small HTTP/1.1 server on std: one thread per connection, one request per connection (or a WebSocket it becomes).
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,8 @@ pub struct Res {
     pub ctype: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// For a 101: what takes the connection over once the answer is sent.
+    pub upgrade: Option<Box<dyn FnOnce(Box<dyn hive_phone::Conn>, TcpStream) + Send>>,
 }
 
 impl Req {
@@ -38,7 +40,7 @@ impl Req {
 
 impl Res {
     pub fn new(status: u16, ctype: &str, body: impl Into<Vec<u8>>) -> Res {
-        Res { status, ctype: ctype.into(), headers: vec![], body: body.into() }
+        Res { status, ctype: ctype.into(), headers: vec![], body: body.into(), upgrade: None }
     }
     pub fn json(value: &serde_json::Value) -> Res {
         Res::new(200, "application/json", value.to_string())
@@ -109,8 +111,8 @@ fn reason(status: u16) -> &'static str {
 }
 
 pub fn write(stream: &mut impl Write, res: &Res) -> std::io::Result<()> {
-    let mut head = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
-        res.status, reason(res.status), res.ctype, res.body.len());
+    let mut head = if res.status == 101 { "HTTP/1.1 101 Switching Protocols\r\n".to_string() } else { format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
+        res.status, reason(res.status), res.ctype, res.body.len()) };
     for (k, v) in &res.headers { head.push_str(&format!("{k}: {v}\r\n")); }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
@@ -123,17 +125,19 @@ pub fn serve(addr: &str, handler: Arc<dyn Fn(Req) -> Res + Send + Sync>) -> std:
     for stream in listener.incoming().flatten() {
         let handler = handler.clone();
         stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
-        std::thread::spawn(move || handle(stream, &*handler));
+        let Ok(socket) = stream.try_clone() else { continue };
+        std::thread::spawn(move || handle(stream, socket, &*handler));
     }
     Ok(())
 }
 
-pub fn handle(mut stream: impl Read + Write, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
-    let res = match parse(&mut stream, 512 << 20) {
+/// `socket` is the connection's TCP socket (for its timeouts), under `stream` (which may be TLS).
+pub fn handle(mut stream: impl hive_phone::Conn + 'static, socket: TcpStream, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
+    let mut res = match parse(&mut stream, 512 << 20) {
         Some(req) => handler(req),
         None => Res::err(400, "bad request"),
     };
-    write(&mut stream, &res).ok();
+    if write(&mut stream, &res).is_ok() { if let Some(up) = res.upgrade.take() { up(Box::new(stream), socket) } }
 }
 
 #[cfg(test)]
