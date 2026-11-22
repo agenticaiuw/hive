@@ -83,7 +83,7 @@ async function forget(id, name) {
 }
 // One link pairs anything: opened on a phone or computer it signs in here; pasted into the Hive app or extension it connects that.
 async function pairCode() {
-  const link = `${location.origin}${location.pathname.replace(/\/$/, '')}/#pair=${(await api('api/pair/code', { method: 'POST' })).code}`;
+  const link = `${location.origin}/#pair=${(await api('api/pair/code', { method: 'POST' })).code}`;
   navigator.clipboard?.writeText(link).catch(() => {});
   $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · open it on the device, or paste it into the Hive app or extension (10 min)`;
 }

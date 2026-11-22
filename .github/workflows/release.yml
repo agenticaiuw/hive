@@ -1,4 +1,4 @@
-# Every push to main: GitHub builds what people download from agenticaiuw.com/hive (and what downloaded nodes update
+# Every push to main: GitHub builds what people download from Releases (and what downloaded nodes update
 # themselves to), all under the release tagged `latest`.
 name: release
 on:
@@ -61,6 +61,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git tag -f latest && git push -f origin latest
-          gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push. Get it from agenticaiuw.com/hive."
+          gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push."
           gh release upload latest out/* --clobber
-          gh release edit latest --notes "Built from main at ${GITHUB_SHA::12}. Get it from agenticaiuw.com/hive."
+          gh release edit latest --notes "Built from main at ${GITHUB_SHA::12}."

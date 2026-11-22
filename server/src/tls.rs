@@ -1,6 +1,7 @@
-//! HTTPS on the VM's public address, with a Let's Encrypt certificate (ACME, RFC 8555) the server gets and renews
-//! itself. Port 80 answers Let's Encrypt's checks and sends everything else to HTTPS. It runs only when the state folder
-//! holds a `host` file (the public address or name), which is written once the owner agrees to Let's Encrypt's terms.
+//! Hive's address: HTTPS on this computer's public address, the same on a VM or a laptop at home. Hive finds the address
+//! itself (STUN), asks a home router to send ports 80 and 443 to this computer (UPnP; a VM has no router and skips it), and
+//! gets a Let's Encrypt certificate (ACME, RFC 8555) for the address, renewing it and following the address when it changes.
+//! Port 80 answers Let's Encrypt's checks and sends everything else to HTTPS.
 use crate::http::{self, Req, Res};
 use hive_protocol::b64;
 use ring::rand::SystemRandom;
@@ -12,7 +13,7 @@ use rustls::sign::CertifiedKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::net::{IpAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -26,28 +27,40 @@ impl ResolvesServerCert for Current {
     fn resolve(&self, _: ClientHello) -> Option<Arc<CertifiedKey>> { self.0.read().unwrap().clone() }
 }
 
-pub fn start(host: String, dir: PathBuf, handler: Handler) {
+/// This Hive's address, once it has a certificate for it.
+pub fn address(state: &Path) -> Option<String> {
+    let host = std::fs::read_to_string(state.join("host")).ok()?;
+    state.join("tls").join("cert.pem").exists().then(|| format!("https://{}", host.trim()))
+}
+
+pub fn start(state: PathBuf, handler: Handler) {
+    let dir = state.join("tls");
     std::fs::create_dir_all(&dir).ok();
     let current = Arc::new(Current(RwLock::new(load(&dir))));
     let tokens: Arc<Mutex<HashMap<String, String>>> = Default::default();
 
-    let (h, t) = (host.clone(), tokens.clone());
+    let t = tokens.clone();
     std::thread::spawn(move || listen("0.0.0.0:80", move |mut s| {
         let res = match http::parse(&mut s, 1 << 16) {
             Some(r) => match r.path.strip_prefix("/.well-known/acme-challenge/").and_then(|k| t.lock().unwrap().get(k).cloned()) {
                 Some(answer) => Res::new(200, "text/plain", answer),
-                None => Res::new(301, "text/plain", "").header("Location", &format!("https://{h}{}", r.path)),
+                None => Res::new(301, "text/plain", "").header("Location",
+                    &format!("https://{}{}", r.headers.get("host").map(String::as_str).unwrap_or(""), r.path)),
             },
             None => Res::err(400, "bad request"),
         };
         http::write(&mut s, &res).ok();
     }));
 
-    let (cur, d) = (current.clone(), dir.clone());
+    let (cur, file) = (current.clone(), state.join("host"));
     std::thread::spawn(move || loop {
-        if due(&host, &d) {
-            match issue(&host, &d, &tokens) {
-                Ok(()) => { *cur.0.write().unwrap() = load(&d); eprintln!("certificate for {host} renewed") }
+        open_ports();
+        let old = std::fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+        let host = public_ip().unwrap_or(old.clone());
+        if host != old { std::fs::write(&file, &host).ok(); std::fs::remove_file(dir.join("cert.pem")).ok(); }
+        if !host.is_empty() && due(&host, &dir) {
+            match issue(&host, &dir, &tokens) {
+                Ok(()) => { *cur.0.write().unwrap() = load(&dir); eprintln!("certificate for {host} renewed") }
                 Err(e) => eprintln!("certificate: {e}"),
             }
         }
@@ -61,6 +74,37 @@ pub fn start(host: String, dir: PathBuf, handler: Handler) {
         let Ok(conn) = rustls::ServerConnection::new(config.clone()) else { return };
         http::handle(rustls::StreamOwned::new(conn, s), &*handler);
     }));
+}
+
+/// This computer's address as the internet sees it, from a STUN server (RFC 8489).
+fn public_ip() -> Option<String> {
+    let server = ("stun.l.google.com", 19302).to_socket_addrs().ok()?.find(|a| a.is_ipv4())?;
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    let mut req = [0u8; 20];
+    req[1] = 1;
+    req[4..8].copy_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+    req[8..].copy_from_slice(crate::api::random(6).as_bytes());
+    s.send_to(&req, server).ok()?;
+    let mut b = [0u8; 512];
+    let n = s.recv(&mut b).ok()?;
+    let mut i = 20;
+    while i + 4 <= n {
+        let (kind, len) = (u16::from_be_bytes([b[i], b[i + 1]]), u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize);
+        let v = b.get(i + 4..i + 4 + len)?;
+        if kind == 0x20 && len >= 8 && v[1] == 1 { return Some(format!("{}.{}.{}.{}", v[4] ^ 0x21, v[5] ^ 0x12, v[6] ^ 0xa4, v[7] ^ 0x42)) }
+        i += 4 + len.div_ceil(4) * 4;
+    }
+    None
+}
+
+/// Asks a home router to send ports 80 and 443 to this computer, for two hours (asked again every hour).
+fn open_ports() {
+    let Ok(gw) = igd_next::search_gateway(igd_next::SearchOptions { timeout: Some(Duration::from_secs(3)), ..Default::default() }) else { return };
+    let Some(local) = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect(gw.addr).is_ok()).and_then(|s| s.local_addr().ok()) else { return };
+    for port in [80, 443] {
+        if let Err(e) = gw.add_port(igd_next::PortMappingProtocol::TCP, port, SocketAddr::new(local.ip(), port), 7200, "Hive") { eprintln!("router: {e}") }
+    }
 }
 
 fn listen(addr: &str, each: impl Fn(std::net::TcpStream) + Send + Sync + 'static) {
@@ -186,9 +230,8 @@ fn issue(host: &str, dir: &Path, tokens: &Mutex<HashMap<String, String>>) -> Res
 }
 
 fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, data).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+    crate::private(path, data);
+    if path.exists() { Ok(()) } else { Err(format!("couldn't write {}", path.display())) }
 }
 
 #[cfg(test)]
