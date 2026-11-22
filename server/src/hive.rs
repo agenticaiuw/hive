@@ -232,7 +232,7 @@ impl Hive {
         }
         for m in plan["messages"].as_array().into_iter().flatten() {
             let tid = m["task"].as_i64().unwrap_or(0);
-            if let Err(e) = self.message_task(tid, &s(&m["text"]), "owner") {
+            if let Err(e) = self.message_task(tid, id, &s(&m["text"]), "owner") {
                 self.log(0, tid, id, "hive", &format!("Couldn't pass the message to task #{tid}: {e}"));
             }
         }
@@ -369,10 +369,10 @@ impl Hive {
     }
 
     /// A message for a task's agent: steered into its turn if it's working, else a new turn.
-    pub fn message_task(self: &Arc<Self>, task_id: i64, text: &str, from: &str) -> Result<(), String> {
+    pub fn message_task(self: &Arc<Self>, task_id: i64, request: i64, text: &str, from: &str) -> Result<(), String> {
         let task = self.db.get("select * from tasks where id=?", args!(task_id)).ok_or(format!("there's no task #{task_id}"))?;
         let agent = task["agent_id"].as_i64().ok_or("that task has no agent yet")?;
-        self.log(agent, task_id, 0, from, text);
+        self.log(agent, task_id, request, from, text);
         if matches!(s(&task["status"]).as_str(), "needs" | "done" | "dropped") {
             self.db.run("update tasks set status='working', why=null, need=null, updated=? where id=?", args!(now(), task_id));
         }
@@ -589,7 +589,7 @@ impl Hive {
         match name {
             "message_agent" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;
-                self.message_task(to, &s(&a["text"]), &format!("task #{task}'s agent"))?;
+                self.message_task(to, 0, &s(&a["text"]), &format!("task #{task}'s agent"))?;
                 return Ok(json!(format!("Sent to task #{to}'s agent.")));
             }
             "info" => {
