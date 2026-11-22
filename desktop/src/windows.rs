@@ -81,7 +81,7 @@ fn move_to(x: f64, y: f64) -> Result<(), String> {
     send(&[mouse(dx, dy, 0, MOVE | ABSOLUTE)])
 }
 
-pub fn screenshot() -> Result<Value, String> {
+pub fn screenshot(_app: &str) -> Result<Value, String> {
     screen();
     let file = std::env::temp_dir().join(format!("hive-shot-{}.jpg", std::process::id()));
     let script = format!(r#"Add-Type -AssemblyName System.Windows.Forms, System.Drawing

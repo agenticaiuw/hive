@@ -1,14 +1,16 @@
-//! The Mac's screen, mouse and keyboard. Input goes through the owner's input helper (/tmp/agent-vhid.sock: a virtual keyboard
-//! and mouse that hands control back the moment the owner touches theirs); screenshots through screencapture. x/y are screen
-//! points, which are also the screenshot's pixels.
+//! The Mac's screen, mouse and keyboard, driven the way macOS lets one app drive another: CoreGraphics events. After a
+//! screenshot of one app's window they go to that app alone (posted to its process, naming its window), so the owner keeps
+//! their pointer and keyboard; after a screenshot of the whole screen they go through the Mac's own event stream, which
+//! reaches everything (Dock, menu bar, cmd+space) and moves the pointer. Hive needs the Accessibility permission for both.
 use crate::common::pause;
 use hive_protocol::b64;
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::ffi::c_void;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock};
 
 pub const KIND: &str = "mac";
 pub const NAME: &str = "Mac";
@@ -26,58 +28,187 @@ pub fn shell(cmd: &str) -> Command {
     c
 }
 
+type Ref = *const c_void;
+#[repr(C)] #[derive(Clone, Copy)] struct Point { x: f64, y: f64 }
+#[repr(C)] #[derive(Clone, Copy)] struct Rect { origin: Point, size: Point }
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventCreate(source: Ref) -> Ref;
+    fn CGEventGetLocation(event: Ref) -> Point;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> Rect;
+    fn CGEventSourceCreate(state: i32) -> Ref;
+    fn CGEventCreateMouseEvent(source: Ref, kind: u32, at: Point, button: u32) -> Ref;
+    fn CGEventCreateKeyboardEvent(source: Ref, key: u16, down: bool) -> Ref;
+    fn CGEventCreateScrollWheelEvent2(source: Ref, units: u32, count: u32, w1: i32, w2: i32, w3: i32) -> Ref;
+    fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
+    fn CGEventSetFlags(event: Ref, flags: u64);
+    fn CGEventSetLocation(event: Ref, at: Point);
+    fn CGEventKeyboardSetUnicodeString(event: Ref, len: usize, text: *const u16);
+    fn CGEventPostToPid(pid: i32, event: Ref);
+    fn CGEventPost(tap: u32, event: Ref);
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Ref;
+    fn CGSMainConnectionID() -> i32;
+    fn CGSCopySpacesForWindows(connection: i32, mask: i32, windows: Ref) -> Ref;
+}
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    pub fn AXIsProcessTrusted() -> bool;
+    pub fn AXIsProcessTrustedWithOptions(options: Ref) -> bool;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" { fn CFRelease(cf: Ref); }
+
+/// Where input goes: one app's window (its process, its window number, where it is on the screen), or the whole Mac.
+#[derive(Clone, Copy)]
+enum Target { App { pid: i32, window: u32, at: Point, size: Point }, Mac }
+static TARGET: Mutex<Target> = Mutex::new(Target::Mac);
+
+/// What the last screenshot showed, once macOS lets Hive send events.
+fn target() -> Result<Target, String> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("macOS isn't letting Hive control this Mac yet: the owner turns on Hive in System Settings > Privacy & Security > Accessibility.".into());
+    }
+    Ok(*TARGET.lock().unwrap())
+}
+
+/// (x, y) in the last screenshot as a point on the screen.
+fn point(t: Target, x: f64, y: f64) -> Result<Point, String> {
+    let (at, size) = match t { Target::App { at, size, .. } => (at, size), Target::Mac => { let (w, h) = screen_size(); (Point { x: 0.0, y: 0.0 }, Point { x: w, y: h }) } };
+    if x < 0.0 || y < 0.0 || x >= size.x || y >= size.y { return Err(format!("({x:.0}, {y:.0}) is outside the screenshot ({:.0}x{:.0})", size.x, size.y)); }
+    Ok(Point { x: at.x + x, y: at.y + y })
+}
+
+/// Sends an event where `t` says and frees it. An app's own events carry their source's private key state, so keys the
+/// owner holds down don't mix in; mouse events name the window, which is how an app that isn't in front knows which is meant.
+fn post(t: Target, make: impl FnOnce(Ref) -> Ref) -> Result<(), String> {
+    static PRIVATE: OnceLock<usize> = OnceLock::new();
+    unsafe {
+        let source = match t { Target::App { .. } => *PRIVATE.get_or_init(|| CGEventSourceCreate(-1) as usize) as Ref, Target::Mac => std::ptr::null() };
+        let e = make(source);
+        if e.is_null() { return Err("macOS didn't make the event".into()); }
+        match t {
+            Target::App { pid, window, .. } => { for field in [91, 92] { CGEventSetIntegerValueField(e, field, window as i64); } CGEventPostToPid(pid, e) }
+            Target::Mac => CGEventPost(0, e),
+        }
+        CFRelease(e);
+    }
+    Ok(())
+}
+
+fn mouse(t: Target, kind: u32, at: Point, button: u32, clicks: i64) -> Result<(), String> {
+    post(t, |s| unsafe { let e = CGEventCreateMouseEvent(s, kind, at, button); if !e.is_null() { CGEventSetIntegerValueField(e, 1, clicks); } e })
+}
+
+const MOVED: u32 = 5;
+
 pub fn click(x: f64, y: f64, right: bool, count: i64) -> Result<(), String> {
-    let bit = if right { 2 } else { 1 };
-    move_to(x, y)?;
-    pause(60);
-    for i in 0..count {
-        send(&format!("buttons {bit}"))?;
-        pause(50);
-        send("buttons 0")?;
-        if i + 1 < count { pause(90); }
+    let t = target()?;
+    let at = point(t, x, y)?;
+    let (down, up, button) = if right { (3, 4, 1) } else { (1, 2, 0) };
+    mouse(t, MOVED, at, 0, 0)?;
+    pause(30);
+    for n in 1..=count {
+        mouse(t, down, at, button, n)?;
+        pause(30);
+        mouse(t, up, at, button, n)?;
+        pause(40);
     }
     Ok(())
 }
 
 pub fn drag(x: f64, y: f64, to_x: f64, to_y: f64) -> Result<(), String> {
-    move_to(x, y)?;
+    let t = target()?;
+    let (from, to) = (point(t, x, y)?, point(t, to_x, to_y)?);
+    mouse(t, MOVED, from, 0, 0)?;
+    pause(30);
+    mouse(t, 1, from, 0, 1)?;
     pause(80);
-    send("buttons 1")?;
-    pause(100);
-    let moved = move_to(to_x, to_y);
-    pause(80);
-    send("buttons 0").ok();
-    moved
+    for i in 1..=12 {
+        let f = i as f64 / 12.0;
+        mouse(t, 6, Point { x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f }, 0, 1)?;
+        pause(16);
+    }
+    mouse(t, 2, to, 0, 1)
 }
 
 pub fn scroll(x: f64, y: f64, dx: i64, dy: i64) -> Result<(), String> {
-    move_to(x, y)?;
-    // Rolling a wheel away from you is +1; natural scrolling flips what that does.
-    let natural = Command::new("defaults").args(["read", "-g", "com.apple.swipescrolldirection"]).output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() != "0").unwrap_or(true);
-    let sign = if natural { 1 } else { -1 };
-    for (amount, fmt) in [(dy, "{} 0"), (dx, "0 {}")] {
-        for _ in 0..amount.abs() {
-            send(&format!("scroll {}", fmt.replace("{}", &(sign * amount.signum()).to_string())))?;
-            pause(30);
-        }
+    let t = target()?;
+    let at = point(t, x, y)?;
+    mouse(t, MOVED, at, 0, 0)?;
+    // A notch at a time; wheel lines are positive up and left, the tool's are positive down and right.
+    for i in 0..dy.abs().max(dx.abs()) {
+        let (wy, wx) = (if i < dy.abs() { -dy.signum() } else { 0 }, if i < dx.abs() { -dx.signum() } else { 0 });
+        post(t, |s| unsafe { let e = CGEventCreateScrollWheelEvent2(s, 1, 2, wy as i32, wx as i32, 0); if !e.is_null() { CGEventSetLocation(e, at); } e })?;
+        pause(20);
     }
     Ok(())
 }
 
-// ---- the screen: CoreGraphics for the cursor and display size ----
-
-#[repr(C)] #[derive(Clone, Copy)] struct Point { x: f64, y: f64 }
-#[repr(C)] #[derive(Clone, Copy)] struct Rect { origin: Point, size: Point }
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
-    fn CGEventGetLocation(event: *const std::ffi::c_void) -> Point;
-    fn CGMainDisplayID() -> u32;
-    fn CGDisplayBounds(display: u32) -> Rect;
+fn press(t: Target, code: u16, flags: u64) -> Result<(), String> {
+    for down in [true, false] {
+        post(t, |s| unsafe { let e = CGEventCreateKeyboardEvent(s, code, down); if !e.is_null() { CGEventSetFlags(e, flags); } e })?;
+        pause(12);
+    }
+    Ok(())
 }
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" { fn CFRelease(cf: *const std::ffi::c_void); }
+
+pub fn key(combo: &str) -> Result<(), String> {
+    let t = target()?;
+    let (code, flags) = chord(combo)?;
+    press(t, code, flags)
+}
+
+
+/// Types the characters themselves, whatever the keyboard layout; a new line is the return key.
+pub fn type_text(text: &str) -> Result<(), String> {
+    let t = target()?;
+    for c in text.chars() {
+        if c == '\n' { press(t, 36, 0)?; continue; }
+        let mut units = [0u16; 2];
+        let units = c.encode_utf16(&mut units);
+        for down in [true, false] {
+            post(t, |s| unsafe { let e = CGEventCreateKeyboardEvent(s, 0, down); if !e.is_null() { CGEventKeyboardSetUnicodeString(e, units.len(), units.as_ptr()); } e })?;
+        }
+        pause(4);
+    }
+    Ok(())
+}
+
+/// "shift+cmd+t": the key's code and the modifiers' flags.
+fn chord(combo: &str) -> Result<(u16, u64), String> {
+    let low = combo.to_lowercase().replace(' ', "");
+    let parts: Vec<&str> = low.split('+').collect();
+    let (last, mods) = parts.split_last().filter(|(l, _)| !l.is_empty()).ok_or_else(|| format!("no key in {combo}"))?;
+    let mut flags = 0;
+    for m in mods {
+        flags |= match *m {
+            "cmd" | "command" | "meta" | "super" => 0x100000, "shift" => 0x20000, "alt" | "opt" | "option" => 0x80000,
+            "ctrl" | "control" => 0x40000, "fn" => 0x800000, _ => return Err(format!("unknown modifier {m} in {combo}")),
+        };
+    }
+    Ok((keycode(last).ok_or_else(|| format!("unknown key {last} in {combo}"))?, flags))
+}
+
+fn keycode(name: &str) -> Option<u16> {
+    Some(match name {
+        "return" | "enter" => 36, "tab" => 48, "space" => 49, "delete" | "backspace" => 51, "escape" | "esc" => 53,
+        "forwarddelete" | "forward_delete" => 117, "home" => 115, "end" => 119, "pageup" | "page_up" => 116,
+        "pagedown" | "page_down" => 121, "left" => 123, "right" => 124, "down" => 125, "up" => 126,
+        _ => {
+            if let Some(n) = name.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=12).contains(n)) {
+                return Some([122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111][n - 1]);
+            }
+            // The US layout's keys in key-code order (\0 where a key has no character).
+            const KEYS: &str = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\0\0`";
+            let mut cs = name.chars();
+            let c = cs.next().filter(|&c| c != '\0' && cs.next().is_none())?;
+            KEYS.find(c)? as u16
+        }
+    })
+}
+
+// ---- the screen ----
 
 fn cursor() -> (f64, f64) {
     unsafe {
@@ -94,181 +225,70 @@ fn screen_size() -> (f64, f64) {
     (r.size.x, r.size.y)
 }
 
-pub fn screenshot() -> Result<Value, String> {
+/// The front window of the app called `app` (or whose name has it in it): one on this desktop if it has one, else one on
+/// another desktop.
+fn window(app: &str) -> Result<(Target, String), String> {
+    let list = unsafe { Retained::from_raw(CGWindowListCopyWindowInfo(16, 0) as *mut NSArray<NSDictionary<NSString, AnyObject>>) }
+        .ok_or("macOS didn't list the windows")?;
+    let get = |d: &NSDictionary<NSString, AnyObject>, k: &str| d.objectForKey(&NSString::from_str(k));
+    let num = |v: Option<Retained<AnyObject>>| v.and_then(|v| v.downcast::<NSNumber>().ok()).map(|n| n.doubleValue()).unwrap_or(0.0);
+    let text = |v: Option<Retained<AnyObject>>| v.and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
+    let want = app.trim().to_lowercase();
+    let mut windows: Vec<_> = list.iter().filter_map(|d| {
+        let b = get(&d, "kCGWindowBounds")?.downcast::<NSDictionary>().ok()?;
+        let f = |k: &str| num(b.objectForKey(&NSString::from_str(k)));
+        let size = Point { x: f("Width"), y: f("Height") };
+        let id = num(get(&d, "kCGWindowNumber")) as u32;
+        // A window that's on no desktop is one the app closed but keeps.
+        let shown = || unsafe {
+            let ids = NSArray::from_retained_slice(&[NSNumber::numberWithUnsignedInt(id)]);
+            Retained::from_raw(CGSCopySpacesForWindows(CGSMainConnectionID(), 7, Retained::as_ptr(&ids).cast()) as *mut NSArray).is_some_and(|s| s.count() > 0)
+        };
+        (num(get(&d, "kCGWindowLayer")) == 0.0 && num(get(&d, "kCGWindowAlpha")) > 0.0 && size.x >= 50.0 && size.y >= 50.0 && shown()).then(|| {
+            let t = Target::App { pid: num(get(&d, "kCGWindowOwnerPID")) as i32, window: id, at: Point { x: f("X"), y: f("Y") }, size };
+            (text(get(&d, "kCGWindowOwnerName")), text(get(&d, "kCGWindowName")), t, get(&d, "kCGWindowIsOnscreen").is_none())
+        })
+    }).collect();
+    windows.sort_by_key(|w| w.3);
+    let found = windows.iter().find(|w| w.0.to_lowercase() == want).or_else(|| windows.iter().find(|w| w.0.to_lowercase().contains(&want)));
+    let (owner, title, t, _) = found.ok_or_else(|| format!("{app} has no window (it isn't open, or its windows are minimized)"))?;
+    Ok((*t, if title.is_empty() { owner.clone() } else { format!("{owner}'s window \"{title}\"") }))
+}
+
+/// The whole screen, or one app's front window (even under other windows); the other tools then act in what it showed.
+pub fn screenshot(app: &str) -> Result<Value, String> {
     let file = std::env::temp_dir().join(format!("hive-shot-{}.jpg", std::process::id()));
     let p = file.to_string_lossy().into_owned();
-    let (w, _) = screen_size();
-    let ok = Command::new("screencapture").args(["-x", "-m", "-t", "jpg", &p]).status().map(|s| s.success()).unwrap_or(false);
-    if !ok { return Err("screencapture failed (Hive needs Screen Recording permission)".into()); }
-    // Retina captures are 2x; shrink to points so the image's pixels are the click coordinates.
-    Command::new("sips").args(["--resampleWidth", &(w as i64).to_string(), &p]).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
+    let (t, what) = if app.trim().is_empty() { (Target::Mac, String::new()) } else { window(app)? };
+    let (args, width) = match t {
+        Target::App { window, size, .. } => (vec!["-x".to_string(), "-o".into(), "-l".into(), window.to_string()], size.x),
+        Target::Mac => (vec!["-x".to_string(), "-m".into()], screen_size().0),
+    };
+    let ok = Command::new("screencapture").args(&args).args(["-t", "jpg", &p]).status().map(|s| s.success()).unwrap_or(false);
+    if !ok { return Err("screencapture failed (Hive needs the Screen Recording permission)".into()); }
+    // Retina captures are 2x; shrink to points so the image's pixels are the coordinates the other tools take.
+    Command::new("sips").args(["--resampleWidth", &(width as i64).to_string(), &p]).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
     let data = std::fs::read(&file).map_err(|e| e.to_string())?;
     std::fs::remove_file(&file).ok();
-    let (x, y) = cursor();
-    Ok(json!({ "text": format!("The Mac's screen; the pointer is at ({x:.0}, {y:.0})."), "images": [format!("data:image/jpeg;base64,{}", b64::encode(&data))] }))
-}
-
-// ---- the input helper ----
-
-static HELPER: Mutex<Option<BufReader<UnixStream>>> = Mutex::new(None);
-static PPC: Mutex<f64> = Mutex::new(1.0);
-
-/// The helper chimes when it takes or gives back the keyboard unless its sound switch says off; the owner wants no tone.
-fn quiet() {
-    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support");
-    std::fs::create_dir_all(dir.join("Hive")).ok(); // "Personal Agent" links to it on Macs set up before
-    std::fs::create_dir_all(dir.join("Personal Agent")).ok();
-    std::fs::write(dir.join("Personal Agent/speak-aloud"), "off\n").ok();
-}
-
-fn request(line: &str) -> Result<String, String> {
-    let mut slot = HELPER.lock().unwrap();
-    for attempt in 0..2 {
-        if slot.is_none() {
-            let st = UnixStream::connect("/tmp/agent-vhid.sock").map_err(|_| "The Mac's input helper isn't running.".to_string())?;
-            quiet();
-            st.set_read_timeout(Some(Duration::from_secs(30))).ok();
-            *slot = Some(BufReader::new(st));
-        }
-        let r = slot.as_mut().unwrap();
-        let mut reply = String::new();
-        let ok = r.get_mut().write_all(format!("{line}\n").as_bytes()).is_ok() && r.read_line(&mut reply).map(|n| n > 0).unwrap_or(false);
-        if ok { return Ok(reply.trim().to_string()); }
-        *slot = None;
-        if attempt == 1 { break; }
-    }
-    Err("Lost the connection to the Mac's input helper.".into())
-}
-
-fn send(line: &str) -> Result<String, String> {
-    let mut reply = request(line)?;
-    if !reply.starts_with("ok") && reply.contains("disengaged") {
-        // The owner touched their keyboard or mouse earlier; ask for control again (it's given once their hands are off).
-        request("engage")?;
-        let end = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < end {
-            if request("status")?.contains("state=engaged") { break; }
-            pause(200);
-        }
-        reply = request(line)?;
-    }
-    if reply.starts_with("ok") { return Ok(reply); }
-    Err(if reply.contains("disengaged") {
-        "The owner is using the Mac's keyboard or mouse right now, so Hive let go. Wait a little and try again.".into()
-    } else { format!("The input helper refused: {reply}") })
-}
-
-/// Moves the pointer to (x, y): the virtual mouse only moves relatively, so nudge, look, and learn how far a count goes.
-fn move_to(x: f64, y: f64) -> Result<(), String> {
-    let (w, h) = screen_size();
-    if x < 0.0 || y < 0.0 || x >= w || y >= h { return Err(format!("({x:.0}, {y:.0}) is off the screen ({w:.0}x{h:.0})")); }
-    let mut stalled = 0;
-    for _ in 0..200 {
-        let before = cursor();
-        let (ex, ey) = (x - before.0, y - before.1);
-        if ex.abs() <= 0.75 && ey.abs() <= 0.75 { return Ok(()); }
-        let ppc = *PPC.lock().unwrap();
-        let count = |e: f64| { let c = (e / ppc * 0.8).round() as i64; (if c == 0 && e.abs() > 0.5 { e.signum() as i64 } else { c }).clamp(-127, 127) };
-        let (cx, cy) = (count(ex), count(ey));
-        send(&format!("move {cx} {cy}"))?;
-        pause(12);
-        let after = cursor();
-        let (sent, moved) = ((cx as f64).hypot(cy as f64), (after.0 - before.0).hypot(after.1 - before.1));
-        if sent >= 3.0 { let mut p = PPC.lock().unwrap(); *p = 0.7 * *p + 0.3 * (moved / sent).clamp(0.05, 10.0); }
-        stalled = if moved < 0.01 { stalled + 1 } else { 0 };
-        if stalled >= 15 { return Err("The pointer stopped moving; is the virtual mouse ready?".into()); }
-    }
-    Err(format!("The pointer didn't reach ({x:.0}, {y:.0})."))
-}
-
-fn modifier(name: &str) -> Option<u8> {
-    Some(match name { "ctrl" | "control" => 1, "shift" => 2, "alt" | "opt" | "option" => 4, "cmd" | "command" | "meta" => 8, _ => return None })
-}
-
-fn named(name: &str) -> Option<u8> {
-    Some(match name {
-        "return" | "enter" => 0x28, "esc" | "escape" => 0x29, "backspace" | "delete" => 0x2A, "tab" => 0x2B, "space" => 0x2C,
-        "forwarddelete" => 0x4C, "home" => 0x4A, "pageup" => 0x4B, "end" => 0x4D, "pagedown" => 0x4E,
-        "right" => 0x4F, "left" => 0x50, "down" => 0x51, "up" => 0x52,
-        _ => match name.strip_prefix('f')?.parse::<u8>().ok()? { n @ 1..=12 => 0x3A + n - 1, _ => return None },
-    })
-}
-
-/// The key that types `c` on a US keyboard, and whether it needs shift.
-fn char_key(c: char) -> Option<(u8, bool)> {
-    const PLAIN: &str = "-=[]\\;'`,./";
-    const SHIFTED: &str = "_+{}|:\"~<>?";
-    const PLAIN_USAGE: [u8; 11] = [0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38];
-    match c {
-        'a'..='z' => Some((0x04 + (c as u8 - b'a'), false)),
-        'A'..='Z' => Some((0x04 + (c as u8 - b'A'), true)),
-        ' ' => Some((0x2C, false)), '\n' => Some((0x28, false)), '\t' => Some((0x2B, false)),
-        _ => "1234567890".find(c).map(|i| (0x1E + i as u8, false))
-            .or_else(|| "!@#$%^&*()".find(c).map(|i| (0x1E + i as u8, true)))
-            .or_else(|| PLAIN.find(c).map(|i| (PLAIN_USAGE[i], false)))
-            .or_else(|| SHIFTED.chars().position(|x| x == c).map(|i| (PLAIN_USAGE[i], true))),
-    }
-}
-
-pub fn key(combo: &str) -> Result<(), String> {
-    let parts: Vec<String> = combo.replace(' ', "").split('+').filter(|p| !p.is_empty()).map(String::from).collect();
-    let (mut mods, mut usage) = (0u8, None);
-    for (i, p) in parts.iter().enumerate() {
-        let low = p.to_lowercase();
-        if let Some(b) = modifier(&low) { mods |= b; continue; }
-        if i + 1 != parts.len() { return Err(format!("unknown modifier {p} in {combo}")); }
-        let single = if p.chars().count() == 1 { char_key(p.chars().next().unwrap()) } else { None };
-        match (named(&low), single) {
-            (Some(u), _) => usage = Some(u),
-            (None, Some((u, shifted))) => { usage = Some(u); if shifted { mods |= 2; } }
-            _ => return Err(format!("unknown key {p} in {combo}")),
-        }
-    }
-    if mods != 0 { send(&format!("keys {mods}"))?; pause(30); }
-    let pressed = match usage {
-        Some(u) => send(&format!("keys {mods} {u}")).and_then(|_| { pause(50); send(&format!("keys {mods}")) }),
-        None => Ok(String::new()),
+    *TARGET.lock().unwrap() = t;
+    let text = match t {
+        Target::App { .. } => format!("{what}. Clicks, keys and typing now go to this app alone, in the background; the owner's pointer and keyboard stay theirs."),
+        Target::Mac => { let (x, y) = cursor(); format!("The Mac's screen; the pointer is at ({x:.0}, {y:.0}). Clicks, keys and typing now use the Mac's own pointer and keyboard.") }
     };
-    send("keys 0").ok();
-    pressed.map(|_| ())
-}
-
-pub fn type_text(text: &str) -> Result<(), String> {
-    let mut other = String::new();
-    for c in text.chars() {
-        let Some((u, shifted)) = char_key(c) else { other.push(c); continue };
-        if !other.is_empty() { paste(&other)?; other.clear(); }
-        let m = if shifted { 2 } else { 0 };
-        send(&format!("keys {m} {u}"))?;
-        pause(30);
-        send(&format!("keys {m}"))?;
-        if shifted { send("keys 0")?; }
-        pause(35);
-    }
-    if !other.is_empty() { paste(&other)?; }
-    Ok(())
-}
-
-/// Characters a US keyboard can't type go in through the clipboard (which is put back afterwards).
-fn paste(text: &str) -> Result<(), String> {
-    let before = Command::new("pbpaste").output().map(|o| o.stdout).unwrap_or_default();
-    let put = |b: &[u8]| { if let Ok(mut c) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() { c.stdin.take().unwrap().write_all(b).ok(); c.wait().ok(); } };
-    put(text.as_bytes());
-    let r = key("cmd+v");
-    pause(300);
-    put(&before);
-    r
+    Ok(json!({ "text": text, "images": [format!("data:image/jpeg;base64,{}", b64::encode(&data))] }))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn keys() {
-        assert_eq!(super::char_key('a'), Some((0x04, false)));
-        assert_eq!(super::char_key('?'), Some((0x38, true)));
-        assert_eq!(super::char_key('"'), Some((0x34, true)));
-        assert_eq!(super::char_key('é'), None);
-        assert_eq!(super::named("f12"), Some(0x45));
+        assert_eq!(super::keycode("a"), Some(0));
+        assert_eq!(super::keycode("`"), Some(50));
+        assert_eq!(super::keycode("/"), Some(44));
+        assert_eq!(super::keycode("l"), Some(37));
+        assert_eq!(super::keycode("f12"), Some(111));
+        assert_eq!(super::keycode("é"), None);
+        assert_eq!(super::chord("cmd+shift+T"), Ok((17, 0x120000)));
     }
 }
 
@@ -307,3 +327,4 @@ fn copy_app_replaces_an_older_copy() {
     assert!(!dest.join("Contents/stale").exists() && !dest.with_extension("app.new").exists() && app.exists());
     std::fs::remove_dir_all(&t).ok();
 }
+

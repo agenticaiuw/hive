@@ -22,7 +22,17 @@ pub fn tools() -> Vec<Value> {
         tool(&format!("{k}_key"), &format!("Press keys on the {on}, e.g. {}.", os::KEYS), json!({ "keys": s("Keys joined with +") }), &["keys"]),
     ];
     for t in &mut input { t["lock"] = json!("input"); }
-    let mut all = vec![tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in the other {k} tools are pixels in this image."), json!({}), &[])];
+    let shot = if cfg!(target_os = "macos") {
+        tool("mac_screenshot", "See the owner's Mac: the whole screen, or with app (e.g. \"Safari\") only that app's front window, even under \
+            other windows. The other mac tools then act in what it showed, x/y being its pixels: in an app's window they go to that app alone, \
+            in the background, and the owner keeps their pointer and keyboard (clicks, scrolling, typing and keys like return work there; \
+            shortcuts through the app's menus, like cmd+s, don't); on the whole screen they use the Mac's own pointer and keyboard, \
+            which reach everything (Dock, menu bar, cmd+space) but move the owner's pointer.",
+            json!({ "app": s("An app's name for only its window, or \"\" for the whole screen") }), &["app"])
+    } else {
+        tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in the other {k} tools are pixels in this image."), json!({}), &[])
+    };
+    let mut all = vec![shot];
     all.append(&mut input);
     all.extend([
         tool(&format!("{k}_shell"), &format!("Run a command on the owner's {on} ({}, as the owner) and get its output.", os::SHELL),
@@ -38,7 +48,7 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
     let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
     let done = |t: &str| Ok(json!({ "text": t }));
     match tool.strip_prefix(os::KIND).and_then(|t| t.strip_prefix('_')).unwrap_or("") {
-        "screenshot" => os::screenshot(),
+        "screenshot" => os::screenshot(a["app"].as_str().unwrap_or("")),
         "click" => { os::click(f("x"), f("y"), a["button"] == "right", a["count"].as_i64().unwrap_or(1).clamp(1, 3))?; done("Clicked.") }
         "drag" => { os::drag(f("x"), f("y"), f("to_x"), f("to_y"))?; done("Dragged.") }
         "scroll" => { os::scroll(f("x"), f("y"), f("dx") as i64, f("dy") as i64)?; done("Scrolled.") }
