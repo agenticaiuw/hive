@@ -42,7 +42,7 @@ import SafariServices
         let data = (try? Data(contentsOf: URL(fileURLWithPath: home + "/.config/hive/node.json"))) ?? Data()
         let conf = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         let item = NSExtensionItem()
-        item.userInfo = [SFExtensionMessageKey: ["server": conf["server"] ?? "", "token": conf["token"] ?? ""]]
+        item.userInfo = [SFExtensionMessageKey: ["server": conf["server"] ?? "", "token": conf["token"] ?? "", "id": conf["id"] ?? ""]]
         context.completeRequest(returningItems: [item])
     }
 }
