@@ -30,9 +30,9 @@ fn valid(hive: &Hive, t: &str) -> bool {
 }
 fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
 
-/// A new device token for a pairing code or the owner key; None if neither matches.
+/// A new device token for a pairing code (or the whole pairing link) or the owner key; None if neither matches.
 fn pair(hive: &Hive, secret: &str, node: &str) -> Option<String> {
-    let secret = secret.trim();
+    let secret = secret.trim().rsplit("#pair=").next().unwrap_or_default();
     let code_ok = secret.len() >= 6 && hive.db.get("select 1 from tokens where hash=? and node='code' and at > ?", args!(hash(&format!("code:{secret}")), now() - 600_000)).is_some();
     if !(code_ok || (!secret.is_empty() && secret == hive.owner_key)) { return None; }
     if code_ok { hive.db.run("delete from tokens where hash=?", args!(hash(&format!("code:{secret}")))); }
@@ -99,7 +99,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             if req.q("wait") != "1" { return Res::json(&json!({ "id": rid })); }
             hive.wait_until(170_000, || hive.db.get("select * from requests where id=? and status not in ('new','planning')", args!(rid)));
             let r = hive.db.get("select * from requests where id=?", args!(rid)).unwrap_or(json!({}));
-            let tasks = hive.db.all("select id, title, quote, status from tasks where request_id=?", args!(rid));
+            // The tasks it went to: new ones, and open ones whose agent got it as a message.
+            let tasks = hive.db.all("select id, title, quote, status from tasks where request_id=?1
+                or id in (select task_id from log where request_id=?1 and task_id>0 and who='owner')", args!(rid));
             let ctx = &b["context"];
             let rules = rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]));
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
@@ -122,7 +124,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "log": hive.db.all("select * from log where task_id=? and id > ? order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
         })),
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
-        ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), &s(&b["text"]), "owner") {
+        ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), 0, &s(&b["text"]), "owner") {
             Ok(()) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(409, &e),
         },
