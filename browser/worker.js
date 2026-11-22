@@ -168,7 +168,14 @@ async function pageCode(url) {
 }
 chrome.webNavigation.onCommitted.addListener(async ({ tabId, frameId, url }) => {
   if (frameId) return;
-  for (const { css } of await pageCode(url)) if (css) chrome.scripting.insertCSS({ target: { tabId }, css }).catch(() => {});
+  for (const { css, js } of await pageCode(url)) {
+    const redirect = js?.match(/^\/\/ hive-redirect: (\/\S*|\/) (\/\S*)$/m);
+    if (redirect && new URL(url).pathname === redirect[1]) {
+      await chrome.tabs.update(tabId, { url: new URL(redirect[2], url).href }).catch(() => {});
+      return;
+    }
+    if (css) chrome.scripting.insertCSS({ target: { tabId }, css }).catch(() => {});
+  }
 });
 const pageJs = async ({ tabId, frameId, url }) => {
   if (frameId) return;
