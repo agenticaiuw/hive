@@ -134,4 +134,6 @@ jobs:
           gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push."
           gh release upload latest out/* --clobber
           echo "${GITHUB_SHA::12}" > version && gh release upload latest version --clobber
-          gh release edit latest --notes "Built from main at ${GITHUB_SHA::12}."
+          # One release, `latest`, whose files every push replaces: GitHub shows when it was first made, so its title says
+          # when these files were built.
+          gh release edit latest --title "Hive, built $(date -u '+%b %-d %H:%M UTC') from ${GITHUB_SHA::7}" --notes "Built from main at ${GITHUB_SHA::12}."
