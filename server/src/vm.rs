@@ -29,16 +29,17 @@ fn sh(cmd: &str, dir: &Path) -> (bool, String) {
     }
 }
 
-/// Take in the changes the Mac pushed over SSH to the branch `incoming` (keeping this checkout's own commits on top), build,
-/// and restart Hive's server and the VM's devices; the restart comes after this answer is sent. (Not from GitHub until the
-/// org move: fetches there count as clones.)
+/// Take in GitHub's main (keeping this checkout's own commits on top), build, push to GitHub, which builds and signs what every
+/// device downloads, and restart Hive's server; the restart comes after this answer is sent.
 pub fn reinstall(repo: &Path) -> Result<Value, String> {
-    let (ok, out) = sh("(! git rev-parse -q --verify incoming >/dev/null || git rebase --autostash -q incoming || git rebase --abort); CARGO_TARGET_DIR=target cargo build --release -p hive-server 2>&1 | tail -30", repo);
+    let (ok, out) = sh("(git pull -q --rebase --autostash origin main || git rebase --abort); CARGO_TARGET_DIR=target cargo build --release -p hive-server 2>&1 | tail -30", repo);
     let tail: String = out.chars().rev().take(4000).collect::<String>().chars().rev().collect();
     if !ok || tail.contains("error[") || tail.contains("error:") { return Err(format!("The build failed:\n{tail}")); }
+    let (pushed, why) = sh("git push -q origin HEAD:main 2>&1", repo);
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(2));
         Command::new("systemctl").args(["--no-block", "restart", "hive-server"]).status().ok();
     });
-    Ok(json!("Built. Hive's server restarts in a moment; your turn continues after it's back."))
+    let pushed = if pushed { "pushed to GitHub, whose build the devices update to".to_string() } else { format!("not pushed to GitHub: {why}") };
+    Ok(json!(format!("Built and {pushed}. Hive's server restarts in a moment; your turn continues after it's back.")))
 }

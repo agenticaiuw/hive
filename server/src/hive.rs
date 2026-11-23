@@ -303,7 +303,7 @@ impl Hive {
                 t += VM_NOTES;
                 if nodes.iter().any(|n| n == "hive") {
                     t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. \
-                        Commit with a clear message, then call reinstall; devices with a checkout of Hive pick the commit up from here.", repo.display());
+                        Commit with a clear message, then call reinstall.", repo.display());
                 }
             }
             None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \

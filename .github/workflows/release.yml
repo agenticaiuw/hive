@@ -13,52 +13,43 @@ concurrency:
 jobs:
   mac:
     runs-on: macos-latest
-    # Hive.app and its .dmg are signed and notarized with the repo's Developer ID secrets; without them nothing Mac is published, since an
-    # unsigned app won't open after download and Safari turns its extension off.
-    env:
-      MAC_CERT: ${{ secrets.MAC_CERT }}
+    # Signed with the repo's Developer ID and notarized with its App Store Connect key, here and only here: every Mac downloads
+    # this build (Safari runs Hive for Safari only from a notarized app). People download Hive-Mac.dmg (Hive.app beside a
+    # shortcut to Applications); installed apps update from Hive-Mac.zip. The server goes out zipped too, since a browser drops
+    # a bare program's permission to run; servers update from hive-server-macos.
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0 } # the devices' version is the last commit to their code
       - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - run: |
           cargo build --release -p hive -p hive-server --target aarch64-apple-darwin
           cargo build --release -p hive -p hive-server --target x86_64-apple-darwin
           mkdir out
           for p in hive hive-server; do lipo -create -output out/$p-macos target/{aarch64,x86_64}-apple-darwin/release/$p; done
-      - if: env.MAC_CERT != ''
-        env: { MAC_CERT_PASSWORD: "${{ secrets.MAC_CERT_PASSWORD }}" }
+      - env:
+          MAC_CERT: ${{ secrets.MAC_CERT }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          echo "$MAC_CERT" | base64 -d > cert.p12
-          security create-keychain -p ci ci.keychain && security default-keychain -s ci.keychain && security unlock-keychain -p ci ci.keychain
+          echo "$MAC_CERT" | base64 -d > cert.p12 && echo "$ASC_KEY_P8" | base64 -d > key.p8
+          security create-keychain -p ci ci.keychain && security list-keychains -d user -s ci.keychain && security unlock-keychain -p ci ci.keychain
           security import cert.p12 -k ci.keychain -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign && rm cert.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k ci ci.keychain > /dev/null
-      - run: desktop/mac/bundle.sh out/Hive.app out/hive-macos && ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
-      - if: env.MAC_CERT != ''
-        env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
-        run: |
-          xcrun notarytool submit out/Hive-Mac.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait
-          xcrun stapler staple out/Hive.app && rm out/Hive-Mac.zip && ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
-      - if: env.MAC_CERT != ''
-        env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
-        run: |
-          codesign -s "Developer ID Application" --options runtime --timestamp out/hive-server-macos
-          ditto -c -k out/hive-server-macos server.zip
-          xcrun notarytool submit server.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait && rm server.zip
-      # People download Hive-Mac.dmg (Hive.app beside a shortcut to Applications, to drag it into); installed apps update from Hive-Mac.zip.
-      # The server goes out zipped too, since a browser drops a bare program's permission to run; servers update from hive-server-macos.
-      - run: |
-          mkdir s && cp out/hive-server-macos s/hive-server && ditto -c -k s/hive-server out/hive-server-macos.zip && rm -rf s
+          id=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ { print $2; exit }')
+          notarize() { xcrun notarytool submit "$1" --key key.p8 --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait | tee notary.log; grep -q "status: Accepted" notary.log; }
+          desktop/mac/bundle.sh out/Hive.app out/hive-macos
+          ditto -c -k --keepParent out/Hive.app app.zip && notarize app.zip && xcrun stapler staple out/Hive.app
+          ditto -c -k --keepParent out/Hive.app out/Hive-Mac.zip
+          codesign -s "$id" -o runtime --timestamp out/hive-server-macos
+          ditto -c -k out/hive-server-macos server.zip && notarize server.zip
+          mkdir s && cp out/hive-server-macos s/hive-server && ditto -c -k s/hive-server out/hive-server-macos.zip
           mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
-          hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg && rm -rf dmg
-      - if: env.MAC_CERT != ''
-        env: { APPLE_ID: "${{ secrets.APPLE_ID }}", APPLE_PASSWORD: "${{ secrets.APPLE_PASSWORD }}", APPLE_TEAM: "${{ secrets.APPLE_TEAM }}" }
-        run: |
-          codesign -s "Developer ID Application" --timestamp out/Hive-Mac.dmg
-          xcrun notarytool submit out/Hive-Mac.dmg --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait
-          xcrun stapler staple out/Hive-Mac.dmg
-      - if: env.MAC_CERT != ''
-        uses: actions/upload-artifact@v4
+          hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg
+          codesign -s "$id" --timestamp out/Hive-Mac.dmg && notarize out/Hive-Mac.dmg && xcrun stapler staple out/Hive-Mac.dmg
+          rm -rf key.p8 app.zip server.zip notary.log s dmg
+      - uses: actions/upload-artifact@v4
         with: { name: mac, path: out }
   windows:
     runs-on: windows-latest

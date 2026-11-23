@@ -16,17 +16,11 @@ mod os;
 #[path = "windows.rs"]
 mod os;
 
-/// The checkout of Hive this binary was built in, if any: Hive's code changes reach this computer through it.
-fn repo() -> String {
-    std::env::current_exe().ok().and_then(|e| e.ancestors().find(|d| d.join(".git").exists() && d.join("desktop").join("Cargo.toml").exists())
-        .map(|d| d.to_string_lossy().into_owned())).unwrap_or_default()
-}
-
 /// The link from the dashboard's Pair a device: `https://<server>/#pair=<code>`.
 fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
     let (server, code) = link.trim().split_once("/#pair=")
         .ok_or("That isn't a pairing link. On your Hive dashboard, choose Pair a device and paste the link it copies.")?;
-    hive_protocol::pair("node", server, code, os::KIND, &os::host(), &repo())
+    hive_protocol::pair("node", server, code, os::KIND, &os::host())
 }
 
 fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }

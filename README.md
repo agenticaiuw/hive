@@ -11,7 +11,7 @@ The club's one project: agents that use your computer, phone and browser the way
 - **One agent per task**, with the tools of the nodes the task needs. A turn ends with done and the outcome, or exactly why it stopped and what the owner must do; there is no "stuck".
 - **Nodes bring their own tools.** A Mac or Windows computer, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.
 - **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
-- **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive; nodes with a checkout pick the change up from the VM.
+- **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive and pushes to GitHub, which builds and signs what every device downloads and updates to.
 
 ## Where things are
 

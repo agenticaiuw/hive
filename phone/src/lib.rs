@@ -32,7 +32,7 @@ pub fn start(state: PathBuf, server: String, owner_key: String) {
         let conf = loop {
             match hive_protocol::load("phone").filter(|c| c.server == server) {
                 Some(c) => break c,
-                None => match hive_protocol::pair("phone", &server, &owner_key, "phone", "iPhone", "") {
+                None => match hive_protocol::pair("phone", &server, &owner_key, "phone", "iPhone") {
                     Ok(c) => break c,
                     Err(_) => std::thread::sleep(std::time::Duration::from_secs(2)),
                 },

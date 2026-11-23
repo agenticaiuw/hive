@@ -212,18 +212,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
-        ("GET", ["api", "git", "bundle"]) => {
-            // Only the commits the device lacks, when it says which one it has.
-            let have = req.q("have").chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>();
-            let Some(repo) = &hive.repo else { return Res::err(404, "This Hive has no checkout to share") };
-            let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(repo).args(a).output();
-            let known = !have.is_empty() && git(&["cat-file", "-e", &format!("{have}^{{commit}}")]).map(|o| o.status.success()).unwrap_or(false);
-            let range = if known { format!("{have}..HEAD") } else { "HEAD".into() };
-            match git(&["bundle", "create", "-", &range]) {
-                Ok(o) if o.status.success() => Res::new(200, "application/octet-stream", o.stdout),
-                _ => Res::err(500, "couldn't bundle Hive's code"),
-            }
-        }
         ("GET", ["api", "vm", "screen"]) => match crate::vm::screen() {
             Some(png) => Res::new(200, "image/png", png),
             None => Res::err(404, "The VM's screen isn't running."),

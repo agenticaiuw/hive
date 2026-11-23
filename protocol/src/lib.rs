@@ -1,5 +1,5 @@
 //! The node side of the protocol (protocol/README.md), for nodes written in Rust: pair, say hello with your tools,
-//! take calls, answer them, and update yourself when the server's code changes.
+//! take calls, answer them, and update yourself to GitHub's build when the server's devices' code changes.
 pub mod b64;
 
 use serde_json::{json, Value};
@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("HIVE_GIT");
-/// The last change to the devices' own code: devices update (and a Mac app rebuilds and signs itself) only when it moves.
+/// The last change to the devices' own code: devices update only when it moves.
 pub const DEVICES: &str = env!("HIVE_DEVICES");
-/// Where downloaded nodes (no checkout of Hive) get each new build: GitHub builds one for every push to main.
+/// Where every device and downloaded server gets each new build: GitHub builds (and signs) one for every push to main.
 pub const RELEASES: &str = "https://github.com/agenticaiuw-org/hive/releases/download/latest";
 
-pub struct Conf { pub server: String, pub token: String, pub id: String, pub repo: String }
+pub struct Conf { pub server: String, pub token: String, pub id: String }
 
 pub struct Node {
     pub kind: &'static str,
@@ -22,7 +22,7 @@ pub struct Node {
     /// What agents should know about this device, one or two sentences.
     pub notes: String,
     pub tools: Vec<Value>,
-    /// The cargo package to rebuild when Hive's code changes (only if the device has a checkout of Hive).
+    /// The program's name in GitHub's builds (hive, hive-server).
     pub package: &'static str,
 }
 
@@ -37,12 +37,11 @@ pub fn load(name: &str) -> Option<Conf> {
         server: v["server"].as_str()?.trim_end_matches('/').into(),
         token: v["token"].as_str()?.into(),
         id: v["id"].as_str()?.into(),
-        repo: v["repo"].as_str().unwrap_or("").into(),
     })
 }
 
 /// Trade a pairing code for this device's token and save it (readable only by this user).
-pub fn pair(name: &str, server: &str, code: &str, kind: &str, label: &str, repo: &str) -> Result<Conf, String> {
+pub fn pair(name: &str, server: &str, code: &str, kind: &str, label: &str) -> Result<Conf, String> {
     let server = server.trim().trim_end_matches('/');
     let server = if server.contains("://") { server.to_string() } else { format!("https://{server}") };
     let r = ureq::post(&format!("{server}/api/pair")).set("content-type", "application/json")
@@ -57,10 +56,10 @@ pub fn pair(name: &str, server: &str, code: &str, kind: &str, label: &str, repo:
     let id = format!("{kind}-{}", label.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>());
     let path = conf_path(name);
     std::fs::create_dir_all(path.parent().unwrap()).ok();
-    std::fs::write(&path, json!({ "server": server, "token": token, "id": id, "repo": repo }).to_string()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json!({ "server": server, "token": token, "id": id }).to_string()).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok(); }
-    Ok(Conf { server, token: token.into(), id, repo: repo.into() })
+    Ok(Conf { server, token: token.into(), id })
 }
 
 pub fn call(c: &Conf, method: &str, path: &str, body: Option<&Value>, secs: u64) -> Result<(u16, Value), String> {
@@ -98,8 +97,7 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
                     let again = tried.0 != want || tried.1.elapsed() > Duration::from_secs(600);
                     if !want.is_empty() && !want.starts_with(DEVICES) && !DEVICES.starts_with(want.as_str()) && again {
                         tried = (want.clone(), Instant::now());
-                        let done = if c.repo.is_empty() { download(node.package, &want) } else { update(&c, node.package) };
-                        if let Err(e) = done { eprintln!("update to {want}: {e}"); }
+                        if let Err(e) = download(node.package, &want) { eprintln!("update to {want}: {e}"); }
                     }
                 }
                 Ok((st, v)) => { eprintln!("hello: {st} {v}"); std::thread::sleep(Duration::from_secs(10)); continue; }
@@ -124,45 +122,13 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
     }
 }
 
-/// Hive's code changed on the VM: bring this checkout to it (fast-forward only), rebuild, and restart into the new build.
-fn update(c: &Conf, package: &str) -> Result<(), String> {
-    let r = ureq::get(&format!("{}/api/git/bundle?have={VERSION}", c.server)).timeout(Duration::from_secs(300))
-        .set("authorization", &format!("Bearer {}", c.token)).call().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    let bundle = std::env::temp_dir().join(format!("hive-{}.bundle", std::process::id()));
-    std::fs::write(&bundle, bytes).map_err(|e| e.to_string())?;
-    // An app started from Finder or at login gets only the system PATH, without rustup's ~/.cargo/bin.
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let path = std::env::join_paths(std::iter::once(PathBuf::from(&home).join(".cargo").join("bin"))
-        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap_or_default();
-    let run = |args: &[&str]| -> Result<(), String> {
-        let o = std::process::Command::new(args[0]).args(&args[1..]).current_dir(&c.repo).env("CARGO_TARGET_DIR", PathBuf::from(&c.repo).join("target"))
-            .env("PATH", &path).output().map_err(|e| e.to_string())?;
-        if o.status.success() { Ok(()) } else { Err(format!("{}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim())) }
-    };
-    let b = bundle.to_string_lossy().into_owned();
-    let fetched = run(&["git", "fetch", &b, "HEAD"]).and_then(|_| run(&["git", "merge", "--ff-only", "FETCH_HEAD"]));
-    std::fs::remove_file(&bundle).ok();
-    fetched?;
-    let exe = PathBuf::from(&c.repo).join("target").join("release").join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
-    // Windows won't overwrite a running program, but it lets it be renamed.
-    #[cfg(windows)]
-    { let old = exe.with_extension("old.exe"); std::fs::remove_file(&old).ok(); std::fs::rename(&exe, &old).ok(); }
-    run(&["cargo", "build", "--release", "-p", package])?;
-    match app() {
-        Some(app) => { run(&["sh", "desktop/mac/bundle.sh", &app.to_string_lossy()])?; restart(app.join("Contents/MacOS").join(package)) }
-        None => restart(exe),
-    }
-}
-
 /// The Mac app this program runs inside (Hive.app), if it does: updates replace the whole app so its signature stays whole.
 fn app() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") { return None; }
     std::env::current_exe().ok()?.ancestors().find(|d| d.extension().is_some_and(|x| x == "app")).map(PathBuf::from)
 }
 
-/// A downloaded program (a node, or a server with no checkout): fetch GitHub's build of version `want` and swap it in for this one.
+/// A device, or a server with no checkout: fetch GitHub's build of version `want` and swap it in for this one.
 pub fn download(package: &str, want: &str) -> Result<(), String> {
     if let Some(app) = app() { return download_app(&app, package, want); }
     let name = match std::env::consts::OS {
