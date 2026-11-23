@@ -1,6 +1,6 @@
-# Hive Phone (phone/ios/build.sh): every push and pull request that touches it builds the unsigned HivePhone.ipa and runs
-# its smoke test on an iPhone simulator. After each release of main it's built again and added to the `latest` release
-# as HivePhone.ipa: on its own here, so a phone build that fails never holds back the server and the other devices.
+# The iPhone's apps (phone/ios/build.sh): every push and pull request that touches them builds the unsigned HivePhone.ipa
+# and Hive.ipa and runs the smoke test on an iPhone simulator. After each release of main they're built again and added
+# to the `latest` release: on their own here, so a phone build that fails never holds back the server and other devices.
 name: phone
 on:
   push:
@@ -25,12 +25,12 @@ jobs:
         with: { go-version: stable, cache: false }
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
-        with: { name: HivePhone, path: target/HivePhone.ipa }
+        with: { name: ipa, path: "target/*.ipa" }
       - if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest target/HivePhone.ipa --clobber
-      # Only to learn from: what a simulator says about the runner and its window, kept in the xcresult.
+        run: gh release upload latest target/HivePhone.ipa target/Hive.ipa --clobber
+      # Only to learn from: what a simulator says about the runner and the Hive app, kept in the xcresult.
       - if: github.event_name != 'workflow_run'
         continue-on-error: true
         timeout-minutes: 20

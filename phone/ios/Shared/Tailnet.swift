@@ -1,12 +1,14 @@
 import Foundation
 import Network
 
-/// Tailscale inside Hive Phone (tailscale/libtailscale, built by build.sh), for a Hive at home on the owner's tailnet
-/// (its address ends in .ts.net): the link and the dashboard reach it through this node's local SOCKS5 proxy, so the
-/// iPhone needs neither the Tailscale app nor a VPN. The node is `hive-phone` on the tailnet; its keys stay in the app's
-/// container, so the owner signs it in once, in Safari, from the dashboard window's button.
+/// Tailscale inside each iPhone app (tailscale/libtailscale, built by build.sh), for a Hive at home on the owner's tailnet
+/// (its address ends in .ts.net): the app reaches it through its node's local SOCKS5 proxy, so the iPhone needs neither
+/// the Tailscale app nor a VPN. Each app is its own node (`hostname`), since apps can't share one; its keys stay in the
+/// app's container, so the owner signs each in once, in Safari.
 final class Tailnet {
     static let shared = Tailnet()
+    /// Its name on the tailnet, set before start: hive-phone (Hive Phone) or hive-app (Hive).
+    var hostname = "hive-phone"
     static let changed = Notification.Name("hive.changed")
 
     /// tailscale's backend state: NeedsLogin, Starting, Running, ...
@@ -24,7 +26,7 @@ final class Tailnet {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let s = tailscale_new()
         tailscale_set_dir(s, dir.path)
-        tailscale_set_hostname(s, "hive-phone")
+        tailscale_set_hostname(s, hostname)
         tailscale_set_logfd(s, -1)
         guard tailscale_start(s) == 0 else { update("Tailscale didn't start: \(Tailnet.error(s))", nil, nil); return }
         sd = s

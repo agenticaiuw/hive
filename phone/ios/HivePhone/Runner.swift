@@ -124,27 +124,27 @@ final class Runner {
 
     // MARK: Apps
 
-    private var own: String { Bundle.main.bundleIdentifier ?? "" }
     private var recent: [String] { UserDefaults.standard.stringArray(forKey: "recentApps") ?? [] }
 
     private func remember(_ id: String) {
         UserDefaults.standard.set(Array(([id] + recent.filter { $0 != id }).prefix(20)), forKey: "recentApps")
     }
 
-    /// The app in front: Hive Phone itself, an app Hive opened, or one of Apple's; otherwise, and whenever the iPhone is
-    /// locked, SpringBoard (home screen, lock screen, system prompts). An app opened from its icon that isn't Apple's
-    /// reads as SpringBoard: XCUITest's public calls can't name it.
+    /// The app in front: SpringBoard when its home screen shows; else an app Hive opened, Hive, or one of Apple's;
+    /// otherwise, and whenever the iPhone is locked, SpringBoard (lock screen, system prompts). Another app opened from
+    /// its icon reads as SpringBoard: XCUITest's public calls can't name it.
     private func front() -> String {
         if Runner.locked() { return Runner.springboard }
-        for id in [own] + recent + Runner.system where XCUIApplication(bundleIdentifier: id).state == .runningForeground { return id }
+        // An app left by Home can still say it's in front; home-screen icons a tap would reach say SpringBoard is.
+        let icon = XCUIApplication(bundleIdentifier: Runner.springboard).icons.firstMatch
+        if icon.exists && icon.isHittable { return Runner.springboard }
+        for id in recent + ["app.hive"] + Runner.system where XCUIApplication(bundleIdentifier: id).state == .runningForeground { return id }
         return Runner.springboard
     }
 
-    /// The app whose tree Hive reads and types into. Hive Phone's own window reads as SpringBoard: XCUITest asking this
-    /// process about itself would wait on the main thread it's running on.
+    /// The app whose tree Hive reads and types into.
     private func target() -> (String, XCUIApplication) {
-        var id = front()
-        if id == own { id = Runner.springboard }
+        let id = front()
         return (id, XCUIApplication(bundleIdentifier: id))
     }
 
