@@ -24,7 +24,7 @@ Folders follow the parts of Hive, not the club's teams: parts last longer than t
 | `vm/` | How the VM runs Hive: its services, installer and screen | Cloud |
 | `dashboard/` | The dashboard the server shows at `/` | Product Design |
 | `desktop/` | The Hive app for Mac and Windows (`hive`, no window; fn's type bar on a Mac): the computer as a node (screen, mouse, keyboard, shell, files); also Claude Code's hook | Automation |
-| `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive | Automation |
+| `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive; Tailscale built in (`tailnet/build.sh`) reaches a Hive on its owner's tailnet | Automation |
 | `tailnet/` | Tailscale built into Hive (`hive-tailnet`, Go): how a Hive on a laptop at home is reached by its owner's own devices, privately and encrypted, with nobody installing Tailscale | Cloud |
 | `phone/` | The iPhone as a node: Hive Phone (`ios/`) dials in to the server over a WebSocket, and the server runs the phone's tools (this crate), on any computer | Automation |
 

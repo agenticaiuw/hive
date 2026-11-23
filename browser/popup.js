@@ -1,6 +1,6 @@
 // The toolbar popup: connect this browser to Hive, ask Hive from any page (the request goes to the orchestrator with the
 // page as context) and follow what it's doing, and see the owner's rules for this site.
-import { api, conf, pair } from './hive.js';
+import { api, conf, onTailnet, pair } from './hive.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -10,6 +10,7 @@ async function show() {
   $('main').hidden = !c;
   if (!c) return;
   $('dash').href = `${c.server}/#key=${encodeURIComponent(c.token)}`; // signs that tab in by itself, as the Mac app's window does
+  $('dash').hidden = onTailnet(c.server); // the browser's own tabs aren't on the tailnet, only the extension is
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let site = '';
   try { site = /^https?:$/.test(new URL(tab.url).protocol) ? new URL(tab.url).hostname : ''; } catch {}
@@ -54,9 +55,23 @@ async function work(c) {
   $('workBox').hidden = !tasks.length;
 }
 
+// This browser's Tailscale, for a Hive on its owner's tailnet: its sign-in button while it needs one, and how pairing through
+// it is going (the worker pairs, once it's signed in).
+async function tailscale() {
+  const { tailnet: t, pairing, pairNote } = await chrome.storage.local.get(['tailnet', 'pairing', 'pairNote']);
+  $('ts').hidden = !t?.url || t.state === 'Running';
+  $('tsLogin').onclick = () => chrome.tabs.create({ url: t.url });
+  if (pairNote) $('pairNote').textContent = pairNote;
+  else if (pairing) $('pairNote').textContent = $('ts').hidden ? 'Connecting through Tailscale…' : 'Sign in to Tailscale, and this browser connects to your Hive by itself.';
+}
+chrome.storage.onChanged.addListener((ch) => { tailscale(); if (ch.hive?.newValue) show(); });
+tailscale();
+
 $('pair').onsubmit = async (e) => {
   e.preventDefault();
   $('pairNote').textContent = 'Connecting…';
+  const link = $('link').value.trim();
+  if (onTailnet(link)) return chrome.storage.local.set({ pairing: link, pairNote: '' });
   try {
     await pair($('link').value);
     show();
