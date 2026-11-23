@@ -1,4 +1,4 @@
-//! Hive Phone's one WebSocket (ios/PhoneRelay.h): the phone dials in to Hive's server, which sends it WebDriverAgent calls
+//! Hive Phone's one WebSocket (ios/HivePhone/Link.swift): the phone dials in to Hive's server, which sends it WebDriverAgent-style calls
 //! ({id, method, path, body}); it answers each ({id, status, body}).
 use serde_json::{json, Value};
 use std::collections::HashMap;

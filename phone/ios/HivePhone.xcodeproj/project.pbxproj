@@ -1,0 +1,221 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* HivePhone.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* HivePhone.swift */; };
+		A10000000000000000000002 /* Runner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* Runner.swift */; };
+		A10000000000000000000003 /* Tree.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* Tree.swift */; };
+		A10000000000000000000004 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* Link.swift */; };
+		A10000000000000000000005 /* Tailnet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* Tailnet.swift */; };
+		A10000000000000000000006 /* Dashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* Dashboard.swift */; };
+		A10000000000000000000007 /* Catch.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* Catch.m */; };
+		A10000000000000000000008 /* libtailscale.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* libtailscale.xcframework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* HivePhone.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HivePhone.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* Runner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Runner.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* Tree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tree.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* Link.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Link.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* Tailnet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tailnet.swift; sourceTree = "<group>"; };
+		A20000000000000000000006 /* Dashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dashboard.swift; sourceTree = "<group>"; };
+		A20000000000000000000007 /* Catch.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Catch.m; sourceTree = "<group>"; };
+		A20000000000000000000008 /* Catch.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Catch.h; sourceTree = "<group>"; };
+		A20000000000000000000009 /* Bridging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridging.h; sourceTree = "<group>"; };
+		A2000000000000000000000A /* libtailscale.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = libtailscale.xcframework; path = ../../target/libtailscale.xcframework; sourceTree = SOURCE_ROOT; };
+		A2000000000000000000000B /* HivePhone.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HivePhone.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000008 /* libtailscale.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A40000000000000000000002 /* HivePhone */,
+				A2000000000000000000000A /* libtailscale.xcframework */,
+				A40000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A40000000000000000000002 /* HivePhone */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* HivePhone.swift */,
+				A20000000000000000000002 /* Runner.swift */,
+				A20000000000000000000003 /* Tree.swift */,
+				A20000000000000000000004 /* Link.swift */,
+				A20000000000000000000005 /* Tailnet.swift */,
+				A20000000000000000000006 /* Dashboard.swift */,
+				A20000000000000000000007 /* Catch.m */,
+				A20000000000000000000008 /* Catch.h */,
+				A20000000000000000000009 /* Bridging.h */,
+			);
+			path = HivePhone;
+			sourceTree = "<group>";
+		};
+		A40000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000B /* HivePhone.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* HivePhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A70000000000000000000002 /* Build configuration list for PBXNativeTarget "HivePhone" */;
+			buildPhases = (
+				A30000000000000000000002 /* Sources */,
+				A30000000000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HivePhone;
+			productName = HivePhone;
+			productReference = A2000000000000000000000B /* HivePhone.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A60000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A50000000000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A70000000000000000000001 /* Build configuration list for PBXProject "HivePhone" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A40000000000000000000001;
+			productRefGroup = A40000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A50000000000000000000001 /* HivePhone */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A30000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* HivePhone.swift in Sources */,
+				A10000000000000000000002 /* Runner.swift in Sources */,
+				A10000000000000000000003 /* Tree.swift in Sources */,
+				A10000000000000000000004 /* Link.swift in Sources */,
+				A10000000000000000000005 /* Tailnet.swift in Sources */,
+				A10000000000000000000006 /* Dashboard.swift in Sources */,
+				A10000000000000000000007 /* Catch.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A80000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A80000000000000000000002 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../target/libtailscale/include";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+					/Developer/Library/Frameworks,
+					/Developer/Library/PrivateFrameworks,
+					/System/Developer/Library/Frameworks,
+					/System/Developer/Library/PrivateFrameworks,
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					CoreFoundation,
+					"-lresolv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.hive.phone;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = HivePhone/Bridging.h;
+				TARGETED_DEVICE_FAMILY = 1;
+				USES_XCTRUNNER = YES;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A70000000000000000000001 /* Build configuration list for PBXProject "HivePhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000001 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A70000000000000000000002 /* Build configuration list for PBXNativeTarget "HivePhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000002 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A60000000000000000000001 /* Project object */;
+}
