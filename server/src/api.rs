@@ -230,11 +230,13 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         },
         ("POST", ["api", "node", "hello"]) => {
             let nid = s(&b["id"]);
+            // The same device under an id it no longer uses (it joined again) goes once it's been quiet for an hour.
+            hive.db.run("delete from nodes where kind=? and name=? and id!=? and seen < ?", args!(s(&b["kind"]), s(&b["name"]), nid.clone(), now() - 3_600_000));
             hive.db.run("insert into nodes(id, kind, name, notes, tools, seen, version) values(?,?,?,?,?,?,?) on conflict(id) do update set \
                 kind=excluded.kind, name=excluded.name, notes=excluded.notes, tools=excluded.tools, seen=excluded.seen, version=excluded.version",
                 args!(nid, s(&b["kind"]), s(&b["name"]), s(&b["notes"]), b["tools"].clone(), now(), s(&b["version"])));
             hive.bump();
-            Res::json(&json!({ "ok": true, "version": hive.version }))
+            Res::json(&json!({ "ok": true, "version": hive_protocol::DEVICES }))
         }
         ("GET", ["api", "node", "next"]) => {
             let nid = req.q("id").to_string();

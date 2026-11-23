@@ -13,7 +13,8 @@ concurrency:
 jobs:
   mac:
     runs-on: macos-latest
-    # Hive.app and its .dmg are signed and notarized when the repo has the Developer ID secrets, so it opens without warnings; ad hoc if not.
+    # Hive.app and its .dmg are signed and notarized with the repo's Developer ID secrets; without them nothing Mac is published, since an
+    # unsigned app won't open after download and Safari turns its extension off.
     env:
       MAC_CERT: ${{ secrets.MAC_CERT }}
     steps:
@@ -56,12 +57,14 @@ jobs:
           codesign -s "Developer ID Application" --timestamp out/Hive-Mac.dmg
           xcrun notarytool submit out/Hive-Mac.dmg --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM" --wait
           xcrun stapler staple out/Hive-Mac.dmg
-      - uses: actions/upload-artifact@v4
+      - if: env.MAC_CERT != ''
+        uses: actions/upload-artifact@v4
         with: { name: mac, path: out }
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # the devices' version is the last commit to their code
       - run: cargo build --release -p hive -p hive-server
       - shell: bash
         run: mkdir out && cp target/release/hive.exe out/hive-windows.exe && cp target/release/hive-server.exe out/hive-server-windows.exe
@@ -73,6 +76,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 } # the devices' version is the last commit to their code
       - run: cargo build --release -p hive-server && mkdir out && cp target/release/hive-server out/hive-server-linux-$(uname -m)
       - uses: actions/upload-artifact@v4
         with: { name: "linux-${{ matrix.os }}", path: out }

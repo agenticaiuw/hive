@@ -61,7 +61,7 @@ fn main() {
         Some("end") => hook::end(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("task") => hook::task(&args[1..]).unwrap_or_else(|e| fail(e)),
         Some("rule") => hook::rule(&args[1..]).unwrap_or_else(|e| fail(e)),
-        Some("--version") => println!("{}", hive_protocol::VERSION),
+        Some("--version") => println!("{}", hive_protocol::DEVICES),
         None => {
             #[cfg(target_os = "macos")]
             os::install();

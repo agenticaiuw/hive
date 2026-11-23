@@ -19,6 +19,7 @@ export async function api(c, path, body, method) {
     method: method || (body === undefined ? 'GET' : 'POST'),
     headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(40_000), // a dropped connection never answers, and the wait for a call is 25s
   });
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));

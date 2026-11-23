@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("HIVE_GIT");
+/// The last change to the devices' own code: devices update (and a Mac app rebuilds and signs itself) only when it moves.
+pub const DEVICES: &str = env!("HIVE_DEVICES");
 /// Where downloaded nodes (no checkout of Hive) get each new build: GitHub builds one for every push to main.
 pub const RELEASES: &str = "https://github.com/agenticaiuw-org/hive/releases/download/latest";
 
@@ -84,7 +86,7 @@ pub fn n(d: &str) -> Value { json!({ "type": "number", "description": d }) }
 /// Serve the device forever: hello, take calls, answer them (each call on its own thread).
 pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static) -> ! {
     let (c, handle) = (Arc::new(c), Arc::new(handle));
-    let hello = json!({ "id": c.id, "kind": node.kind, "name": node.name, "version": VERSION, "notes": node.notes, "tools": node.tools });
+    let hello = json!({ "id": c.id, "kind": node.kind, "name": node.name, "version": DEVICES, "notes": node.notes, "tools": node.tools });
     let mut last_hello = Instant::now() - Duration::from_secs(3600);
     let mut tried = (String::new(), Instant::now());
     loop {
@@ -94,7 +96,7 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
                     last_hello = Instant::now();
                     let want = v["version"].as_str().unwrap_or("").to_string();
                     let again = tried.0 != want || tried.1.elapsed() > Duration::from_secs(600);
-                    if !want.is_empty() && !want.starts_with(VERSION) && !VERSION.starts_with(want.as_str()) && again {
+                    if !want.is_empty() && !want.starts_with(DEVICES) && !DEVICES.starts_with(want.as_str()) && again {
                         tried = (want.clone(), Instant::now());
                         let done = if c.repo.is_empty() { download(node.package, &want) } else { update(&c, node.package) };
                         if let Err(e) = done { eprintln!("update to {want}: {e}"); }
