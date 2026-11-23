@@ -27,9 +27,15 @@ export async function api(c, path, body, method) {
   return j;
 }
 
-/** A Hive at home that only its owner's tailnet reaches is served at https://hive.<tailnet>.ts.net, and reached through
+/** A Hive at home that only its owner's tailnet reaches is served at http://hive.<tailnet>.ts.net, and reached through
  * Tailscale built into the extension (tailnet.js); any other server, directly. */
-export const onTailnet = (url) => { try { return new URL(url).hostname.endsWith('.ts.net'); } catch { return false; } };
+export const onTailnet = (url) => {
+  try {
+    const h = new URL(url).hostname, ip = h.match(/^100\.(\d+)\.\d+\.\d+$/);
+    // Its MagicDNS name, or its tailnet address (100.64.0.0/10) when the tailnet has MagicDNS off.
+    return h.endsWith('.ts.net') || (!!ip && +ip[1] >= 64 && +ip[1] < 128);
+  } catch { return false; }
+};
 export const tailnet = {
   // Chrome, Edge and Brave run the node in an offscreen document, opened here when it isn't already. Safari has none: its
   // background page runs the node and replaces this (worker.js). Calls at once share one opening, so none asks before it

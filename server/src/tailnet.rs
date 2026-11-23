@@ -38,6 +38,12 @@ pub fn get(state: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf,
 pub fn start(state: PathBuf, addr: String) {
     std::thread::spawn(move || loop {
         let exe = crate::setup::exe(&state.join("bin"), "hive-tailnet");
+        // The helper follows Hive: a new Hive fetches the helper built with it.
+        let stamp = state.join("bin").join("hive-tailnet.version");
+        if std::fs::read_to_string(&stamp).unwrap_or_default() != hive_protocol::VERSION {
+            std::fs::remove_file(&exe).ok();
+            if get(&state, &|_, _| {}).is_ok() { std::fs::write(&stamp, hive_protocol::VERSION).ok(); }
+        }
         if !exe.exists() { if let Err(e) = get(&state, &|_, _| {}) { note(&state, &json!({ "error": e })); } }
         let mut c = Command::new(&exe);
         c.args(["serve", "--name", "hive", "--to", &addr]).arg("--state").arg(state.join("tailscale"))

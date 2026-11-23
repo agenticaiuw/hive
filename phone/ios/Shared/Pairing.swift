@@ -11,12 +11,16 @@ struct Pairing: Equatable {
     let url: URL
     let token: String
     var host: String { url.host ?? "" }
-    var tailnet: Bool { host.lowercased().hasSuffix(".ts.net") }
-    /// The dashboard of the same Hive: the WebSocket's https twin, without /phone/device, signed in by the phone's own
-    /// key (the server gives it a dashboard token of its own).
+    /// On the owner's tailnet: its MagicDNS name, or its tailnet address (100.64.0.0/10) when MagicDNS is off.
+    var tailnet: Bool {
+        let h = host.lowercased(), p = h.split(separator: ".").compactMap { Int($0) }
+        return h.hasSuffix(".ts.net") || (p.count == 4 && p[0] == 100 && (64..<128).contains(p[1]))
+    }
+    /// The dashboard of the same Hive: the WebSocket's web twin (wss is https; ws, inside a tailnet, is http), without
+    /// /phone/device, signed in by the phone's own key (the server gives it a dashboard token of its own).
     var dashboard: URL {
         var c = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-        c.scheme = "https"
+        c.scheme = url.scheme == "ws" ? "http" : "https"
         c.path = String(c.path.dropLast("phone/device".count))
         c.query = nil
         c.fragment = "key=" + token
@@ -25,9 +29,11 @@ struct Pairing: Equatable {
 
     static func checked(_ json: Any?) -> Pairing? {
         guard let d = json as? [String: Any], let endpoint = d["url"] as? String, let token = d["token"] as? String,
-              (40...512).contains(token.count), let url = URL(string: endpoint), url.scheme == "wss",
+              (40...512).contains(token.count), let url = URL(string: endpoint), url.scheme == "wss" || url.scheme == "ws",
               !(url.host ?? "").isEmpty, url.path.hasSuffix("/device") else { return nil }
-        return Pairing(url: url, token: token)
+        let p = Pairing(url: url, token: token)
+        // Plain ws only inside the owner's tailnet, which WireGuard encrypts; anywhere else it must be wss.
+        return url.scheme == "wss" || p.tailnet ? p : nil
     }
 
     static func from(_ text: String) -> Pairing? {

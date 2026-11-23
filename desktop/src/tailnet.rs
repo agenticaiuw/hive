@@ -12,7 +12,9 @@ const DOOR: &str = "127.0.0.1:8791";
 
 /// Whether a Hive server is on a tailnet.
 pub fn on(server: &str) -> bool {
-    server.split("://").nth(1).unwrap_or(server).split(['/', ':']).next().is_some_and(|h| h.ends_with(".ts.net"))
+    let host = server.split("://").nth(1).unwrap_or(server).split(['/', ':']).next().unwrap_or("");
+    // Its MagicDNS name, or its tailnet address (100.64.0.0/10) when the tailnet has MagicDNS off.
+    host.ends_with(".ts.net") || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
 }
 
 /// This computer's pairing, with the server swapped for the door when the Hive is on a tailnet.
@@ -59,7 +61,9 @@ pub fn open(server: &str, label: &str, login: &dyn Fn(&str)) -> Result<String, S
 fn helper() -> Result<PathBuf, String> {
     let bin = dir().join("bin");
     let exe = bin.join(if cfg!(windows) { "hive-tailnet.exe" } else { "hive-tailnet" });
-    if exe.exists() { return Ok(exe) }
+    // The helper follows the app: a new app fetches the helper built with it.
+    let stamp = bin.join("hive-tailnet.version");
+    if exe.exists() && std::fs::read_to_string(&stamp).unwrap_or_default() == hive_protocol::DEVICES { return Ok(exe) }
     let name = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "hive-tailnet-macos-arm64", ("macos", _) => "hive-tailnet-macos-x86_64",
         ("windows", _) => "hive-tailnet-windows.exe", _ => return Err("no Tailscale helper for this computer".into()),
@@ -72,6 +76,7 @@ fn helper() -> Result<PathBuf, String> {
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).ok(); }
     std::fs::rename(&part, &exe).map_err(|e| e.to_string())?;
+    std::fs::write(&stamp, hive_protocol::DEVICES).ok();
     Ok(exe)
 }
 
@@ -83,5 +88,6 @@ mod tests {
         assert!(super::on("https://hive.tail1234.ts.net/"));
         assert!(!super::on("https://153.66.203.47"));
         assert!(!super::on("https://ts.net.example.com"));
+        assert!(super::on("http://100.96.39.78") && !super::on("http://100.200.1.1"));
     }
 }

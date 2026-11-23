@@ -81,7 +81,11 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 }
                 else { pair(hive, &secret, "dashboard", &req.peer) };
             return match t {
-                Ok(t) => Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000")),
+                // Inside the owner's tailnet Hive is plain HTTP (WireGuard encrypts it), where a Secure cookie wouldn't be kept.
+                Ok(t) => {
+                    let secure = if req.headers.get("x-forwarded-proto").is_some_and(|p| p == "http") { "" } else { " Secure;" };
+                    Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=31536000"))
+                }
                 Err(e) => Res::err(401, e),
             };
         }
@@ -178,7 +182,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let file = hive.state.join("phone-token");
             let key = std::fs::read_to_string(&file).ok().filter(|k| k.len() >= 40).unwrap_or_else(|| { let k = random(32); crate::private(&file, &k); k });
             hive.start_phone();
-            let json = json!({ "url": format!("{}/phone/device", address.replacen("https://", "wss://", 1)), "token": key }).to_string();
+            let json = json!({ "url": format!("{}/phone/device", address.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1)), "token": key }).to_string();
             let b64 = hive_protocol::b64::encode(json.as_bytes()).replace('+', "-").replace('/', "_").replace('=', "");
             Res::json(&json!({ "pairing": format!("hive-phone:{b64}") }))
         }

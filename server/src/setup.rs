@@ -119,8 +119,7 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
     Err("Hive is running, but Let's Encrypt hasn't given it a secure address yet. Open Hive Server again in a few minutes.".into())
 }
 
-/// Waits while the owner signs in to Tailscale (and turns on HTTPS for their tailnet), showing them each step, until Hive has
-/// its tailnet address.
+/// Waits while the owner signs in to Tailscale, showing them the sign-in, until Hive has its tailnet address.
 fn connect_devices(state: &Path, ui: &dyn Ui) -> Result<String, String> {
     let mut failing = 0;
     for _ in 0..3600 {
@@ -129,7 +128,6 @@ fn connect_devices(state: &Path, ui: &dyn Ui) -> Result<String, String> {
         // A passing hiccup (the network blinking) isn't a failure; one that lasts half a minute is.
         match crate::tailnet::why(state) { Some(e) if failing > 60 => return Err(e), Some(_) => failing += 1, None => failing = 0 }
         if let Some(u) = v["login"].as_str() { ui.show(json!({ "step": "tailscale", "url": u })) }
-        if let Some(u) = v["admin"].as_str() { ui.show(json!({ "step": "tailscale-https", "url": u })) }
         std::thread::sleep(Duration::from_millis(500));
     }
     Err("Tailscale sign-in didn't finish. Open Hive Server again to carry on.".into())
@@ -347,7 +345,6 @@ impl Ui for Terminal {
             ("starting", _) => "Signed in. Starting your Hive…".into(),
             ("tailscale", _) => format!("Your phone and other computers reach this Hive through Tailscale, a free private network only your \
                 devices can use. Sign in (or make a free account) here, on any device:\n{}", v["url"].as_str().unwrap_or("")),
-            ("tailscale-https", _) => format!("Last step: turn on MagicDNS and HTTPS for your Tailscale network, here:\n{}", v["url"].as_str().unwrap_or("")),
             _ => return,
         };
         if *last != line { eprintln!("{line}"); *last = line; }

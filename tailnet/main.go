@@ -2,12 +2,14 @@
 // devices from anywhere, with nobody installing the Tailscale app. Traffic between them is end-to-end encrypted (WireGuard).
 //
 //	hive-tailnet serve --state DIR --name hive --to 127.0.0.1:8790
-//	    the Hive server: joins the owner's tailnet as `name` and serves https://<name>.<tailnet>.ts.net through to `to`
-//	hive-tailnet dial --state DIR --name NAME --to https://hive.<tailnet>.ts.net --listen 127.0.0.1:PORT
+//	    the Hive server: joins the owner's tailnet as `name` and serves http://<name>.<tailnet>.ts.net (its 100.x address
+//	    when the tailnet has MagicDNS off) through to `to`. Plain HTTP inside the tailnet: WireGuard already encrypts it end to
+//	    end and only the owner's devices reach it, so the owner never has to turn on HTTPS certificates in Tailscale's console.
+//	hive-tailnet dial --state DIR --name NAME --to http://hive.<tailnet>.ts.net --listen 127.0.0.1:PORT
 //	    a Hive device: a plain-HTTP port on this computer that reaches the server across the tailnet
 //
-// It says what's happening as one JSON line per change on stdout: {"login": url} until the owner signs in, {"https": "off",
-// "admin": url} while the tailnet hasn't turned on MagicDNS and HTTPS, {"address": url} once serving, {"error": text}. It
+// It says what's happening as one JSON line per change on stdout: {"login": url} until the owner signs in, {"address": url}
+// once serving, {"error": text}. It
 // stops when its stdin closes, so it never outlives the program that started it.
 package main
 
@@ -29,8 +31,6 @@ import (
 
 	"tailscale.com/tsnet"
 )
-
-const admin = "https://login.tailscale.com/admin/dns"
 
 var (
 	mu   sync.Mutex
@@ -73,17 +73,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer s.Close()
-	dns := ready(s, mode == "serve")
+	host := ready(s)
 	if mode == "serve" {
-		serve(s, dns, *to)
+		serve(s, host, *to)
 	} else {
 		dial(s, *to, *listen)
 	}
 }
 
-// ready waits for the owner's sign-in (and, for a server, for HTTPS on the tailnet), saying what they need to do, and returns
-// this node's name, like hive.tail1234.ts.net.
-func ready(s *tsnet.Server, https bool) string {
+// ready waits for the owner's sign-in, saying what they need to do, and returns this node's name on the tailnet (like
+// hive.tail1234.ts.net), or its 100.x address when the tailnet has MagicDNS off.
+func ready(s *tsnet.Server) string {
 	lc, err := s.LocalClient()
 	if err != nil {
 		say(map[string]string{"error": err.Error()})
@@ -99,22 +99,20 @@ func ready(s *tsnet.Server, https bool) string {
 		case st.BackendState == "NeedsLogin" && st.AuthURL != "":
 			say(map[string]string{"login": st.AuthURL})
 		case st.BackendState == "Running" && st.Self != nil:
-			dns := strings.TrimSuffix(st.Self.DNSName, ".")
-			if !https {
-				return dns
+			if st.CurrentTailnet != nil && st.CurrentTailnet.MagicDNSEnabled && st.Self.DNSName != "" {
+				return strings.TrimSuffix(st.Self.DNSName, ".")
 			}
-			if st.CurrentTailnet != nil && st.CurrentTailnet.MagicDNSEnabled && len(st.CertDomains) > 0 {
-				return dns
+			if ip4, _ := s.TailscaleIPs(); ip4.IsValid() {
+				return ip4.String()
 			}
-			say(map[string]string{"https": "off", "admin": admin})
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
-// serve publishes the local Hive server on the tailnet over HTTPS, with Tailscale's certificate for this node's name.
-func serve(s *tsnet.Server, dns, to string) {
-	ln, err := s.ListenTLS("tcp", ":443")
+// serve publishes the local Hive server on the tailnet.
+func serve(s *tsnet.Server, host, to string) {
+	ln, err := s.Listen("tcp", ":80")
 	if err != nil {
 		say(map[string]string{"error": err.Error()})
 		os.Exit(1)
@@ -126,16 +124,16 @@ func serve(s *tsnet.Server, dns, to string) {
 		peer, _, _ := net.SplitHostPort(r.RemoteAddr)
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
 		r.Header.Set("X-Forwarded-For", peer)
-		r.Header.Set("X-Forwarded-Proto", "https")
+		r.Header.Set("X-Forwarded-Proto", "http")
 	}
-	say(map[string]string{"address": "https://" + dns})
+	say(map[string]string{"address": "http://" + host})
 	if err := http.Serve(ln, proxy); err != nil {
 		say(map[string]string{"error": err.Error()})
 		os.Exit(1)
 	}
 }
 
-// dial gives this computer a plain-HTTP port that reaches the Hive server across the tailnet (HTTPS end to end from here).
+// dial gives this computer a plain-HTTP port that reaches the Hive server across the tailnet (encrypted by WireGuard).
 func dial(s *tsnet.Server, to, listen string) {
 	target, err := url.Parse(to)
 	if err != nil || target.Host == "" {
@@ -151,7 +149,7 @@ func dial(s *tsnet.Server, to, listen string) {
 	proxy.Transport = s.HTTPClient().Transport
 	director := proxy.Director
 	proxy.Director = func(r *http.Request) { director(r); r.Host = target.Host }
-	// The door is plain HTTP on this computer only, where a browser won't keep a Secure cookie; the hop across is HTTPS.
+	// The door is plain HTTP on this computer only, where a browser won't keep a Secure cookie.
 	proxy.ModifyResponse = func(res *http.Response) error {
 		for i, c := range res.Header.Values("Set-Cookie") {
 			if i == 0 {
