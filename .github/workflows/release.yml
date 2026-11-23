@@ -15,9 +15,9 @@ jobs:
     runs-on: macos-latest
     # Signed with the repo's Developer ID and notarized with its App Store Connect key, here and only here: every Mac downloads
     # this build (Safari runs Hive for Safari only from a notarized app). People download Hive-Mac.dmg (Hive.app beside a
-    # shortcut to Applications); installed apps update from Hive-Mac.zip. People download the server as Hive Server.app
-    # (hive-server-macos.zip): macOS warns about malware on any bare program a browser downloads, notarized or not, since only
-    # an app can carry its ticket. Servers update from the bare hive-server-macos, which no browser touches.
+    # shortcut to Applications); installed apps update from Hive-Mac.zip. The server goes out the same way, as Hive-Server.dmg
+    # (and Hive Server.app in hive-server-macos.zip, for older links): macOS warns about malware on any bare program a browser
+    # downloads, notarized or not, since only an app can carry its ticket. Servers update from the bare hive-server-macos.
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 } # the devices' version is the last commit to their code
@@ -52,7 +52,13 @@ jobs:
           server/mac/bundle.sh "out/Hive Server.app" out/hive-server-macos
           mkdir s && cp -R out/hive-server-macos "out/Hive Server.app" s/ && ditto -c -k s server.zip && notarize server.zip
           xcrun stapler staple "out/Hive Server.app"
-          ditto -c -k --keepParent "out/Hive Server.app" out/hive-server-macos.zip && rm -rf "out/Hive Server.app"
+          ditto -c -k --keepParent "out/Hive Server.app" out/hive-server-macos.zip
+          # What people download: a disk image showing Hive Server beside Applications, so the app never lands in Downloads
+          # (a browser unpacks a zip there). The zip stays for links that already point at it.
+          mkdir sdmg && mv "out/Hive Server.app" sdmg/ && ln -s /Applications sdmg/Applications
+          hdiutil create -volname "Hive Server" -srcfolder sdmg -format UDZO out/Hive-Server.dmg
+          codesign -s "$id" --timestamp out/Hive-Server.dmg && notarize out/Hive-Server.dmg && xcrun stapler staple out/Hive-Server.dmg
+          rm -rf sdmg
           mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg
           codesign -s "$id" --timestamp out/Hive-Mac.dmg && notarize out/Hive-Mac.dmg && xcrun stapler staple out/Hive-Mac.dmg
@@ -66,7 +72,9 @@ jobs:
             xattr -w -r com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$a"
             approved -t exec "$a" && xcrun stapler validate "$a"
           done
-          approved -t open --context context:primary-signature out/Hive-Mac.dmg && xcrun stapler validate out/Hive-Mac.dmg
+          for d in out/Hive-Mac.dmg out/Hive-Server.dmg; do
+            approved -t open --context context:primary-signature "$d" && xcrun stapler validate "$d"
+          done
           rm -rf "$v" check.log
       - uses: actions/upload-artifact@v4
         with: { name: mac, path: out }
