@@ -704,7 +704,7 @@ keep going. You heard the owner in context, so you write what follows from their
 (always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \
 that's truly separate from yours becomes a task (the task tool). Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
-sends it on their behalf. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password). Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
 const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99: \
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
