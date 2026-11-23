@@ -46,7 +46,7 @@ final class HivePhone: XCTestCase {
             .base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         let p = Link.pairing(from: pairing)
         XCTAssertEqual(p?.tailnet, true)
-        XCTAssertEqual(p?.dashboard.absoluteString, "https://hive.example.ts.net/")
+        XCTAssertEqual(p?.dashboard.absoluteString.hasPrefix("https://hive.example.ts.net/#key="), true)
         XCTAssertNil(Link.pairing(from: "hive-phone:e30"))
 
         // Hive Phone's window is in front when the test starts: does a tap the runner makes reach it?

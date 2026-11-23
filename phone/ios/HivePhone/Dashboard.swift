@@ -2,9 +2,8 @@ import UIKit
 import WebKit
 
 /// Hive Phone's own window, shown by the test that runs Hive Phone (HivePhone.swift) in the runner app: the paired Hive's
-/// dashboard, and above it how the link stands, with Tailscale's sign-in when the node needs it. The dashboard is signed
-/// in on its own page (the owner key, or a "Pair a device" link) and keeps its cookie: the phone's token is only for
-/// the link, and the server counts a token it doesn't take for the dashboard as a wrong code.
+/// dashboard, and above it how the link stands, with Tailscale's sign-in when the node needs it. The dashboard signs in
+/// with the phone's own key (Link.Pairing.dashboard), and keeps its cookie.
 final class Dashboard: UIViewController {
     private static var window: UIWindow?
     /// Taps on Reload, which the smoke test counts to see this window take touches while the runner drives the screen.

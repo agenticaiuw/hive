@@ -71,7 +71,15 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("POST", ["api", "login"]) => {
             // A device's own token (the desktop app opening the dashboard), the owner key, or a pairing code.
             let secret = s(&req.json()["secret"]);
-            let t = if secret != hive.owner_key && valid(hive, &secret) { Ok(secret) } else { pair(hive, &secret, "dashboard", &req.peer) };
+            let phone = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
+            let t = if secret != hive.owner_key && valid(hive, &secret) { Ok(secret) }
+                // Hive Phone's own key signs in its dashboard window, with a dashboard token of its own.
+                else if !phone.trim().is_empty() && secret == phone.trim() {
+                    let t = random(24);
+                    hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), "dashboard:phone", now()));
+                    Ok(t)
+                }
+                else { pair(hive, &secret, "dashboard", &req.peer) };
             return match t {
                 Ok(t) => Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000")),
                 Err(e) => Res::err(401, e),

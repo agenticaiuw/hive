@@ -19,12 +19,14 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         let token: String
         var host: String { url.host ?? "" }
         var tailnet: Bool { host.lowercased().hasSuffix(".ts.net") }
-        /// The dashboard of the same Hive: the WebSocket's https twin, without /phone/device.
+        /// The dashboard of the same Hive: the WebSocket's https twin, without /phone/device, signed in by the phone's own
+        /// key (the server gives it a dashboard token of its own).
         var dashboard: URL {
             var c = URLComponents(url: url, resolvingAgainstBaseURL: false)!
             c.scheme = "https"
             c.path = String(c.path.dropLast("phone/device".count))
             c.query = nil
+            c.fragment = "key=" + token
             return c.url!
         }
     }
