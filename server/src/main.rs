@@ -23,6 +23,13 @@ fn main() {
         Some("--version") => return println!("{}", hive_protocol::VERSION),
         Some("code") => return println!("{}", hive_server::code(&state)),
         Some("cred") => if let Err(e) = hive_server::cred::main(&args[1..]) { eprintln!("hive-cred: {e}"); std::process::exit(1) } else { return },
+        // Opened as Hive Server.app from Finder: there's no window to talk in, so it reopens itself in Terminal.
+        #[cfg(target_os = "macos")]
+        None if std::env::var_os("HIVE_REPO").is_none() && in_app() && !std::io::IsTerminal::is_terminal(&std::io::stderr()) => {
+            let me = std::env::current_exe().unwrap_or_default();
+            if let Err(e) = Command::new("open").args(["-a", "Terminal"]).arg(&me).status() { eprintln!("Couldn't open Terminal: {e}") }
+            return;
+        }
         // Started by a person (a checkout's server, like the owner's VM, is always started by its service).
         None if std::env::var_os("HIVE_REPO").is_none() => {
             let made = std::fs::create_dir_all(&state).map_err(|e| format!("Couldn't make {}: {e}{}", state.display(),
@@ -55,6 +62,12 @@ fn main() {
         Err(e) => eprintln!("{e}"),
     }
     std::process::exit(1);
+}
+
+/// Whether this program is the one inside Hive Server.app (what a Mac downloads), not a bare copy.
+#[cfg(target_os = "macos")]
+fn in_app() -> bool {
+    std::env::current_exe().is_ok_and(|p| p.parent().is_some_and(|d| d.ends_with("Contents/MacOS")))
 }
 
 /// Copies this program into Hive's folder (where it updates itself) and has the computer run it from there, now and at
