@@ -176,7 +176,9 @@ fn download_app(app: &std::path::Path, package: &str, want: &str) -> Result<(), 
     std::fs::rename(app, &old).and_then(|_| std::fs::rename(&new, app)).map_err(|e| e.to_string())?;
     std::fs::remove_dir_all(&old).ok();
     std::fs::remove_dir_all(&dir).ok();
-    restart(exe(app))
+    // Through Launch Services, so macOS sees the app start (exec'd in place, it gets no menu bar item).
+    std::process::Command::new("open").args(["-n", "-g", "-j"]).arg(app).status().map_err(|e| e.to_string())?;
+    std::process::exit(0)
 }
 
 fn restart(exe: PathBuf) -> Result<(), String> {

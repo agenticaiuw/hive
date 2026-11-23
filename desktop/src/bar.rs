@@ -46,7 +46,10 @@ pub fn run() {
     view.addSubview(&answer);
     BAR.with(|b| *b.borrow_mut() = Some(Bar { panel, field, answer }));
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    if let Some(button) = item.button(mtm) { button.setTitle(&NSString::from_str("Hive")); }
+    if let (Some(button), Some(logo)) = (item.button(mtm), app.applicationIconImage()) {
+        logo.setSize(NSSize::new(20.0, 20.0));
+        button.setImage(Some(&logo));
+    }
     let menu = NSMenu::new(mtm);
     menu.addItem(&*unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str("Quit Hive"),
         Some(objc2::sel!(terminate:)), &NSString::from_str("q")) });
