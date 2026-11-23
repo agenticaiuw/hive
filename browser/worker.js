@@ -16,6 +16,8 @@ const TOOLS = [
   tool('browser_click', 'Click element i of a tab.', { tab: TAB, i: EL }, ['tab', 'i']),
   tool('browser_type', 'Type into field i of a tab, replacing what it held; enter presses Enter after.',
     { tab: TAB, i: EL, text: str('What to type.'), enter: { type: 'boolean', description: 'Press Enter after.' } }, ['tab', 'i', 'text', 'enter']),
+  tool('browser_type_password', 'Fill a password field with a Hive saved password without revealing it. The tab must be on the login site.',
+    { tab: TAB, i: EL, site: str('The exact login site'), username: str('Which login; empty for the only one') }, ['tab', 'i', 'site', 'username']),
   tool('browser_js', "Run JavaScript in a tab's page and get the value of its last expression (a promise is awaited).",
     { tab: TAB, code: str('JavaScript.') }, ['tab', 'code']),
   tool('browser_screenshot', 'See a tab. It comes to the front of its window.', { tab: TAB }, ['tab'], { lock: 'screen' }),
@@ -64,7 +66,7 @@ const RUN = {
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height || getComputedStyle(el).visibility === 'hidden' || el.type === 'hidden') continue;
       el.dataset.hive = els.length + 1;
-      const label = (el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || el.title || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+      const label = (el.innerText || (el.type === 'password' ? '' : el.value) || el.getAttribute('aria-label') || el.placeholder || el.title || '').trim().replace(/\s+/g, ' ').slice(0, 80);
       const what = el.tagName === 'A' ? ` → ${el.href.slice(0, 150)}` : el.type ? ` (${el.type})` : '';
       els.push(`[${els.length + 1}] ${el.tagName.toLowerCase()} ${JSON.stringify(label)}${what}`);
     }
@@ -100,6 +102,24 @@ const RUN = {
     }
     return 'Typed.';
   }, [i, text, !!enter]),
+  browser_type_password: async ({ tab, i, site, password, credential_error }) => {
+    if (credential_error) throw new Error(credential_error);
+    if (typeof password !== 'string') throw new Error('No saved password was delivered.');
+    return inTab(tab, (i, site, password) => {
+      let expected;
+      try { expected = new URL(site.includes('://') ? site : `https://${site}`).hostname.toLowerCase(); }
+      catch { throw new Error('Invalid login site.'); }
+      if (!['https:', 'http:'].includes(location.protocol) || location.hostname.toLowerCase() !== expected)
+        throw new Error('The tab is not on the requested login site.');
+      const el = document.querySelector(`[data-hive="${i}"]`);
+      if (!(el instanceof HTMLInputElement) || el.type !== 'password') throw new Error('Read the page again and select a password field.');
+      el.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, password);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'Filled the saved password.';
+    }, [i, site, password]);
+  },
   browser_js: async ({ tab, code }) => {
     const v = await runJs(tab, code);
     return v === undefined ? 'Done (no value).' : typeof v === 'string' ? v : JSON.stringify(v, null, 1);

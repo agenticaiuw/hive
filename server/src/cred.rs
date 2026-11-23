@@ -16,7 +16,7 @@ fn host(url: &str) -> String {
     let rest = t.split_once("://").map(|(_, r)| r).unwrap_or(&t);
     let h = rest.split(['/', '?', '#']).next().unwrap_or("");
     let h = h.rsplit('@').next().unwrap_or(h).split(':').next().unwrap_or("");
-    h.strip_prefix("www.").unwrap_or(h).to_string()
+    h.to_string()
 }
 
 fn load() -> Result<Vec<Value>, String> {
@@ -36,18 +36,20 @@ fn save(logins: &[Value]) -> Result<(), String> {
     private(&store(), 0o600).map_err(|e| e.to_string())
 }
 
-/// The one login to use for a site: the same host first, then a parent or child domain (wisc.edu ↔ login.wisc.edu).
+/// Select a login only for the exact host, never a related or public-suffix domain.
 pub fn pick(site: &str, username: &str) -> Result<Value, String> {
-    let (logins, h) = (load()?, host(site));
+    select(&load()?, site, username)
+}
+
+fn select(logins: &[Value], site: &str, username: &str) -> Result<Value, String> {
+    let h = host(site);
+    if h.is_empty() { return Err("Give the login's site.".into()); }
     let found: Vec<&Value> = logins.iter().filter(|l| {
-        let lh = host(s(&l["url"]));
-        (lh == h || lh.ends_with(&format!(".{h}")) || h.ends_with(&format!(".{lh}"))) && (username.is_empty() || s(&l["username"]) == username)
+        host(s(&l["url"])) == h && (username.is_empty() || s(&l["username"]) == username)
     }).collect();
-    let exact: Vec<&&Value> = found.iter().filter(|l| host(s(&l["url"])) == h).collect();
-    match (exact.len(), found.len()) {
-        (1, _) => Ok((*exact[0]).clone()),
-        (0, 1) => Ok(found[0].clone()),
-        (0, 0) => Err(format!("No saved login for {site}")),
+    match found.len() {
+        1 => Ok(found[0].clone()),
+        0 => Err(format!("No saved login for {site}")),
         _ => Err(format!("{site} has several logins; give username, one of: {}",
             found.iter().map(|l| s(&l["username"])).collect::<Vec<_>>().join(", "))),
     }
@@ -92,8 +94,17 @@ pub fn main(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn selects_only_the_requested_host_and_login() {
+        let logins = vec![serde_json::json!({"url":"login.example.com", "username":"a", "password":"test"}),
+                          serde_json::json!({"url":"login.example.com", "username":"b", "password":"test2"})];
+        assert!(super::select(&logins, "example.com", "a").is_err());
+        assert!(super::select(&logins, "evil.login.example.com", "a").is_err());
+        assert!(super::select(&logins, "login.example.com", "").is_err());
+        assert_eq!(super::select(&logins, "https://login.example.com/", "b").unwrap()["password"], "test2");
+    }
+    #[test]
     fn hosts() {
-        assert_eq!(super::host("https://www.Login.wisc.edu:443/idp/x?y"), "login.wisc.edu");
+        assert_eq!(super::host("https://www.Login.wisc.edu:443/idp/x?y"), "www.login.wisc.edu");
         assert_eq!(super::host("wisc.edu"), "wisc.edu");
         assert_eq!(super::host(" user@x.com/a "), "x.com");
     }

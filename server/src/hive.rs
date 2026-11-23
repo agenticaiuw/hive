@@ -605,10 +605,14 @@ impl Hive {
             "type_password" => {
                 let (site, user, tool) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]));
                 if tool.is_empty() { return crate::vm::type_password(&site, &user).map(|m| json!(m)); }
-                if !tool.ends_with("_type") { return Err("tool is a device's typing tool, e.g. browser_type or mac_type".into()); }
+                let target = match tool.as_str() {
+                    "browser_type" => "browser_type_password", "mac_type" => "mac_type_password",
+                    "windows_type" => "windows_type_password",
+                    _ => return Err("tool must be browser_type, mac_type, or windows_type".into()),
+                };
                 let mut args = serde_json::from_str::<Value>(&s(&a["args"])).ok().filter(Value::is_object).unwrap_or(json!({}));
-                args["text"] = crate::cred::pick(&site, &user)?["password"].clone();
-                let r = self.tool_inner(&tool, &args, agent, task)?;
+                args["site"] = json!(site); args["username"] = json!(user);
+                let r = self.tool_inner(target, &args, agent, task)?;
                 return Ok(if r["error"].is_null() { json!(format!("Typed the saved password for {site} with {tool}.")) } else { r });
             }
             "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
@@ -630,7 +634,11 @@ impl Hive {
         let (node, decl) = self.device_for(name).ok_or(format!("Hive has no tool called {name}"))?;
         if let Some(lock) = decl["lock"].as_str() { self.take_lock(&format!("{} {lock}", s(&node["name"])), agent)?; }
         // Files cross with the call: vm_path's bytes go to the device, and a file the device sends back lands in Hive's files.
-        let mut args = a.clone();
+        let mut args = if matches!(name, "browser_type_password" | "mac_type_password" | "windows_type_password") {
+            let mut safe = json!({ "site": s(&a["site"]), "username": s(&a["username"]) });
+            if name == "browser_type_password" { safe["tab"] = a["tab"].clone(); safe["i"] = a["i"].clone(); }
+            safe
+        } else { a.clone() };
         if let Some(p) = a["vm_path"].as_str() {
             args["data"] = json!(b64::encode(&std::fs::read(p).map_err(|e| format!("couldn't read {p}: {e}"))?));
         }

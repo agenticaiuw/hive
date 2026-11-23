@@ -223,6 +223,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             hive.db.run("insert into nodes(id, kind, name, notes, tools, seen, version) values(?,?,?,?,?,?,?) on conflict(id) do update set \
                 kind=excluded.kind, name=excluded.name, notes=excluded.notes, tools=excluded.tools, seen=excluded.seen, version=excluded.version",
                 args!(nid, s(&b["kind"]), s(&b["name"]), s(&b["notes"]), b["tools"].clone(), now(), s(&b["version"])));
+            // Bind a device token to its own node before allowing it to receive credentials.
+            let th = hash(&token(&req));
+            let label = format!("{}:{}", s(&b["kind"]), s(&b["name"]));
+            if hive.db.get("select 1 from tokens where hash=? and node=?", args!(th.clone(), label)).is_some() {
+                hive.db.run("insert into node_tokens(node, hash) values(?,?) on conflict(node) do update set hash=excluded.hash", args!(nid, th));
+            }
             hive.bump();
             Res::json(&json!({ "ok": true, "version": hive_protocol::DEVICES }))
         }
@@ -236,7 +242,22 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             });
             hive.db.run("update nodes set seen=? where id=?", args!(now(), nid));
             match call {
-                Some(c) => Res::json(&json!({ "id": c["id"], "tool": c["tool"], "args": serde_json::from_str::<Value>(&s(&c["args"])).unwrap_or(json!({})) })),
+                Some(c) => {
+                    let mut a = serde_json::from_str::<Value>(&s(&c["args"])).unwrap_or(json!({}));
+                    let tool = s(&c["tool"]);
+                    if matches!(tool.as_str(), "browser_type_password" | "mac_type_password" | "windows_type_password") {
+                        // The database holds only the site and username. Resolve the secret at delivery,
+                        // and only for the device token that registered this node.
+                        let authorized = hive.db.get("select 1 from node_tokens where node=? and hash=?", args!(nid, hash(&token(&req)))).is_some();
+                        let login = if authorized { crate::cred::pick(&s(&a["site"]), &s(&a["username"])) }
+                            else { Err("This device token is not bound to the requested node.".into()) };
+                        match login {
+                            Ok(login) => a["password"] = login["password"].clone(),
+                            Err(e) => a["credential_error"] = json!(e),
+                        }
+                    }
+                    Res::json(&json!({ "id": c["id"], "tool": c["tool"], "args": a }))
+                },
                 None => Res::new(204, "application/json", ""),
             }
         }

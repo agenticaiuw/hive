@@ -22,6 +22,7 @@ create table if not exists nodes(id text primary key, kind text, name text, note
 create table if not exists calls(id integer primary key, node text, tool text, args text, status text default 'queued',
   result text, agent_id integer, at integer);
 create table if not exists tokens(hash text primary key, node text, at integer);
+create table if not exists node_tokens(node text primary key, hash text unique);
 create table if not exists info(key text primary key, value text, updated integer);
 create table if not exists files(id integer primary key, name text, size integer, node text, at integer);
 create index if not exists log_task on log(task_id, id);

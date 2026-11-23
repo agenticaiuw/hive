@@ -19,6 +19,8 @@ pub fn tools() -> Vec<Value> {
         tool(&format!("{k}_scroll"), &format!("Scroll on the {on} at (x, y): dy > 0 scrolls down, dx > 0 right (in wheel notches)."),
             { let mut p = xy(); p["dy"] = n("notches down"); p["dx"] = n("notches right"); p }, &["x", "y", "dy", "dx"]),
         tool(&format!("{k}_type"), &format!("Type text on the {on} into whatever has focus."), json!({ "text": s("Text to type") }), &["text"]),
+        tool(&format!("{k}_type_password"), &format!("Type a Hive saved password into the focused field on the {on} without revealing it."),
+            json!({ "site": s("The login site"), "username": s("Which login; empty for the only one") }), &["site", "username"]),
         tool(&format!("{k}_key"), &format!("Press keys on the {on}, e.g. {}.", os::KEYS), json!({ "keys": s("Keys joined with +") }), &["keys"]),
     ];
     for t in &mut input { t["lock"] = json!("input"); }
@@ -53,6 +55,11 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         "drag" => { os::drag(f("x"), f("y"), f("to_x"), f("to_y"))?; done("Dragged.") }
         "scroll" => { os::scroll(f("x"), f("y"), f("dx") as i64, f("dy") as i64)?; done("Scrolled.") }
         "type" => { os::type_text(a["text"].as_str().unwrap_or(""))?; done("Typed.") }
+        "type_password" => {
+            if let Some(e) = a["credential_error"].as_str() { return Err(e.into()); }
+            let password = a["password"].as_str().ok_or("No saved password was delivered.")?;
+            os::type_text(password)?; done("Typed the saved password.")
+        }
         "key" => { os::key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
         "shell" => shell(os::shell(a["command"].as_str().unwrap_or("")), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
         "get_file" => {
@@ -106,6 +113,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 9);
+        assert_eq!(tools().len(), 10);
     }
 }
