@@ -1,12 +1,13 @@
 //! The fn key's type bar on a Mac: press fn and let go (by itself) and a small floating window takes a request; return sends
 //! it to Hive's orchestrator and shows the answer; escape, its close button or fn again hides it. The window doesn't take
-//! the front from the owner's app, and macOS shows Hive the fn key only once Hive has the Accessibility permission.
+//! the front from the owner's app, and macOS shows Hive the fn key only once Hive has the Accessibility permission. Hive's
+//! menu in the menu bar quits it (macOS won't replace a running app with a new download).
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSFloatingWindowLevel, NSFont, NSPanel, NSTextField, NSWindowStyleMask, NSWorkspace};
+    NSFloatingWindowLevel, NSFont, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSTextField, NSVariableStatusItemLength, NSWindowStyleMask, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
@@ -44,6 +45,13 @@ pub fn run() {
     view.addSubview(&field);
     view.addSubview(&answer);
     BAR.with(|b| *b.borrow_mut() = Some(Bar { panel, field, answer }));
+    let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    if let Some(button) = item.button(mtm) { button.setTitle(&NSString::from_str("Hive")); }
+    let menu = NSMenu::new(mtm);
+    menu.addItem(&*unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str("Quit Hive"),
+        Some(objc2::sel!(terminate:)), &NSString::from_str("q")) });
+    item.setMenu(Some(&menu));
+    std::mem::forget(item); // stays for as long as the app runs
     listen();
     app.run();
 }
