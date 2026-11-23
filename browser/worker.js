@@ -82,25 +82,33 @@ const RUN = {
     return 'Clicked.';
   }, [i]),
   browser_type: ({ tab, i, text, enter }) => inTab(tab, (i, text, enter) => {
-    const el = document.querySelector(`[data-hive="${i}"]`);
-    if (!el) return `There's no element ${i} now: read the page again.`;
+    const field = 'input:not([type=hidden]),textarea,[contenteditable=""],[contenteditable=true]';
+    const hit = document.querySelector(`[data-hive="${i}"]`);
+    if (!hit) return `There's no element ${i} now: read the page again.`;
+    const el = hit.matches(field) ? hit : hit.querySelector(field);
+    if (!el) return `Element ${i} isn't a text field.`;
+    const shown = () => (el.isContentEditable ? el.innerText : el.value);
     el.focus();
-    if (el.isContentEditable) {
-      document.execCommand('selectAll');
-      document.execCommand('insertText', false, text);
-    } else {
-      const proto = Object.getPrototypeOf(el);
-      Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, text);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+    // Typed the way a person types, so pages that ignore a bare value change (Google's own fields) still see it.
+    if (el.isContentEditable) document.execCommand('selectAll'); else el.select();
+    document.execCommand(text ? 'insertText' : 'delete', false, text);
+    if (shown() !== text && !el.isContentEditable) {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value').set.call(el, text);
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
     if (enter) {
-      const down = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true });
-      el.dispatchEvent(down);
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      const key = (type) => {
+        const e = new KeyboardEvent(type, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+        for (const k of ['keyCode', 'which']) Object.defineProperty(e, k, { get: () => 13 });
+        el.dispatchEvent(e);
+        return e;
+      };
+      const down = key('keydown');
+      key('keyup');
       if (!down.defaultPrevented) el.form?.requestSubmit();
     }
-    return 'Typed.';
+    return `Typed. The field now shows ${JSON.stringify(shown().slice(0, 200))}.`;
   }, [i, text, !!enter]),
   browser_type_password: async ({ tab, i, site, password, credential_error }) => {
     if (credential_error) throw new Error(credential_error);
