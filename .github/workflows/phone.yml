@@ -35,6 +35,27 @@ jobs:
         continue-on-error: true
         timeout-minutes: 20
         run: phone/ios/build.sh test
+      # What failed, as annotations: anyone can read those on a public repo, signed in or not, unlike the log.
+      - if: always() && github.event_name != 'workflow_run'
+        run: |
+          r=target/HivePhone/smoke.xcresult
+          [ -d "$r" ] || { echo "::error title=smoke::no xcresult (the test didn't start)"; exit 0; }
+          xcrun xcresulttool get test-results tests --path "$r" > tests.json 2>/dev/null || true
+          python3 - <<'EOF'
+          import json
+          def walk(n, path):
+              name = n.get("name", "")
+              if n.get("nodeType") == "Test Case" and n.get("result") == "Failed":
+                  why = [c.get("name", "") for c in n.get("children", []) if c.get("nodeType") == "Failure Message"]
+                  print(f"::error title={name}::{' | '.join(why)[:900] or 'failed'}")
+              if n.get("nodeType") == "Test Case" and n.get("result") == "Passed":
+                  print(f"::notice title={name}::passed")
+              for c in n.get("children", []): walk(c, path + [name])
+          try:
+              for t in json.load(open("tests.json")).get("testNodes", []): walk(t, [])
+          except Exception as e:
+              print(f"::error title=smoke::couldn't read the results: {e}")
+          EOF
       - if: always() && github.event_name != 'workflow_run'
         uses: actions/upload-artifact@v4
         with: { name: smoke, path: target/HivePhone/smoke.xcresult, if-no-files-found: ignore }
