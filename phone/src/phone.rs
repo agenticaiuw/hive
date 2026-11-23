@@ -1,4 +1,4 @@
-//! The iPhone's tools, through Hive Phone's WebSocket (link.rs) to WebDriverAgent on the phone.
+//! The iPhone's tools, through Hive Phone's WebSocket (link.rs) to Hive Phone's own runner, which answers as WebDriverAgent does (ios/HivePhone/Runner.swift).
 use crate::link;
 use serde_json::{json, Value};
 use std::path::PathBuf;

@@ -25,7 +25,7 @@ Folders follow the parts of Hive, not the club's teams: parts last longer than t
 | `dashboard/` | The dashboard the server shows at `/` | Product Design |
 | `desktop/` | The Hive app for Mac and Windows (`hive`, no window; fn's type bar on a Mac): the computer as a node (screen, mouse, keyboard, shell, files); also Claude Code's hook | Automation |
 | `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive | Automation |
-| `phone/` | The iPhone as a node: Hive Phone (`ios/`) dials in to the server over a WebSocket, and the server runs the phone's tools (this crate), on any computer | Automation |
+| `phone/` | The iPhone as a node: Hive Phone (`ios/`, which also shows the dashboard and reaches a Hive on a tailnet through Tailscale built in) dials in to the server over a WebSocket, and the server runs the phone's tools (this crate), on any computer | Automation |
 
 A folder appears with its first code: a new device, like Hardware's wearable, is a new top-level folder that speaks `protocol/`, and the server doesn't change for it.
 
