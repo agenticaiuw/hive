@@ -25,19 +25,37 @@ fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
 
 fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }
 
-/// Not paired yet: join with the link the dashboard's Pair a device just copied, and open that dashboard in the browser.
+/// Not paired yet: join with the link the dashboard's Pair a device copies, and open that dashboard in the browser. A link
+/// already on the clipboard joins at once; otherwise a box asks for it, and asks again until it works or is cancelled.
 fn join() -> Result<hive_protocol::Conf, String> {
     let (paste, open) = if cfg!(windows) { ("Get-Clipboard", "Start-Process") } else { ("pbpaste", "open") };
-    let link = os::shell(paste).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    let c = connect(&link)?;
+    let copied = os::shell(paste).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let mut link = if copied.contains("/#pair=") { copied } else { String::new() };
+    let mut tried = connect(&link);
+    while let Err(e) = &tried {
+        // Say why only once a link was tried: an empty clipboard isn't a mistake.
+        let why = if link.is_empty() { String::new() } else { format!("That didn't connect: {e}\n\n") };
+        link = ask(&format!("{why}{PAIR}"), &link).ok_or("cancelled")?;
+        tried = connect(&link);
+    }
+    let c = tried?;
     os::shell(&format!("{open} '{}'", dashboard(&c))).status().ok();
     Ok(c)
 }
 
-/// The app's one message, when there's nothing to join with.
-fn say(text: &str) {
-    os::shell(&if cfg!(windows) { format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{text}', 'Hive')") }
-        else { format!("osascript -e 'display alert \"Hive\" message \"{text}\"'") }).status().ok();
+const PAIR: &str = "Paste this computer's pairing link: on your Hive dashboard, click Pair a device, and it copies the link.";
+
+/// A box to paste into, with OK and Cancel: what was entered, or None when cancelled.
+fn ask(prompt: &str, default: &str) -> Option<String> {
+    let cmd = if cfg!(windows) {
+        let q = |s: &str| s.replace('\'', "''");
+        format!("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::InputBox('{}', 'Hive', '{}')", q(prompt), q(default))
+    } else {
+        let q = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "'\\''");
+        format!("osascript -e 'text returned of (display dialog \"{}\" default answer \"{}\" with title \"Hive\")'", q(prompt), q(default))
+    };
+    let out = os::shell(&cmd).output().ok().filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
 fn serve(c: hive_protocol::Conf) {
@@ -64,7 +82,7 @@ fn main() {
                 Ok(c) => { std::thread::spawn(move || serve(c)); bar::run() }
                 #[cfg(windows)]
                 Ok(c) => serve(c),
-                Err(_) => say("To connect this computer, click Pair a device on your Hive dashboard, then open Hive again within 10 minutes."),
+                Err(_) => {}
             }
         }
         _ => fail("usage: hive | hive hook | hive task … | hive rule … | hive end <task> …".into()),
