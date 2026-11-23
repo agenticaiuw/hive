@@ -12,7 +12,7 @@ pub const VERSION: &str = env!("HIVE_GIT");
 /// The last change to the devices' own code: devices update only when it moves.
 pub const DEVICES: &str = env!("HIVE_DEVICES");
 /// Where every device and downloaded server gets each new build: GitHub builds (and signs) one for every push to main.
-pub const RELEASES: &str = "https://github.com/agenticaiuw-org/hive/releases/download/latest";
+pub const RELEASES: &str = "https://github.com/agenticaiuw/hive/releases/download/latest";
 
 pub struct Conf { pub server: String, pub token: String, pub id: String }
 
