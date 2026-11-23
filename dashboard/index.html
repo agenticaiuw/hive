@@ -150,11 +150,11 @@ async function render() {
     const groups = {};
     for (const t of list) (groups[tab === 'Tasks' ? (t.project || 'Other') : 'Active agents'] ??= []).push(t);
     v.innerHTML = `<div class="split"><div>${Object.entries(groups).map(([g, ts]) => `<p class="muted">${esc(g)}</p>${ts.map(t => taskCard(t)).join('')}`).join('') || '<p class="muted">No agents are working.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    loadChat();
+    chatAfter = 0; loadChat();
   } else if (tab === 'Past') {
     const done = await api('api/tasks?status=done'), dropped = await api('api/tasks?status=dropped');
     v.innerHTML = `<div class="split"><div>${[...done, ...dropped].map(t => taskCard(t)).join('') || '<p class="muted">None yet.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    loadChat();
+    chatAfter = 0; loadChat();
   } else if (tab === 'Rules') {
     const rules = await api('api/rules');
     v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>

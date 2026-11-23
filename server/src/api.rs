@@ -133,7 +133,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "tasks", _]) => Res::json(&json!({
             "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
-            "log": hive.db.all("select * from log where task_id=? and id > ? order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
+            "log": hive.db.all("select * from log where (task_id=?1 or (task_id=0 and request_id=(select request_id from tasks where id=?1) and request_id>0)) and id > ?2 order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
         })),
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
         ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), 0, &s(&b["text"]), "owner") {
