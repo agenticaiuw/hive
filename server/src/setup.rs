@@ -31,9 +31,16 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
     let engine = if state.join("engine").exists() { engine(state) } else { ui.engine() };
     std::fs::write(state.join("engine"), &engine).map_err(|e| e.to_string())?;
     if engine == "claude" { get_claude(state, ui)?; sign_in_claude(state, ui)?; } else { get_codex(state, ui)?; sign_in_codex(state, ui)?; }
+    // At home, the owner's devices reach Hive through their own Tailscale network; a cloud VM has a public address.
+    let home = crate::tailnet::on(state) || (!state.join("reach").exists() && !crate::tailnet::cloud());
+    if home {
+        crate::tailnet::get(state, &download_step(ui, "Tailscale"))?;
+        std::fs::write(state.join("reach"), "tailnet").map_err(|e| e.to_string())?;
+    }
     ui.show(json!({ "step": "starting" }));
     std::fs::remove_file(state.join("tls").join("why")).ok();
     install(state)?;
+    if home { return connect_devices(state, ui) }
     for _ in 0..360 {
         if let Some(a) = crate::address(state) {
             let link = format!("{a}/#key={}", crate::owner_key(state));
@@ -49,6 +56,22 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
         std::thread::sleep(Duration::from_millis(500));
     }
     Err("Hive is running, but Let's Encrypt hasn't given it a secure address yet. Open Hive Server again in a few minutes.".into())
+}
+
+/// Waits while the owner signs in to Tailscale (and turns on HTTPS for their tailnet), showing them each step, until Hive has
+/// its tailnet address.
+fn connect_devices(state: &Path, ui: &dyn Ui) -> Result<String, String> {
+    let mut failing = 0;
+    for _ in 0..3600 {
+        let v = crate::tailnet::status(state);
+        if let Some(a) = v["address"].as_str() { return Ok(format!("{a}/#key={}", crate::owner_key(state))) }
+        // A passing hiccup (the network blinking) isn't a failure; one that lasts half a minute is.
+        match crate::tailnet::why(state) { Some(e) if failing > 60 => return Err(e), Some(_) => failing += 1, None => failing = 0 }
+        if let Some(u) = v["login"].as_str() { ui.show(json!({ "step": "tailscale", "url": u })) }
+        if let Some(u) = v["admin"].as_str() { ui.show(json!({ "step": "tailscale-https", "url": u })) }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err("Tailscale sign-in didn't finish. Open Hive Server again to carry on.".into())
 }
 
 // ---- getting the engine ----
@@ -105,7 +128,7 @@ fn claude_platform() -> String {
 
 /// A program Hive runs, from its maker's release, fetched once. A download that stops moving for a minute starts over, up to
 /// three times, instead of waiting forever; `sha256` (when the maker publishes one) must match.
-pub(crate) fn fetch(bin: &Path, name: &str, url: &str, sha256: Option<&str>, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf, String> {
+pub fn fetch(bin: &Path, name: &str, url: &str, sha256: Option<&str>, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf, String> {
     use sha2::Digest;
     let exe = exe(bin, name);
     if exe.exists() { return Ok(exe); }
@@ -260,7 +283,10 @@ impl Ui for Terminal {
                 format!("Sign in to ChatGPT: open {} on any device and enter the code {}", v["url"].as_str().unwrap_or(""), v["code"].as_str().unwrap_or("")),
             ("signin", Some("claude")) if v["url"].is_string() =>
                 format!("Sign in to Claude: open this link on any device:\n{}\nIf the page gives you a code, paste it here and press Enter:", v["url"].as_str().unwrap_or("")),
-            ("starting", _) => "Signed in. Starting your Hive and getting its secure address (up to 3 minutes)…".into(),
+            ("starting", _) => "Signed in. Starting your Hive…".into(),
+            ("tailscale", _) => format!("Your phone and other computers reach this Hive through Tailscale, a free private network only your \
+                devices can use. Sign in (or make a free account) here, on any device:\n{}", v["url"].as_str().unwrap_or("")),
+            ("tailscale-https", _) => format!("Last step: turn on MagicDNS and HTTPS for your Tailscale network, here:\n{}", v["url"].as_str().unwrap_or("")),
             _ => return,
         };
         if *last != line { eprintln!("{line}"); *last = line; }

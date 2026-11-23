@@ -126,7 +126,7 @@ fn send() {
 
 /// What Hive's orchestrator says to `text`, and the tasks it went to.
 fn ask(text: &str, app: &str) -> String {
-    let Some(c) = hive_protocol::load("node") else { return "This Mac isn't paired with a Hive.".into() };
+    let Some(c) = crate::tailnet::load() else { return "This Mac isn't paired with a Hive.".into() };
     match hive_protocol::call(&c, "POST", "/api/requests?wait=1", Some(&json!({ "text": text, "node": crate::os::KIND, "context": { "app": app } })), 180) {
         Ok((200, r)) => {
             let tasks: Vec<String> = r["tasks"].as_array().into_iter().flatten()

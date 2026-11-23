@@ -9,6 +9,7 @@
 mod bar;
 mod common;
 mod hook;
+mod tailnet;
 #[cfg(target_os = "macos")]
 #[path = "mac.rs"]
 mod os;
@@ -17,10 +18,21 @@ mod os;
 mod os;
 
 /// The link from the dashboard's Pair a device: `https://<server>/#pair=<code>`.
+/// A Hive on a tailnet pairs through this computer's door to it (tailnet.rs), and keeps the tailnet address.
 fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
     let (server, code) = link.trim().split_once("/#pair=")
         .ok_or("That isn't a pairing link. On your Hive dashboard, choose Pair a device and paste the link it copies.")?;
-    hive_protocol::pair("node", server, code, os::KIND, &os::host())
+    if !tailnet::on(server) { return hive_protocol::pair("node", server, code, os::KIND, &os::host()) }
+    let door = tailnet::open(server, &format!("{}-{}", os::KIND, os::host()), &sign_in)?;
+    let c = hive_protocol::pair("node", &door, code, os::KIND, &os::host())?;
+    let saved = serde_json::json!({ "server": server.trim_end_matches('/'), "token": c.token, "id": c.id });
+    std::fs::write(hive_protocol::conf_path("node"), saved.to_string()).map_err(|e| e.to_string())?;
+    Ok(c)
+}
+
+/// Tailscale's sign-in page, in the browser.
+fn sign_in(url: &str) {
+    os::shell(&format!("{} '{url}'", if cfg!(windows) { "Start-Process" } else { "open" })).status().ok();
 }
 
 fn dashboard(c: &hive_protocol::Conf) -> String { format!("{}/#key={}", c.server, c.token) }
@@ -77,7 +89,12 @@ fn main() {
         None => {
             #[cfg(target_os = "macos")]
             os::install();
-            match hive_protocol::load("node").map(Ok).unwrap_or_else(join) {
+            // A Hive on a tailnet is reached through this computer's door to it, open while the app runs.
+            let paired = hive_protocol::load("node").map(|c| {
+                if !tailnet::on(&c.server) { return Ok(c) }
+                tailnet::open(&c.server, &format!("{}-{}", os::KIND, os::host()), &sign_in).map(|door| hive_protocol::Conf { server: door, ..c })
+            });
+            match paired.unwrap_or_else(join) {
                 #[cfg(target_os = "macos")]
                 Ok(c) => { std::thread::spawn(move || serve(c)); bar::run() }
                 #[cfg(windows)]

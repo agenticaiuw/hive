@@ -85,8 +85,25 @@ jobs:
       - run: cargo build --release -p hive-server && mkdir out && cp target/release/hive-server out/hive-server-linux-$(uname -m)
       - uses: actions/upload-artifact@v4
         with: { name: "linux-${{ matrix.os }}", path: out }
+  # Tailscale built into Hive (tailnet/): one Go build per computer, cross-compiled here. Hive fetches it with a program, not a
+  # browser, so the Mac's copy needs no notarization (Go signs it ad hoc, which Apple silicon requires).
+  tailnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: tailnet/go.mod, cache-dependency-path: tailnet/go.sum }
+      - working-directory: tailnet
+        env: { CGO_ENABLED: "0" }
+        run: |
+          mkdir -p ../out
+          for t in darwin/arm64:macos-arm64 darwin/amd64:macos-x86_64 linux/amd64:linux-x86_64 linux/arm64:linux-aarch64 windows/amd64:windows.exe; do
+            GOOS=${t%%/*} GOARCH=$(echo ${t%%:*} | cut -d/ -f2) go build -trimpath -ldflags=-s -o ../out/hive-tailnet-${t#*:} .
+          done
+      - uses: actions/upload-artifact@v4
+        with: { name: tailnet, path: out }
   publish:
-    needs: [mac, windows, linux]
+    needs: [mac, windows, linux, tailnet]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

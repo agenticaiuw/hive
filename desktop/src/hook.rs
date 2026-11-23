@@ -9,7 +9,7 @@ pub fn run() {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok();
     let e: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-    let Some(c) = hive_protocol::load("node") else { return };
+    let Some(c) = crate::tailnet::load() else { return };
     let session = e["session_id"].as_str().unwrap_or("");
     let event = e["hook_event_name"].as_str().unwrap_or("");
     let mut out = String::new();
@@ -62,7 +62,7 @@ pub fn rule(args: &[String]) -> Result<(), String> {
 }
 
 fn post(path: &str, body: &Value) -> Result<Value, String> {
-    let c = hive_protocol::load("node").ok_or("This computer isn't paired with Hive.")?;
+    let c = crate::tailnet::load().ok_or("This computer isn't paired with Hive.")?;
     match hive_protocol::call(&c, "POST", path, Some(body), 30)? {
         (200, v) => Ok(v),
         (_, v) => Err(v["error"].as_str().unwrap_or("Hive refused").to_string()),

@@ -30,12 +30,16 @@ impl ResolvesServerCert for Current {
 
 /// This Hive's address, once it has a certificate for it.
 pub fn address(state: &Path) -> Option<String> {
+    if crate::tailnet::on(state) { return crate::tailnet::address(state) }
     let host = std::fs::read_to_string(state.join("host")).ok()?;
     state.join("tls").join("cert.pem").exists().then(|| format!("https://{}", host.trim()))
 }
 
 /// What to do when the internet can't reach this computer, once Let's Encrypt has said so.
-pub fn why(state: &Path) -> Option<String> { std::fs::read_to_string(state.join("tls").join("why")).ok() }
+pub fn why(state: &Path) -> Option<String> {
+    if crate::tailnet::on(state) { return crate::tailnet::why(state) }
+    std::fs::read_to_string(state.join("tls").join("why")).ok()
+}
 
 pub fn start(state: PathBuf, handler: Handler) {
     let dir = state.join("tls");
@@ -122,7 +126,7 @@ fn guide(host: &str, router: Option<Router>, error: &str) -> String {
     let local = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect("1.1.1.1:80").is_ok()).and_then(|s| s.local_addr().ok())
         .map(|a| a.ip().to_string()).unwrap_or_else(|| "this computer".into());
     // Every big cloud answers on this address inside its VMs; a home network doesn't.
-    let cloud = std::net::TcpStream::connect_timeout(&"169.254.169.254:80".parse().unwrap(), Duration::from_secs(1)).is_ok();
+    let cloud = crate::tailnet::cloud();
     let again = if cfg!(target_os = "linux") { "Run sudo ./hive-server again" } else { "Open hive-server again" };
     let open = "allow incoming TCP on ports 80 and 443 from anywhere (0.0.0.0/0). Oracle Cloud: Networking > Virtual cloud networks > \
         the VM's network > Security Lists > Default Security List > Add Ingress Rules. AWS: EC2 > Security Groups > the VM's group > \

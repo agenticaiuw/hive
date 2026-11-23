@@ -9,6 +9,9 @@ jobs:
       - run: cargo build --workspace
       - run: cargo test --workspace
       - run: node --test .github/privacy.test.mjs
+      - uses: actions/setup-go@v5
+        with: { go-version-file: tailnet/go.mod, cache-dependency-path: tailnet/go.sum }
+      - run: cd tailnet && go vet ./... && go build -o /dev/null .
   windows:
     runs-on: windows-latest
     steps:

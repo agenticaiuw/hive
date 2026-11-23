@@ -9,6 +9,7 @@ pub mod cred;
 mod db;
 mod hive;
 mod http;
+pub mod tailnet;
 mod tls;
 mod tools;
 mod vm;
@@ -75,7 +76,8 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
         format!("http://{}", c.addr));
     let h = hive.clone();
     let handler: Arc<dyn Fn(http::Req) -> http::Res + Send + Sync> = Arc::new(move |req| api::handle(&h, req));
-    tls::start(c.state.clone(), handler.clone());
+    // A Hive at home is reached through its owner's tailnet; anywhere else, on its public address.
+    if tailnet::on(&c.state) { tailnet::start(c.state.clone(), c.addr.clone()) } else { tls::start(c.state.clone(), handler.clone()) }
     let addr = c.addr;
     std::thread::spawn(move || http::serve(&addr, handler).expect("listen"));
     if c.state.join("phone-token").exists() { hive.start_phone(); }
