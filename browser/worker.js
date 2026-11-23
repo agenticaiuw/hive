@@ -20,7 +20,7 @@ const TOOLS = [
     { tab: TAB, i: EL, site: str('The exact login site'), username: str('Which login; empty for the only one') }, ['tab', 'i', 'site', 'username']),
   tool('browser_js', "Run JavaScript in a tab's page and get the value of its last expression (a promise is awaited).",
     { tab: TAB, code: str('JavaScript.') }, ['tab', 'code']),
-  tool('browser_screenshot', 'See a tab. It comes to the front of its window.', { tab: TAB }, ['tab'], { lock: 'screen' }),
+  tool('browser_screenshot', 'See an already visible tab without switching tabs. For background tabs, use browser_read or browser_js.', { tab: TAB }, ['tab'], { lock: 'screen' }),
   tool('browser_close', 'Close a tab.', { tab: TAB }, ['tab']),
 ];
 const NOTES = "The owner's own browser, signed in to their sites: browser_* tools. Tabs you open stay in the background; close them when done.";
@@ -125,8 +125,8 @@ const RUN = {
     return v === undefined ? 'Done (no value).' : typeof v === 'string' ? v : JSON.stringify(v, null, 1);
   },
   browser_screenshot: async ({ tab }) => {
-    const t = await chrome.tabs.update(tab, { active: true });
-    await sleep(400);
+    const t = await chrome.tabs.get(tab);
+    if (!t.active) throw new Error('This tab is in the background. Use browser_read or browser_js; screenshots never switch the owner’s tabs.');
     return { text: `${t.title}\n${t.url}`, images: [await chrome.tabs.captureVisibleTab(t.windowId, { format: 'jpeg', quality: 80 })] };
   },
   browser_close: async ({ tab }) => { await chrome.tabs.remove(tab); return 'Closed.'; },
