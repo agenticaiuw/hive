@@ -5,7 +5,7 @@ const { test } = require('node:test');
 
 // Exercise the actual tool handlers without starting the extension's polling loop.
 const source = readFileSync(`${__dirname}/../worker.js`, 'utf8')
-  .replace("import { api, conf } from './hive.js';", '')
+  .replace(/^import .*$/gm, '')
   .split('async function run(c, call)')[0];
 function handlers(tabs) {
   return vm.runInNewContext(`${source}\nRUN`, { chrome: { tabs }, setTimeout });

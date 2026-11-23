@@ -15,7 +15,7 @@ async function fromApp() {
 
 /** Call Hive's server. JSON in and out; null for 204. */
 export async function api(c, path, body, method) {
-  const r = await fetch(c.server + path, {
+  const r = await request(c.server + path, {
     method: method || (body === undefined ? 'GET' : 'POST'),
     headers: { authorization: `Bearer ${c.token}`, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -27,6 +27,27 @@ export async function api(c, path, body, method) {
   return j;
 }
 
+/** A Hive at home that only its owner's tailnet reaches is served at https://hive.<tailnet>.ts.net, and reached through
+ * Tailscale built into the extension (tailnet.js); any other server, directly. */
+export const onTailnet = (url) => { try { return new URL(url).hostname.endsWith('.ts.net'); } catch { return false; } };
+export const tailnet = {
+  // Chrome, Edge and Brave run the node in an offscreen document, opened here when it isn't already. Safari has none: its
+  // background page runs the node and replaces this (worker.js). Calls at once share one opening, so none asks before it
+  // has loaded; a later one finds it open.
+  fetch: async (url, init) => {
+    await (opening ||= chrome.offscreen?.createDocument({ url: 'offscreen.html', reasons: ['WORKERS'], justification: "Runs Tailscale's client, which reaches the owner's Hive on their tailnet." })
+      .catch(() => {}).finally(() => { opening = null; }));
+    return chrome.runtime.sendMessage({ tailnet: 'fetch', url, init });
+  },
+};
+let opening;
+async function request(url, { signal, ...init }) {
+  if (!onTailnet(url)) return fetch(url, { ...init, signal });
+  const r = await tailnet.fetch(url, init);
+  if (r?.error) throw new Error(r.error);
+  return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
+}
+
 /** Connect this browser with the link the dashboard's "Pair a device" copies: https://<server>/#pair=<code>. */
 export async function pair(link, id) {
   const [server, code] = link.trim().split('/#pair=');
@@ -34,7 +55,7 @@ export async function pair(link, id) {
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
   const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
   const name = safari ? 'Safari' : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
-  const r = await fetch(`${server}/api/pair`, {
+  const r = await request(`${server}/api/pair`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code, kind: 'browser', name }),
