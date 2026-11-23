@@ -94,8 +94,8 @@ function render(s) {
       <div class="row"><a class="go" href="${esc(s.url)}" target="_blank">Sign in to Tailscale</a></div>`;
   else if (s.step === 'done') v.innerHTML = `${logo}<h1>Your Hive is running</h1>
       <p>It starts by itself whenever this computer does, so you can close this window. Next, open your dashboard and click
-      <b>Pair a device</b> to add your phone, browser and other computers.${s.dashboard && s.dashboard.includes('.ts.net')
-        ? ' Each one asks you to sign in to the same Tailscale account once.' : ''}</p>
+      <b>Pair a device</b> to add your phone, browser and other computers.${s.devices
+        ? ` They reach your Hive at <b>${esc(s.devices.replace(/^https?:\/\//, ''))}</b> through Hive's apps, each signing in to the same Tailscale account once.` : ''}</p>
       <div class="row"><a class="go" href="${esc(s.dashboard)}" target="_blank">Open your dashboard</a></div>
       <p class="small" style="margin-top:16px">The dashboard's link signs you in, so keep it to yourself. ${s.os === 'macos'
         ? 'Open Hive Server from Applications any time to get back to it.' : s.os === 'windows' ? 'Hive in the Start menu gets you back to it.' : ''}</p>`;

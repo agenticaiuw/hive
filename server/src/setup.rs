@@ -101,18 +101,9 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
     ui.show(json!({ "step": "starting" }));
     std::fs::remove_file(state.join("tls").join("why")).ok();
     install(state)?;
-    if home { return connect_devices(state, ui) }
+    if home { connect_devices(state, ui)?; return Ok(shortcut(state)) }
     for _ in 0..360 {
-        if let Some(a) = crate::address(state) {
-            let link = format!("{a}/#key={}", crate::owner_key(state));
-            // A PC finds its Hive again under Hive in the Start menu.
-            #[cfg(windows)]
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                let programs = Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs");
-                std::fs::write(programs.join("Hive.url"), format!("[InternetShortcut]\r\nURL={link}\r\n")).ok();
-            }
-            return Ok(link);
-        }
+        if crate::address(state).is_some() { return Ok(shortcut(state)) }
         if let Some(why) = crate::why(state) { return Err(why); }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -120,11 +111,11 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
 }
 
 /// Waits while the owner signs in to Tailscale, showing them the sign-in, until Hive has its tailnet address.
-fn connect_devices(state: &Path, ui: &dyn Ui) -> Result<String, String> {
+fn connect_devices(state: &Path, ui: &dyn Ui) -> Result<(), String> {
     let mut failing = 0;
     for _ in 0..3600 {
         let v = crate::tailnet::status(state);
-        if let Some(a) = v["address"].as_str() { return Ok(format!("{a}/#key={}", crate::owner_key(state))) }
+        if v["address"].is_string() { return Ok(()) }
         // A passing hiccup (the network blinking) isn't a failure; one that lasts half a minute is.
         match crate::tailnet::why(state) { Some(e) if failing > 60 => return Err(e), Some(_) => failing += 1, None => failing = 0 }
         if let Some(u) = v["login"].as_str() { ui.show(json!({ "step": "tailscale", "url": u })) }
@@ -404,7 +395,8 @@ pub fn window(state: &Path, install: &'static (dyn Fn(&Path) -> Result<(), Strin
         move || {
             let done = if ready(&state) { Ok(dashboard(&state)) } else { run(&state, &*ui, install) };
             ui.show(match done {
-                Ok(link) => json!({ "step": "done", "dashboard": link, "os": std::env::consts::OS }),
+                Ok(link) => json!({ "step": "done", "dashboard": link, "os": std::env::consts::OS,
+                    "devices": crate::tailnet::on(&state).then(|| crate::address(&state)).flatten() }),
                 Err(e) => json!({ "step": "error", "message": e }),
             });
         }
@@ -458,7 +450,25 @@ fn ready(state: &Path) -> bool {
     signed && state.join("engine").exists() && crate::address(state).is_some()
 }
 
-fn dashboard(state: &Path) -> String { format!("{}/#key={}", crate::address(state).unwrap_or_default(), crate::owner_key(state)) }
+/// The dashboard's link on the computer Hive runs on. A Hive on a tailnet is opened here at its own local address, since this
+/// computer's browser isn't on the tailnet (only Hive's apps are); anywhere else, at its public address.
+pub fn dashboard(state: &Path) -> String {
+    let at = if crate::tailnet::on(state) {
+        format!("http://{}", std::env::var("HIVE_ADDR").unwrap_or_else(|_| "127.0.0.1:8790".into()))
+    } else { crate::address(state).unwrap_or_default() };
+    format!("{at}/#key={}", crate::owner_key(state))
+}
+
+/// The dashboard's link, which a PC also finds again under Hive in the Start menu.
+fn shortcut(state: &Path) -> String {
+    let link = dashboard(state);
+    #[cfg(windows)]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let programs = Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs");
+        std::fs::write(programs.join("Hive.url"), format!("[InternetShortcut]\r\nURL={link}\r\n")).ok();
+    }
+    link
+}
 
 #[cfg(test)]
 mod tests {

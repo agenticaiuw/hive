@@ -83,7 +83,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             return match t {
                 // Inside the owner's tailnet Hive is plain HTTP (WireGuard encrypts it), where a Secure cookie wouldn't be kept.
                 Ok(t) => {
-                    let secure = if req.headers.get("x-forwarded-proto").is_some_and(|p| p == "http") { "" } else { " Secure;" };
+                    // So is the dashboard opened on the Hive computer itself, at its local address.
+                    let local = req.headers.get("host").is_some_and(|h| h.starts_with("127.0.0.1") || h.starts_with("localhost"));
+                    let secure = if local || req.headers.get("x-forwarded-proto").is_some_and(|p| p == "http") { "" } else { " Secure;" };
                     Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=31536000"))
                 }
                 Err(e) => Res::err(401, e),
