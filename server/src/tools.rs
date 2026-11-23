@@ -40,3 +40,8 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
 pub fn for_codex(t: &Value) -> Value {
     json!({ "type": "function", "name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"] })
 }
+
+/// As an MCP server lists a tool (Claude Code agents), likewise without Hive's own fields.
+pub fn for_mcp(t: &Value) -> Value {
+    json!({ "name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"] })
+}

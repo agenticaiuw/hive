@@ -3,6 +3,7 @@
 //! sign-in the first time, then `start` serves the dashboard and API on this computer and on its public address over HTTPS
 //! (tls.rs), which works anywhere.
 mod api;
+mod claude;
 mod codex;
 pub mod cred;
 mod db;
@@ -60,14 +61,17 @@ pub fn setup(state: &Path, _say: &dyn Fn(&str)) -> Result<PathBuf, String> {
 /// Runs Hive on its own thread (which ends only if Hive stops). Starting Hive agrees to Let's Encrypt's terms for its
 /// certificate. Without a checkout it keeps itself at GitHub's latest build, and its devices follow it.
 pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()>, String> {
-    let codex = setup(&c.state, say)?;
-    let codex_home = c.state.join("codex");
+    let engine = match std::fs::read_to_string(c.state.join("engine")).unwrap_or_default().trim() {
+        "claude" => hive::Engine::Claude { cmd: claude(&c.state)?.to_string_lossy().into(),
+            env: vec![("CLAUDE_CONFIG_DIR".into(), c.state.join("claude").to_string_lossy().into_owned())] },
+        _ => hive::Engine::Codex { cmd: setup(&c.state, say)?.to_string_lossy().into(),
+            env: vec![("CODEX_HOME".into(), c.state.join("codex").to_string_lossy().into_owned())] },
+    };
     if c.repo.is_none() { std::thread::spawn(update); }
     say("Starting your Hive…");
     let db = db::Db::open(&c.state.join("hive.db").to_string_lossy());
-    let codex_env = vec![("CODEX_HOME".to_string(), codex_home.to_string_lossy().into_owned())];
     let key = owner_key(&c.state);
-    let hive = hive::Hive::new(db, c.state.clone(), c.repo, codex.to_string_lossy().into(), codex_env, key, hive_protocol::VERSION.into(),
+    let hive = hive::Hive::new(db, c.state.clone(), c.repo, engine, key, hive_protocol::VERSION.into(),
         format!("http://{}", c.addr));
     let h = hive.clone();
     let handler: Arc<dyn Fn(http::Req) -> http::Res + Send + Sync> = Arc::new(move |req| api::handle(&h, req));
@@ -76,6 +80,12 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
     std::thread::spawn(move || http::serve(&addr, handler).expect("listen"));
     if c.state.join("phone-token").exists() { hive.start_phone(); }
     Ok(std::thread::spawn(move || hive.run()))
+}
+
+/// Claude Code, which setup puts in Hive's bin and signs in under its own config (`<state>/claude`).
+fn claude(state: &Path) -> Result<PathBuf, String> {
+    let exe = state.join("bin").join(if cfg!(windows) { "claude.exe" } else { "claude" });
+    if exe.exists() { Ok(exe) } else { Err(format!("This Hive runs on Claude Code, but {} isn't there. Run hive-server again to set it up.", exe.display())) }
 }
 
 /// Every hour: if GitHub's latest build isn't this one, swap it in and restart into it.

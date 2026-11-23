@@ -1,6 +1,8 @@
-//! Hive's brain: every request is planned into tasks and rules, each task gets an agent (a Codex thread), agents' tool
-//! calls reach the devices that declared those tools, and tools that share a lock are used by one agent at a time.
+//! Hive's brain: every request is planned into tasks and rules, each task gets an agent (a Codex thread, or a Claude Code
+//! process: the engine is chosen per Hive), agents' tool calls reach the devices that declared those tools, and tools that
+//! share a lock are used by one agent at a time.
 use crate::args;
+use crate::claude::{Claude, Out};
 use crate::codex::{tool_result, Codex, Event};
 use crate::db::{now, Db};
 use crate::tools;
@@ -16,8 +18,7 @@ pub struct Hive {
     pub state: PathBuf,
     /// On the VM, Hive's checkout, which Hive changes itself from; None on a home computer.
     pub repo: Option<PathBuf>,
-    pub codex_cmd: String,
-    pub codex_env: Vec<(String, String)>,
+    pub engine: Engine,
     pub owner_key: String,
     pub version: String,
     /// Where this Hive's API answers on this computer.
@@ -31,6 +32,16 @@ pub struct Hive {
     last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
     changed: (Mutex<u64>, Condvar),
+    /// Claude Code agents' processes while they work, by agent.
+    claudes: Mutex<HashMap<i64, Arc<Claude>>>,
+    /// Each running Claude agent's MCP secret, so only its own process calls tools as it.
+    mcp: Mutex<HashMap<String, i64>>,
+}
+
+/// What Hive's agents and planner run on, with its program and environment (where it's signed in).
+pub enum Engine {
+    Codex { cmd: String, env: Vec<(String, String)> },
+    Claude { cmd: String, env: Vec<(String, String)> },
 }
 
 pub const LEVELS: [(&str, &str, &str); 4] = [
@@ -38,6 +49,13 @@ pub const LEVELS: [(&str, &str, &str); 4] = [
     ("hard", "gpt-6.1-sol", "medium"), ("hardest", "gpt-6-astra", "high"),
 ];
 const PLANNER_MODEL: (&str, &str) = ("gpt-6.1-terra", "low");
+pub const CLAUDE_LEVELS: [(&str, &str, &str); 4] = [
+    ("easy", "claude-haiku-5-5", "low"), ("normal", "claude-sonnet-5-5", "medium"),
+    ("hard", "claude-opus-5-5", "high"), ("hardest", "claude-opus-5-5", "xhigh"),
+];
+const CLAUDE_PLANNER: (&str, &str) = ("claude-sonnet-5-5", "low");
+/// Hive's own Claude Code agents; 'claude' is the owner's own Claude Code sessions (`hive task`, the inbox).
+const CLAUDE_AGENT: &str = "claude-agent";
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
 fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
@@ -51,12 +69,13 @@ pub fn list(v: &Value) -> Vec<String> {
 }
 
 impl Hive {
-    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, codex_cmd: String, codex_env: Vec<(String, String)>, owner_key: String, version: String, local: String) -> Arc<Hive> {
+    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, engine: Engine, owner_key: String, version: String, local: String) -> Arc<Hive> {
         Arc::new(Hive {
-            db, state, repo, codex_cmd, codex_env, owner_key, version, local,
+            db, state, repo, engine, owner_key, version, local,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
+            claudes: Mutex::new(HashMap::new()), mcp: Mutex::new(HashMap::new()),
         })
     }
 
@@ -97,8 +116,9 @@ impl Hive {
     fn codex(self: &Arc<Self>) -> Result<Arc<Codex>, String> {
         let mut slot = self.codex.lock().unwrap();
         if let Some(c) = slot.as_ref() { if c.alive.load(std::sync::atomic::Ordering::SeqCst) { return Ok(c.clone()); } }
+        let Engine::Codex { cmd, env } = &self.engine else { return Err("this Hive runs on Claude Code, not Codex".into()) };
         let tx = self.events.lock().unwrap().clone().ok_or("Hive isn't running yet")?;
-        let c = Codex::spawn(&self.codex_cmd, &self.codex_env, tx)?;
+        let c = Codex::spawn(cmd, env, tx)?;
         self.loaded.lock().unwrap().clear();
         *slot = Some(c.clone());
         Ok(c)
@@ -149,7 +169,9 @@ impl Hive {
     }
 
     fn resume_working(self: &Arc<Self>) {
-        for a in self.db.all("select id from agents where kind='codex' and status='working' and thread is not null", &[]) {
+        // Only this engine's agents: the other's threads don't carry over.
+        let kind = if matches!(self.engine, Engine::Claude { .. }) { CLAUDE_AGENT } else { "codex" };
+        for a in self.db.all("select id from agents where kind=? and status='working' and thread is not null", args!(kind)) {
             let id = a["id"].as_i64().unwrap_or(0);
             if let Err(e) = self.start_turn(id, "Hive restarted while you were working. Carry on with your task.") {
                 eprintln!("couldn't resume agent {id}: {e}");
@@ -198,6 +220,10 @@ impl Hive {
 
     fn plan_inner(self: &Arc<Self>, req: &Value) -> Result<String, String> {
         let id = req["id"].as_i64().unwrap_or(0);
+        if let Engine::Claude { cmd, env } = &self.engine {
+            let plan = crate::claude::plan(cmd, env, &self.state, CLAUDE_PLANNER, PLANNER, &plan_schema(&self.kinds()), &self.planner_input(req))?;
+            return Ok(self.apply_plan(id, req, &plan));
+        }
         let codex = self.codex()?;
         let started = codex.request("thread/start", json!({
             "model": PLANNER_MODEL.0, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
@@ -320,33 +346,45 @@ impl Hive {
         let level = s(&task["level"]);
         let (_, model, effort) = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]);
         let nodes = list(&task["nodes"]);
-        let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, 'codex', ?, 'working', ?, ?)",
-            args!(task_id, short(&s(&task["title"]), 60), now(), now()));
+        let on_claude = matches!(self.engine, Engine::Claude { .. });
+        let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
+            args!(task_id, if on_claude { CLAUDE_AGENT } else { "codex" }, short(&s(&task["title"]), 60), now(), now()));
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
-        let cwd = match &self.repo { Some(r) if nodes.iter().any(|n| n == "hive") => r.clone(), _ => self.state.join("work").join(task_id.to_string()) };
-        std::fs::create_dir_all(&cwd).ok();
-        let result = (|| {
+        let cwd = self.cwd(&task);
+        let result = if on_claude { self.claude_turn(agent, "Start on your task now.") } else { (|| {
             let codex = self.codex()?;
             let r = codex.request("thread/start", json!({
                 "model": model, "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": self.instructions(&task), "dynamicTools": self.tools_for(&nodes),
+                "developerInstructions": self.instructions(&task), "dynamicTools": self.tools_for(&nodes).iter().map(tools::for_codex).collect::<Vec<_>>(),
             }), 60)?;
             let thread = s(&r["thread"]["id"]);
             if thread.is_empty() { return Err("Codex gave no thread".to_string()); }
             self.db.run("update agents set thread=? where id=?", args!(thread, agent));
             self.loaded.lock().unwrap().insert(thread);
             self.start_turn_with(agent, "Start on your task now.", effort)
-        })();
+        })() };
         if let Err(e) = result {
             self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
-                args!(format!("Hive couldn't start an agent: {e}"), "Nothing from you if Codex comes back by itself; send the task a message to retry.", now(), task_id));
+                args!(format!("Hive couldn't start an agent: {e}"), format!("Nothing from you if {} comes back by itself; send the task a message to retry.",
+                    if on_claude { "Claude Code" } else { "Codex" }), now(), task_id));
             self.db.run("update agents set status='idle' where id=?", args!(agent));
             self.log(agent, task_id, 0, "hive", &format!("Couldn't start the agent: {e}"));
         }
         self.bump();
     }
 
+    /// Where a task's agent works: Hive's checkout for a "hive" task, else a folder of its own.
+    fn cwd(&self, task: &Value) -> PathBuf {
+        let cwd = match &self.repo {
+            Some(r) if list(&task["nodes"]).iter().any(|n| n == "hive") => r.clone(),
+            _ => self.state.join("work").join(s(&task["id"])),
+        };
+        std::fs::create_dir_all(&cwd).ok();
+        cwd
+    }
+
     fn start_turn(self: &Arc<Self>, agent: i64, text: &str) -> Result<(), String> {
+        if self.db.get("select 1 from agents where id=? and kind=?", args!(agent, CLAUDE_AGENT)).is_some() { return self.claude_turn(agent, text); }
         let level = self.db.get("select t.level from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).map(|r| s(&r["level"])).unwrap_or_default();
         let effort = LEVELS.iter().find(|l| l.0 == level).map(|l| l.2).unwrap_or("low");
         self.start_turn_with(agent, text, effort)
@@ -382,9 +420,15 @@ impl Hive {
             self.bump();
             return Ok(());
         }
+        let text = format!("Message from {from}: {text}");
+        if s(&a["kind"]) == CLAUDE_AGENT {
+            // Mid-turn it's a steer, read once the current tool calls finish; else it starts a turn.
+            let busy = self.claudes.lock().unwrap().get(&agent).is_some_and(|c| c.busy.load(std::sync::atomic::Ordering::SeqCst));
+            if !busy { self.nudges.lock().unwrap().remove(&agent); }
+            return self.claude_turn(agent, &text);
+        }
         let thread = s(&a["thread"]);
         let turn = self.turns.lock().unwrap().get(&thread).cloned();
-        let text = format!("Message from {from}: {text}");
         if let Some(turn) = turn {
             let steered = self.codex()?.request("turn/steer", json!({ "threadId": thread, "expectedTurnId": turn,
                 "input": [{ "type": "text", "text": text }] }), 30);
@@ -398,6 +442,10 @@ impl Hive {
         self.db.run("update tasks set status='dropped', updated=? where id=?", args!(now(), task_id));
         if let Some(a) = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=?", args!(task_id)) {
             let thread = s(&a["thread"]);
+            if let Some(c) = a["id"].as_i64().and_then(|id| self.claudes.lock().unwrap().get(&id).cloned()) {
+                // Its turn's result then ends it (after_turn); between turns there's nothing to wait for.
+                if c.busy.load(std::sync::atomic::Ordering::SeqCst) { c.interrupt() } else { c.close() }
+            }
             if let Some(turn) = self.turns.lock().unwrap().get(&thread).cloned() {
                 if let Ok(c) = self.codex() { c.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), 30).ok(); }
             }
@@ -538,7 +586,7 @@ impl Hive {
                 if names.insert(s(&t["name"])) { out.push(t); }
             }
         }
-        out.iter().map(tools::for_codex).collect()
+        out
     }
 
     /// The device that declared this tool (the most recently seen one), and its declaration.
@@ -575,15 +623,103 @@ impl Hive {
         let a = &params["arguments"];
         let agent_row = self.db.get("select * from agents where thread=?", args!(s(&params["threadId"]))).unwrap_or(json!({}));
         let (agent, task) = (agent_row["id"].as_i64().unwrap_or(0), agent_row["task_id"].as_i64().unwrap_or(0));
+        let (ok, text, images) = self.run_tool(&name, a, agent, task);
+        tool_result(ok, &text, &images)
+    }
+
+    /// A tool call, logged, as either engine answers it: whether it worked, its text, and its images (data URLs).
+    fn run_tool(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> (bool, String, Vec<String>) {
         self.log(agent, task, 0, "tool", &format!("{name} {}", short(&a.to_string(), 300)));
-        match self.tool_inner(&name, a, agent, task) {
+        match self.tool_inner(name, a, agent, task) {
             Ok(v) if v["error"].is_null() => {
                 let images: Vec<String> = v["images"].as_array().map(|i| i.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-                tool_result(true, &if v.is_string() { s(&v) } else { s(&v["text"]) }, &images)
+                (true, if v.is_string() { s(&v) } else { s(&v["text"]) }, images)
             }
-            Ok(v) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {}", s(&v["error"]))); tool_result(false, &s(&v["error"]), &[]) }
-            Err(e) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {e}")); tool_result(false, &e, &[]) }
+            Ok(v) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {}", s(&v["error"]))); (false, s(&v["error"]), vec![]) }
+            Err(e) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {e}")); (false, e, vec![]) }
         }
+    }
+
+    // ---- Claude Code agents (claude.rs): a process per agent while it works, its tools over MCP ----
+
+    /// A message into a Claude agent's process (a steer mid-turn, else a new turn), starting the process if it isn't running.
+    fn claude_turn(self: &Arc<Self>, agent: i64, text: &str) -> Result<(), String> {
+        let running = self.claudes.lock().unwrap().get(&agent).cloned();
+        // One that just exited fails to take it; a new process resumes its session.
+        if running.map(|c| c.say(text)).is_none_or(|r| r.is_err()) { self.spawn_claude(agent)?.say(text)?; }
+        self.db.run("update agents set status='working', updated=? where id=?", args!(now(), agent));
+        Ok(())
+    }
+
+    fn spawn_claude(self: &Arc<Self>, agent: i64) -> Result<Arc<Claude>, String> {
+        let Engine::Claude { cmd, env } = &self.engine else { return Err("this Hive runs on Codex, not Claude Code".into()) };
+        let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
+        let task = self.db.get("select * from tasks where id=?", args!(a["task_id"].clone())).ok_or("the agent has no task")?;
+        let level = s(&task["level"]);
+        let (_, model, effort) = CLAUDE_LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(CLAUDE_LEVELS[1]);
+        let token = crate::api::random(24);
+        let mcp = json!({ "mcpServers": { "hive": { "type": "http", "url": format!("{}/mcp/{token}", self.local) } } });
+        let mut args: Vec<String> = ["--model", model, "--effort", effort].map(String::from).into();
+        args.extend(["--append-system-prompt".into(), format!("{}\n\n{CLAUDE_NOTES}", self.instructions(&task)), "--mcp-config".into(), mcp.to_string()]);
+        let thread = s(&a["thread"]);
+        if !thread.is_empty() { args.extend(["--resume".into(), thread]); }
+        self.mcp.lock().unwrap().insert(token.clone(), agent);
+        let me = self.clone();
+        let c = Claude::spawn(cmd, &args, env, &self.cwd(&task), token.clone(), move |c, out| me.claude_out(agent, c, out))
+            .inspect_err(|_| { self.mcp.lock().unwrap().remove(&token); })?;
+        self.claudes.lock().unwrap().insert(agent, c.clone());
+        Ok(c)
+    }
+
+    /// What a Claude agent's process said (None: it exited), as note() does for Codex's.
+    fn claude_out(self: &Arc<Self>, agent: i64, c: &Claude, out: Option<Out>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let task = self.db.get("select task_id from agents where id=?", args!(agent)).and_then(|r| r["task_id"].as_i64()).unwrap_or(0);
+        match out {
+            Some(Out::Session(id)) => { self.db.run("update agents set thread=? where id=?", args!(id, agent)); }
+            Some(Out::Log(who, text)) => if !text.is_empty() { self.log(agent, task, 0, who, &text) },
+            Some(Out::Ended { queued, .. }) if queued > 0 => {} // it goes straight on to the steers it hadn't taken
+            Some(Out::Ended { error, .. }) => {
+                c.busy.store(false, SeqCst);
+                self.release_all(agent);
+                if let Some(e) = error { self.log(agent, task, 0, "hive", &format!("Turn failed: {e}")); }
+                self.after_turn(agent, task, if c.interrupted.swap(false, SeqCst) { "interrupted" } else { "completed" }.into());
+                // Done or waiting on the owner: the process goes, and a message later resumes its session in a new one.
+                if self.db.get("select 1 from agents where id=? and status='working'", args!(agent)).is_none() { c.close(); }
+            }
+            None => {
+                self.mcp.lock().unwrap().remove(&c.token);
+                let mut running = self.claudes.lock().unwrap();
+                if running.get(&agent).is_some_and(|r| r.token == c.token) { running.remove(&agent); }
+                drop(running);
+                // Gone mid-turn without a result: that turn ended, and after_turn keeps it going a bounded number of times.
+                if c.busy.swap(false, SeqCst) {
+                    self.release_all(agent);
+                    self.log(agent, task, 0, "hive", "Claude Code stopped mid-turn.");
+                    self.after_turn(agent, task, "failed".into());
+                }
+            }
+        }
+    }
+
+    /// An MCP message from a Claude agent's process, signed in by its secret. Ok(None) for a notification.
+    pub fn mcp(self: &Arc<Self>, token: &str, m: &Value) -> Result<Option<Value>, String> {
+        let agent = self.mcp.lock().unwrap().get(token).copied().ok_or("no such agent")?;
+        let task = self.db.get("select t.* from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).unwrap_or(json!({}));
+        let tid = task["id"].as_i64().unwrap_or(0);
+        let tools = || {
+            let mut t: Vec<Value> = self.tools_for(&list(&task["nodes"])).iter().map(tools::for_mcp).collect();
+            t.push(crate::claude::end_turn());
+            t
+        };
+        Ok(crate::claude::mcp(m, tools, |name, a| {
+            if name != "end_turn" { return self.run_tool(name, a, agent, tid); }
+            // What a Codex agent's final message would be: after_turn reads it when the turn's result comes.
+            let end = json!({ "done": a["done"], "outcome": s(&a["outcome"]), "why": s(&a["why"]), "need": s(&a["need"]) });
+            if !a["done"].is_boolean() { return (false, "Give done (true or false), with the outcome, or why and need.".into(), vec![]); }
+            self.last.lock().unwrap().insert(agent, end.to_string());
+            (true, "Recorded. End your turn now.".into(), vec![])
+        }))
     }
 
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
@@ -713,6 +849,11 @@ keep going. You heard the owner in context, so you write what follows from their
 that's truly separate from yours becomes a task (the task tool). Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
 sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password). Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+
+/// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
+const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \
+named mcp__hive__<name>. Hive doesn't read your final message: end every turn by calling mcp__hive__end_turn as your very last \
+action, with done true and the outcome, or done false with exactly why you stopped and exactly what you need from the owner.";
 
 const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99: \
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \

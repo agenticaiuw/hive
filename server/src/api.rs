@@ -86,6 +86,14 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             res.upgrade = Some(Box::new(hive_phone::device));
             return res;
         }
+        // A Claude Code agent's tools (claude.rs), over MCP: the secret in the path is the agent's own, so it signs it in.
+        ("POST", ["mcp", t]) => return match hive.mcp(t, &req.json()) {
+            Err(e) => Res::err(404, &e),
+            Ok(Some(v)) => Res::json(&v),
+            Ok(None) => Res::new(202, "application/json", ""),
+        },
+        // Hive opens no event streams, which MCP asks a server to say this way.
+        ("GET" | "DELETE", ["mcp", _]) => return Res::new(405, "application/json", "").header("Allow", "POST"),
         ("POST", ["api", "pair"]) => {
             let b = req.json();
             return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"])), &req.peer) {
@@ -314,7 +322,7 @@ mod tests {
     use super::*;
     #[test]
     fn codes_pair_once_and_guessing_stops() {
-        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, String::new(), vec![], "owner".into(), String::new(), String::new());
+        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, "owner".into(), String::new(), String::new());
         let code = new_code(&hive.db);
         assert!(pair(&hive, &code, "x", "192.0.2.1").is_ok() && pair(&hive, &code, "x", "192.0.2.1").is_err());
         for _ in 0..10 { assert!(pair(&hive, "12345678", "x", "192.0.2.2").is_err()); }
