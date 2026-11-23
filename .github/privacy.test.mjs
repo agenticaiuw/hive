@@ -1,5 +1,6 @@
 // Keeps the owner's personal details out of this public repository (hive T81). The repository was
-// scrubbed and its history rewritten once; this stops the same kinds of values creeping back in.
+// scrubbed and its history rewritten twice (files, then commit messages); this stops the same kinds of values
+// creeping back into either.
 // It checks shapes, never the values themselves, so the test holds no personal data either:
 //   - Workers are named with the placeholder subdomain (hiveCloud.mjs fills in the real one at build)
 //   - no personal mail addresses (gmail, iCloud, a university's) beyond the public ones listed here
@@ -75,20 +76,35 @@ const RULES = [
   },
 ]
 
-test("the repository holds none of the owner's personal details", t => {
-  const files = trackedTextFiles()
-  if (!files) return t.skip('not a git checkout')
+function scan(entries) {
   const found = []
-  for (const [file, text] of files) {
-    if (file === path.relative(ROOT, import.meta.filename)) continue
+  for (const [name, text] of entries) {
     for (const rule of RULES) {
       for (const m of text.matchAll(rule.find)) {
         if (rule.allowed(m)) continue
         const line = text.slice(0, m.index).split('\n').length
         // Name the place, never the value, so a failing run doesn't print it either.
-        found.push(`${file}:${line}  ${rule.why}`)
+        found.push(`${name}:${line}  ${rule.why}`)
       }
     }
   }
+  return found
+}
+
+test("the repository holds none of the owner's personal details", t => {
+  const files = trackedTextFiles()
+  if (!files) return t.skip('not a git checkout')
+  const found = scan(files.filter(([file]) => file !== path.relative(ROOT, import.meta.filename)))
   assert.deepEqual(found, [], `Personal details in the repository:\n${found.join('\n')}`)
+})
+
+test("no commit message holds the owner's personal details", t => {
+  let log
+  try {
+    log = execFileSync('git', ['-C', ROOT, 'log', '--format=%h%x00%B%x01'], { encoding: 'utf8', maxBuffer: 256 << 20 })
+  } catch {
+    return t.skip('not a git checkout')
+  }
+  const found = scan(log.split('\x01').filter(c => c.includes('\0')).map(c => c.trim().split('\0')).map(([h, m]) => [`commit ${h}`, m]))
+  assert.deepEqual(found, [], `Personal details in commit messages:\n${found.join('\n')}`)
 })
