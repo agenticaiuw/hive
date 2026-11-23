@@ -107,8 +107,8 @@ pub fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
 
 fn reason(status: u16) -> &'static str {
     match status {
-        200 => "OK", 204 => "No Content", 301 => "Moved Permanently", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
-        404 => "Not Found", 409 => "Conflict", 413 => "Too Large", 500 => "Internal Server Error", _ => "Status",
+        200 => "OK", 202 => "Accepted", 204 => "No Content", 301 => "Moved Permanently", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
+        404 => "Not Found", 405 => "Method Not Allowed", 409 => "Conflict", 413 => "Too Large", 500 => "Internal Server Error", _ => "Status",
     }
 }
 
