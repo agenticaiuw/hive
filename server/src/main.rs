@@ -32,6 +32,11 @@ fn main() {
         }
         // Started by a person (a checkout's server, like the owner's VM, is always started by its service).
         None if std::env::var_os("HIVE_REPO").is_none() => {
+            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                // Clears Terminal's line about the command it ran, so the window starts with what Hive is doing.
+                eprint!("\x1b[2J\x1b[3J\x1b[H");
+                say("Hive Server is setting up this computer as your Hive.\nKeep this window open: it takes a few minutes, and asks you to sign in to ChatGPT once.\n");
+            }
             let made = std::fs::create_dir_all(&state).map_err(|e| format!("Couldn't make {}: {e}{}", state.display(),
                 if cfg!(target_os = "linux") { ". Run it as root: sudo ./hive-server" } else { "" }));
             std::fs::remove_file(state.join("tls").join("why")).ok();
@@ -45,6 +50,8 @@ fn main() {
                         Some(Err(why)) => say(&why),
                         None => say("Let's Encrypt hasn't answered yet. Run this again in a few minutes to see where it stands."),
                     }
+                    say(if cfg!(target_os = "macos") { "\nHive now runs by itself, even after a restart. You can close this window and move Hive Server from Downloads to the Trash." }
+                        else { "\nHive now runs by itself, even after a restart. You can close this window and delete the download." });
                     return;
                 }
                 Err(e) => { eprintln!("{e}"); std::process::exit(1) }

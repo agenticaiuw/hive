@@ -60,7 +60,7 @@ pub fn setup(state: &Path, say: &dyn Fn(&str)) -> Result<PathBuf, String> {
         "windows" => format!("{arch}-pc-windows-msvc.exe"),
         _ => format!("{arch}-unknown-linux-musl.tar.gz"),
     };
-    say("Getting Codex, the AI behind Hive's agents…");
+    say("Downloading Codex, the OpenAI program Hive's agents run on…");
     // Codex runs agents' tool calls through its code-mode host, which sits beside it: both come from one release.
     let latest = |name: &str| fetch(&bin, name, &format!("https://github.com/openai/codex/releases/latest/download/{name}-{target}"));
     if !bin.join(if cfg!(windows) { "codex-code-mode-host.exe" } else { "codex-code-mode-host" }).exists() {
@@ -109,14 +109,45 @@ fn update() {
     }
 }
 
+/// Copies a download to its file, showing how far it has got when a person is watching in a terminal.
+fn copy_showing(from: &mut dyn std::io::Read, to: &mut std::fs::File, size: Option<u64>) -> std::io::Result<()> {
+    use std::io::{IsTerminal, Write};
+    let watched = std::io::stderr().is_terminal();
+    let (mut buf, mut done, mut shown) = (vec![0u8; 1 << 16], 0u64, u64::MAX);
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 { break }
+        to.write_all(&buf[..n])?;
+        done += n as u64;
+        let mb = done >> 20;
+        if watched && mb != shown {
+            shown = mb;
+            match size { Some(t) => eprint!("\r  {mb} of {} MB", t >> 20), None => eprint!("\r  {mb} MB") }
+        }
+    }
+    if watched { eprintln!() }
+    Ok(())
+}
+
 /// A program Hive runs, from its maker's latest release on GitHub, fetched once.
 fn fetch(bin: &Path, name: &str, url: &str) -> Result<PathBuf, String> {
     let exe = bin.join(if cfg!(windows) { format!("{name}.exe") } else { name.into() });
     if exe.exists() { return Ok(exe); }
     let failed = |e: String| format!("Couldn't download {name} ({e}). Check the internet connection and try again.");
-    let r = ureq::get(url).call().map_err(|e| failed(e.to_string()))?;
     let part = bin.join(format!("{name}.part"));
-    std::io::copy(&mut r.into_reader(), &mut std::fs::File::create(&part).map_err(|e| failed(e.to_string()))?).map_err(|e| failed(e.to_string()))?;
+    // A download that stops moving for a minute starts over, up to three times, instead of waiting forever.
+    let agent = ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(30)).timeout_read(std::time::Duration::from_secs(60)).build();
+    let mut last = String::new();
+    for attempt in 1..=3 {
+        if attempt > 1 && std::io::IsTerminal::is_terminal(&std::io::stderr()) { eprintln!("  The download stalled ({last}). Trying again…") }
+        let got = agent.get(url).call().map_err(|e| e.to_string()).and_then(|r| {
+            let size = r.header("content-length").and_then(|n| n.parse::<u64>().ok());
+            let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+            copy_showing(&mut r.into_reader(), &mut file, size).map_err(|e| e.to_string())
+        });
+        match got { Ok(()) => { last.clear(); break } Err(e) => last = e }
+    }
+    if !last.is_empty() { std::fs::remove_file(&part).ok(); return Err(failed(last)); }
     if url.ends_with("gz") {
         let unpack = bin.join(format!("{name}.unpack"));
         std::fs::create_dir_all(&unpack).ok();
