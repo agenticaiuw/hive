@@ -60,7 +60,7 @@ const RUN = {
     return `Tab ${x.id}: ${x.title}\n${x.url}`;
   },
   browser_read: ({ tab }) => inTab(tab, () => {
-    const sel = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[contenteditable=""],[contenteditable=true]';
+    const sel = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=option],[role=treeitem],[contenteditable=""],[contenteditable=true]';
     const els = [];
     for (const el of document.querySelectorAll(sel)) {
       const r = el.getBoundingClientRect();
