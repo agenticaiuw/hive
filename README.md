@@ -6,7 +6,7 @@ The club's one project: agents that use your computer, phone and browser the way
 
 ## How it fits together
 
-- **One brain.** The server is the only place agents run, on whichever computer the owner made their Hive; every computer starts it the same way and serves it over HTTPS on its own public address. A laptop at home that the internet can't reach (most homes) gets `<name>.hive.agenticaiuw.com` through the club's relay on the VM instead, still encrypted end to end. Its AI (Claude Code or Codex, chosen at setup) is signed in there and nowhere else.
+- **One brain.** The server is the only place agents run, on whichever computer the owner made their Hive; every computer starts it the same way and serves it over HTTPS on its own public address (a home router opens the ports itself). Codex is signed in there and nowhere else.
 - **Every request goes to the orchestrator first**, which only routes it: to the agent already on that task, or to a new one. The agent that takes it writes the rules (standing instructions, scoped to everywhere, a node, a site, an app or a folder) and any further tasks, since it has the context; a Claude Code session does the same with `hive rule` and `hive task`.
 - **One agent per task**, with the tools of the nodes the task needs. A turn ends with done and the outcome, or exactly why it stopped and what the owner must do; there is no "stuck".
 - **Nodes bring their own tools.** A Mac or Windows computer, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.

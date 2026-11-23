@@ -9,7 +9,6 @@ pub mod cred;
 mod db;
 mod hive;
 mod http;
-mod relay;
 mod tls;
 mod tools;
 mod vm;

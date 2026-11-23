@@ -38,8 +38,6 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .err { color: var(--warn); }
 footer { text-align: center; padding: 0 0 18px; }
-details { margin: 4px 0 6px; } summary { cursor: pointer; color: var(--fg); }
-.steps { white-space: pre-wrap; margin-top: 8px; max-height: 240px; overflow: auto; -webkit-user-select: text; user-select: text; }
 </style>
 </head>
 <body>
@@ -93,13 +91,8 @@ function render(s) {
       <div class="row"><a class="go" href="${esc(s.dashboard)}" target="_blank">Open your dashboard</a></div>
       <p class="small" style="margin-top:16px">The dashboard's link signs you in, so keep it to yourself. ${s.os === 'macos'
         ? 'Open Hive Server from Applications any time to get back to it.' : s.os === 'windows' ? 'Hive in the Start menu gets you back to it.' : ''}</p>`;
-  else if (s.step === 'error') {
-    // The first paragraph says what happened; the steps after it stay folded away until wanted.
-    const [what, ...more] = String(s.message || '').split(/\n\s*\n/);
-    v.innerHTML = `${logo}<h1>Hive couldn't finish setting up</h1><p>${esc(what)}</p>
-      ${more.length ? `<details class="small"><summary>What to do</summary><div class="steps">${esc(more.join('\n\n'))}</div></details>` : ''}
-      <div class="row" style="margin-top:14px"><button class="go" onclick="retry()">Try again</button></div>`;
-  }
+  else if (s.step === 'error') v.innerHTML = `${logo}<h1>Something went wrong</h1><p class="err">${esc(s.message)}</p>
+      <div class="row"><button class="go" onclick="retry()">Try again</button></div>`;
 }
 
 function choose(engine) { api('/engine', { engine }).then(poll); }

@@ -4,8 +4,6 @@ After=network-online.target
 
 [Service]
 Environment=HIVE_ADDR=127.0.0.1:8800 HIVE_STATE=/var/lib/hive HIVE_REPO=/opt/hive HOME=/root
-# The club's relay: Hives on laptops at home get <name>.hive.agenticaiuw.com through this VM (server/src/relay.rs).
-Environment=HIVE_RELAY_DOMAIN=hive.agenticaiuw.com
 Environment=PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/root/.cargo
 ExecStart=/opt/hive/target/release/hive-server
