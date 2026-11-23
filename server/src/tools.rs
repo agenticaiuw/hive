@@ -2,7 +2,7 @@
 use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 
-pub fn cloud(nodes: &[String], vm: bool) -> Vec<Value> {
+pub fn cloud(nodes: &[String]) -> Vec<Value> {
     let mut t = vec![
         tool("message_agent", "Send a message to the agent working on another task (to coordinate, hand over, or ask).",
             json!({ "task": n("The other task's id."), "text": s("The message.") }), &["task", "text"]),
@@ -16,11 +16,13 @@ pub fn cloud(nodes: &[String], vm: bool) -> Vec<Value> {
             json!({ "title": s("Short imperative."), "quote": s("The owner's exact words for it."), "project": s("Short project name."),
             "nodes": { "type": "array", "items": { "type": "string" }, "description": "Where the work happens: vm, hive, browser, phone, mac…" },
             "level": s("easy, normal, hard or hardest.") }), &["title", "quote", "project", "nodes", "level"]),
+        tool("type_password", "Type a saved login's password (`hive-cred list` shows them) without you seeing it: with tool empty, into \
+            the focused field of the VM's screen (:99); else through a device's typing tool, e.g. browser_type (Safari, Chrome) or mac_type.",
+            json!({ "site": s("The site, e.g. x.com"), "username": s("Which login; empty for the only one."),
+            "tool": s("Empty for the VM's screen, else the device's typing tool."),
+            "args": s("That tool's other arguments as JSON, all but text, e.g. {\"tab\": 3, \"i\": 5}.") }),
+            &["site", "username", "tool", "args"]),
     ];
-    if vm {
-        t.push(tool("vm_type_password", "Type a saved password into the focused field of the VM's screen (:99) without you seeing it.",
-            json!({ "site": s("The site, e.g. x.com"), "username": s("Which login; empty for the only one.") }), &["site", "username"]));
-    }
     if nodes.iter().any(|n| n == "browser") {
         t.push(tool("page_code", "Make a site rule take effect in the owner's browsers: CSS, and JavaScript if CSS can't do it, that \
             Hive's extension applies on every page of the rule's site as it loads. Replaces the rule's earlier code. Check it on a real \

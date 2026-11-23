@@ -530,7 +530,7 @@ impl Hive {
 
     /// Every tool a task on these devices gets: the cloud's, then each device's (the most recently seen device of a kind wins).
     fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
-        let mut out: Vec<Value> = tools::cloud(kinds, self.repo.is_some());
+        let mut out: Vec<Value> = tools::cloud(kinds);
         let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
         for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
             if !kinds.contains(&s(&n["kind"])) { continue; }
@@ -558,6 +558,7 @@ impl Hive {
         let done = self.wait_until(secs * 1000, || {
             self.db.get("select result from calls where id=? and status='done'", args!(call)).map(|r| s(&r["result"]))
         });
+        self.db.run("update calls set args='{}' where id=?", args!(call)); // a typed password doesn't stay in the database
         match done {
             Some(r) => Ok(serde_json::from_str(&r).unwrap_or(json!({ "text": r }))),
             None => {
@@ -601,7 +602,15 @@ impl Hive {
                 let rows = if key.is_empty() { self.db.all("select key, value from info order by key", &[]) } else { self.db.all("select key, value from info where key=?", args!(key)) };
                 return Ok(json!(rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")));
             }
-            "vm_type_password" => return crate::vm::type_password(&s(&a["site"]), &s(&a["username"])).map(|m| json!(m)),
+            "type_password" => {
+                let (site, user, tool) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]));
+                if tool.is_empty() { return crate::vm::type_password(&site, &user).map(|m| json!(m)); }
+                if !tool.ends_with("_type") { return Err("tool is a device's typing tool, e.g. browser_type or mac_type".into()); }
+                let mut args = serde_json::from_str::<Value>(&s(&a["args"])).ok().filter(Value::is_object).unwrap_or(json!({}));
+                args["text"] = crate::cred::pick(&site, &user)?["password"].clone();
+                let r = self.tool_inner(&tool, &args, agent, task)?;
+                return Ok(if r["error"].is_null() { json!(format!("Typed the saved password for {site} with {tool}.")) } else { r });
+            }
             "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
             "rule" => return self.add_rule(&s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
             "task" => {
@@ -699,5 +708,5 @@ sends it on their behalf. Never print passwords or keys. Messages from the owner
 
 const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99: \
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
-view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and vm_type_password types one. Hive's files \
+view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and type_password types one, here or in a device. Hive's files \
 (shared with the dashboard and nodes) are in /var/lib/hive/files.";

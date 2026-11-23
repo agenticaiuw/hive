@@ -208,7 +208,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!(hive.db.all(&format!("select * from {table} order by rowid desc limit ? offset ?"),
                 args!(req.q("limit").parse::<i64>().unwrap_or(100), req.q("offset").parse::<i64>().unwrap_or(0)))))
         }
-        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()], hive.repo.is_some()) })].into_iter()
+        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()]) })].into_iter()
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
