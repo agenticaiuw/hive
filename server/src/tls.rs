@@ -3,7 +3,9 @@
 //! gets a Let's Encrypt certificate (ACME, RFC 8555) for the address, renewing it and following the address when it changes.
 //! Port 80 answers Let's Encrypt's checks and sends everything else to HTTPS. When Let's Encrypt can't reach it, `why` says
 //! exactly what to do, from what it found: a cloud VM's closed firewall, a router to open, or a provider sharing one address.
+//! A Hive at home that the internet can't reach goes through the club's relay instead (relay.rs), and the relay runs here too.
 use crate::http::{self, Req, Res};
+use crate::relay;
 use hive_protocol::b64;
 use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
@@ -14,7 +16,7 @@ use rustls::sign::CertifiedKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -42,43 +44,91 @@ pub fn start(state: PathBuf, handler: Handler) {
     std::fs::create_dir_all(&dir).ok();
     let current = Arc::new(Current(RwLock::new(load(&dir))));
     let tokens: Arc<Mutex<HashMap<String, String>>> = Default::default();
-
-    let t = tokens.clone();
-    std::thread::spawn(move || listen("0.0.0.0:80", move |mut s| {
-        let res = match http::parse(&mut s, 1 << 16) {
-            Some(r) => match r.path.strip_prefix("/.well-known/acme-challenge/").and_then(|k| t.lock().unwrap().get(k).cloned()) {
-                Some(answer) => Res::new(200, "text/plain", answer),
-                None => Res::new(301, "text/plain", "").header("Location",
-                    &format!("https://{}{}", r.headers.get("host").map(String::as_str).unwrap_or(""), r.path)),
-            },
-            None => Res::err(400, "bad request"),
-        };
-        http::write(&mut s, &res).ok();
-    }));
-
-    let (cur, file) = (current.clone(), state.join("host"));
-    std::thread::spawn(move || loop {
-        let router = open_ports();
-        let old = std::fs::read_to_string(&file).unwrap_or_default().trim().to_string();
-        let host = public_ip().unwrap_or(old.clone());
-        if host != old { std::fs::write(&file, &host).ok(); std::fs::remove_file(dir.join("cert.pem")).ok(); }
-        if !host.is_empty() && due(&host, &dir) {
-            match issue(&host, &dir, &tokens) {
-                Ok(()) => { *cur.0.write().unwrap() = load(&dir); std::fs::remove_file(dir.join("why")).ok(); eprintln!("certificate for {host} renewed") }
-                Err(e) => { eprintln!("certificate: {e}"); std::fs::write(dir.join("why"), guide(&host, router, &e)).ok(); }
-            }
-        }
-        std::thread::sleep(Duration::from_secs(3600));
-    });
-
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = Arc::new(rustls::ServerConfig::builder_with_provider(provider).with_safe_default_protocol_versions()
-        .expect("tls versions").with_no_client_auth().with_cert_resolver(current));
-    std::thread::spawn(move || listen("0.0.0.0:443", move |s| {
-        let (Ok(conn), Ok(socket)) = (rustls::ServerConnection::new(config.clone()), s.try_clone()) else { return };
-        http::handle(rustls::StreamOwned::new(conn, s), socket, &*handler);
+        .expect("tls versions").with_no_client_auth().with_cert_resolver(current.clone()));
+    // What a connection gets, whether it came in directly or down the relay.
+    let serve: Arc<dyn Fn(TcpStream, u16) + Send + Sync> = {
+        let (t, config, handler) = (tokens.clone(), config.clone(), handler.clone());
+        Arc::new(move |s, port| if port == 80 { plain(s, &t) } else { secure(s, &config, &handler) })
+    };
+    let relay_domain = relay::serving();
+
+    let (sv, rd) = (serve.clone(), relay_domain.clone());
+    std::thread::spawn(move || listen("0.0.0.0:80", move |s| {
+        if let Some(name) = rd.as_ref().and_then(|d| relay::http_host(&s).and_then(|h| relay::home_name(&h, d))) {
+            let Ok(mut back) = s.try_clone() else { return };
+            if !relay::forward(&name, s, 80) { http::write(&mut back, &Res::err(502, &format!("{name}'s Hive isn't connected right now."))).ok(); }
+            return;
+        }
+        sv(s, 80)
+    }));
+
+    let (cur, file, home) = (current.clone(), state.join("host"), serve.clone());
+    std::thread::spawn(move || {
+        // A Hive at home the internet can't reach goes through the relay from then on (relay.rs).
+        let mut relayed = relay::name(&state).is_some();
+        let mut joined: Option<String> = None;
+        loop {
+            let mut router = None;
+            let old = std::fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+            let host = if relayed {
+                if joined.is_none() {
+                    match relay::connect(&state, home.clone()) {
+                        Ok(n) => joined = Some(n),
+                        Err(e) => { std::fs::write(dir.join("why"), format!("{e}\nHive tries again every few minutes.\n")).ok(); std::thread::sleep(Duration::from_secs(300)); continue }
+                    }
+                }
+                format!("{}.{}", joined.as_deref().unwrap_or(""), relay::domain())
+            } else {
+                router = open_ports();
+                public_ip().unwrap_or(old.clone())
+            };
+            if host != old { std::fs::write(&file, &host).ok(); std::fs::remove_file(dir.join("cert.pem")).ok(); }
+            if !host.is_empty() && due(&host, &dir) {
+                match issue(&host, &dir, &tokens) {
+                    Ok(()) => { *cur.0.write().unwrap() = load(&dir); std::fs::remove_file(dir.join("why")).ok(); eprintln!("certificate for {host} renewed") }
+                    Err(e) if !relayed && !cloud() => { eprintln!("certificate: {e}; the internet can't reach {host}, so going through the relay"); relayed = true; continue }
+                    Err(e) => { eprintln!("certificate: {e}"); std::fs::write(dir.join("why"), guide(&host, router, &e)).ok(); }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    });
+
+    std::thread::spawn(move || listen("0.0.0.0:443", move |mut s| {
+        if let Some(d) = &relay_domain {
+            match relay::arrival(&mut s) {
+                relay::Arrival::Back(id) => return relay::joined(&id, s),
+                relay::Arrival::Tls(Some(sni)) => if let Some(name) = relay::home_name(&sni, d) { relay::forward(&name, s, 443); return },
+                _ => {}
+            }
+        }
+        serve(s, 443)
     }));
 }
+
+/// Port 80: Let's Encrypt's checks, and everything else sent to HTTPS.
+fn plain(mut s: TcpStream, tokens: &Mutex<HashMap<String, String>>) {
+    let res = match http::parse(&mut s, 1 << 16) {
+        Some(r) => match r.path.strip_prefix("/.well-known/acme-challenge/").and_then(|k| tokens.lock().unwrap().get(k).cloned()) {
+            Some(answer) => Res::new(200, "text/plain", answer),
+            None => Res::new(301, "text/plain", "").header("Location",
+                &format!("https://{}{}", r.headers.get("host").map(String::as_str).unwrap_or(""), r.path)),
+        },
+        None => Res::err(400, "bad request"),
+    };
+    http::write(&mut s, &res).ok();
+}
+
+/// Port 443: the dashboard and API over HTTPS.
+fn secure(s: TcpStream, config: &Arc<rustls::ServerConfig>, handler: &Handler) {
+    let (Ok(conn), Ok(socket)) = (rustls::ServerConnection::new(config.clone()), s.try_clone()) else { return };
+    http::handle(rustls::StreamOwned::new(conn, s), socket, &**handler);
+}
+
+/// Every big cloud answers on this address inside its VMs; a home network doesn't.
+fn cloud() -> bool { std::net::TcpStream::connect_timeout(&"169.254.169.254:80".parse().unwrap(), Duration::from_secs(1)).is_ok() }
 
 /// This computer's address as the internet sees it, from a STUN server (RFC 8489).
 fn public_ip() -> Option<String> {
@@ -121,8 +171,7 @@ fn open_ports() -> Option<Router> {
 fn guide(host: &str, router: Option<Router>, error: &str) -> String {
     let local = UdpSocket::bind("0.0.0.0:0").ok().filter(|s| s.connect("1.1.1.1:80").is_ok()).and_then(|s| s.local_addr().ok())
         .map(|a| a.ip().to_string()).unwrap_or_else(|| "this computer".into());
-    // Every big cloud answers on this address inside its VMs; a home network doesn't.
-    let cloud = std::net::TcpStream::connect_timeout(&"169.254.169.254:80".parse().unwrap(), Duration::from_secs(1)).is_ok();
+    let cloud = cloud();
     let again = if cfg!(target_os = "linux") { "Run sudo ./hive-server again" } else { "Open hive-server again" };
     let open = "allow incoming TCP on ports 80 and 443 from anywhere (0.0.0.0/0). Oracle Cloud: Networking > Virtual cloud networks > \
         the VM's network > Security Lists > Default Security List > Add Ingress Rules. AWS: EC2 > Security Groups > the VM's group > \
@@ -161,7 +210,7 @@ fn gateway() -> Option<String> {
     w.next().map(String::from)
 }
 
-fn listen(addr: &str, each: impl Fn(std::net::TcpStream) + Send + Sync + 'static) {
+fn listen(addr: &str, each: impl Fn(TcpStream) + Send + Sync + 'static) {
     let Ok(l) = TcpListener::bind(addr) else { return eprintln!("can't listen on {addr}") };
     let each = Arc::new(each);
     for s in l.incoming().flatten() {

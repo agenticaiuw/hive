@@ -78,6 +78,19 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             };
         }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
+        // A home Hive's control connection to this relay (relay.rs), signed in with its name's own secret.
+        ("GET", ["relay"]) if crate::relay::serving().is_some() => {
+            let h = |k: &str| req.headers.get(k).cloned().unwrap_or_default();
+            let name = h("x-relay-name").to_ascii_lowercase();
+            return match crate::relay::admit(&hive.state, &name, &h("x-relay-secret")) {
+                Ok(()) => {
+                    let mut res = Res::new(101, "", "").header("Upgrade", "hive-relay").header("Connection", "Upgrade");
+                    res.upgrade = Some(Box::new(move |conn, _| crate::relay::control(name, conn)));
+                    res
+                }
+                Err(e) => Res::err(if e == "taken" { 409 } else { 400 }, &e),
+            };
+        }
         ("GET", ["phone", "device"]) => {
             let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
             if key.is_empty() || token(&req) != key { return Res::err(401, "Connect the iPhone again from the dashboard."); }
