@@ -1,4 +1,5 @@
-// Hive Server.app's window: it moves itself into Applications the first time, then shows setup (hive-server ui, beside this
+// Hive Server.app's window: it installs itself into Applications the first time (double-clicked on its disk image, at once;
+// from anywhere else, after asking), then shows setup (hive-server ui, beside this
 // program) in a window of its own. Setup's page is served by hive-server on this computer only; closing the window quits both.
 import Cocoa
 import WebKit
@@ -89,12 +90,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegate
         let original = originalLocation(of: here) ?? here
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if original.path.hasPrefix("/Applications/") || original.path.hasPrefix(home + "/Applications/") { return false }
-        let a = NSAlert()
-        a.messageText = "Move Hive Server to your Applications folder?"
-        a.informativeText = "That way it stays put when you clean up Downloads, and you can open it again from Applications."
-        a.addButton(withTitle: "Move to Applications")
-        a.addButton(withTitle: "Not Now")
-        guard a.runModal() == .alertFirstButtonReturn else { return false }
+        // Opened from Hive's disk image, which says "double-click to install": install without asking. From anywhere else
+        // (a Downloads folder), ask first.
+        let image = original.path.hasPrefix("/Volumes/") ? original.deletingLastPathComponent() : nil
+        if image == nil {
+            let a = NSAlert()
+            a.messageText = "Move Hive Server to your Applications folder?"
+            a.informativeText = "That way it stays put when you clean up Downloads, and you can open it again from Applications."
+            a.addButton(withTitle: "Move to Applications")
+            a.addButton(withTitle: "Not Now")
+            guard a.runModal() == .alertFirstButtonReturn else { return false }
+        }
         let fm = FileManager.default
         let dirs = [URL(fileURLWithPath: "/Applications"), URL(fileURLWithPath: home + "/Applications")]
         for dir in dirs where fm.isWritableFile(atPath: dir.path) || (!fm.fileExists(atPath: dir.path) && dir.path.hasPrefix(home)) {
@@ -106,8 +112,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegate
             } catch { continue }
             // macOS already checked this download when it was opened, so the copy needn't ask again.
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dest.path])
-            if original != dest { try? fm.trashItem(at: original, resultingItemURL: nil) }
+            if original != dest && image == nil { try? fm.trashItem(at: original, resultingItemURL: nil) }
             run("/usr/bin/open", ["-n", dest.path])
+            // The disk image has done its job: put it away once this copy, which runs from it, has quit.
+            if let image {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/bin/sh")
+                p.arguments = ["-c", "sleep 3; /usr/bin/hdiutil detach \"$0\" -quiet", image.path]
+                try? p.run()
+            }
             NSApp.terminate(nil)
             return true
         }

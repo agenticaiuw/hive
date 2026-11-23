@@ -61,8 +61,10 @@ function render(s) {
   else if (s.step === 'choose') v.innerHTML = `${logo}<h1>Welcome to Hive</h1>
     <p>Hive's agents work on your computer, phone and browser for you. Which AI should they think with? They use your own account.</p>
     <div class="choices">
-      <button class="choice" onclick="choose('claude')"><div class="mark claude">C</div><div><b>Claude</b><span>Claude Code, with your Claude Pro or Max plan</span></div></button>
-      <button class="choice" onclick="choose('codex')"><div class="mark codex">G</div><div><b>ChatGPT</b><span>Codex, with your ChatGPT Plus or Pro plan</span></div></button>
+      <button class="choice" onclick="choose('claude')"><div class="mark claude">C</div><div><b>Claude</b><span>${s.found?.claude
+        ? 'Claude Code is already signed in on this computer: nothing to download or sign in to' : 'Claude Code, with your Claude Pro or Max plan'}</span></div></button>
+      <button class="choice" onclick="choose('codex')"><div class="mark codex">G</div><div><b>ChatGPT</b><span>${s.found?.codex
+        ? 'Codex is already signed in on this computer: no second sign-in' : 'Codex, with your ChatGPT Plus or Pro plan'}</span></div></button>
     </div>`;
   else if (s.step === 'download') {
     const mb = n => Math.round(n / 1048576);

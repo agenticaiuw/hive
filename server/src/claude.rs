@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+/// The owner's own hooks don't run in Hive's agents: on their own Claude Code sign-in, Hive's hook (desktop/, `hive hook`) would
+/// send each agent's prompts back to Hive.
+const NO_HOOKS: &str = r#"{"disableAllHooks": true}"#;
+
 /// What an agent's process says, already in Hive's terms.
 #[derive(Debug, PartialEq)]
 pub enum Out {
@@ -42,7 +46,7 @@ impl Claude {
     pub fn spawn(cmd: &str, args: &[String], env: &[(String, String)], cwd: &Path, token: String,
         on: impl Fn(&Claude, Option<Out>) + Send + 'static) -> Result<Arc<Claude>, String> {
         let mut child = command(cmd, env, cwd).args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--strict-mcp-config"]).args(args)
+            "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--strict-mcp-config", "--settings", NO_HOOKS]).args(args)
             .spawn().map_err(|e| format!("couldn't start Claude Code ({cmd}): {e}"))?;
         let stdout = child.stdout.take().unwrap();
         let c = Arc::new(Claude { stdin: Mutex::new(child.stdin.take()), token, busy: AtomicBool::new(false), interrupted: AtomicBool::new(false) });
@@ -169,7 +173,7 @@ pub fn end_turn() -> Value {
 /// The planner: one `claude -p` with a JSON schema for its answer.
 pub fn plan(cmd: &str, env: &[(String, String)], cwd: &Path, model: (&str, &str), prompt: &str, schema: &Value, input: &str) -> Result<Value, String> {
     let mut child = command(cmd, env, cwd).args(["-p", "--output-format", "json", "--json-schema", &schema.to_string(), "--model", model.0,
-        "--effort", model.1, "--append-system-prompt", prompt, "--strict-mcp-config", "--permission-mode", "plan", "--no-session-persistence"])
+        "--effort", model.1, "--append-system-prompt", prompt, "--strict-mcp-config", "--permission-mode", "plan", "--no-session-persistence", "--settings", NO_HOOKS])
         .spawn().map_err(|e| format!("couldn't start Claude Code ({cmd}): {e}"))?;
     // The input goes in as the prompt on stdin, which has no length limit the way a command line does.
     let mut stdin = child.stdin.take().unwrap();

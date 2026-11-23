@@ -54,7 +54,8 @@ pub fn code(state: &Path) -> String { api::new_code(&db::Db::open(&state.join("h
 /// window or terminal the first time; this covers a Hive started without it). Returns Codex.
 pub fn setup(state: &Path, _say: &dyn Fn(&str)) -> Result<PathBuf, String> {
     let ui = setup::Terminal::new();
-    let codex = setup::get_codex(state, &ui)?;
+    // The owner's own Codex when setup chose it; else Hive's copy, fetched if it's missing.
+    let codex = if state.join("engine-bin").exists() { setup::engine_bin(state, "codex") } else { setup::get_codex(state, &ui)? };
     setup::sign_in_codex(state, &ui)?;
     Ok(codex)
 }
@@ -63,10 +64,8 @@ pub fn setup(state: &Path, _say: &dyn Fn(&str)) -> Result<PathBuf, String> {
 /// certificate. Without a checkout it keeps itself at GitHub's latest build, and its devices follow it.
 pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()>, String> {
     let engine = match std::fs::read_to_string(c.state.join("engine")).unwrap_or_default().trim() {
-        "claude" => hive::Engine::Claude { cmd: claude(&c.state)?.to_string_lossy().into(),
-            env: vec![("CLAUDE_CONFIG_DIR".into(), c.state.join("claude").to_string_lossy().into_owned())] },
-        _ => hive::Engine::Codex { cmd: setup(&c.state, say)?.to_string_lossy().into(),
-            env: vec![("CODEX_HOME".into(), c.state.join("codex").to_string_lossy().into_owned())] },
+        "claude" => hive::Engine::Claude { cmd: claude(&c.state)?.to_string_lossy().into(), env: setup::engine_env(&c.state, "claude") },
+        _ => hive::Engine::Codex { cmd: setup(&c.state, say)?.to_string_lossy().into(), env: setup::engine_env(&c.state, "codex") },
     };
     if c.repo.is_none() { std::thread::spawn(update); }
     say("Starting your Hive…");
@@ -86,7 +85,7 @@ pub fn start(c: Config, say: &dyn Fn(&str)) -> Result<std::thread::JoinHandle<()
 
 /// Claude Code, which setup puts in Hive's bin and signs in under its own config (`<state>/claude`).
 fn claude(state: &Path) -> Result<PathBuf, String> {
-    let exe = state.join("bin").join(if cfg!(windows) { "claude.exe" } else { "claude" });
+    let exe = setup::engine_bin(state, "claude");
     if exe.exists() { Ok(exe) } else { Err(format!("This Hive runs on Claude Code, but {} isn't there. Run hive-server again to set it up.", exe.display())) }
 }
 

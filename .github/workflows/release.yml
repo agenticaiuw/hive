@@ -53,10 +53,10 @@ jobs:
           mkdir s && cp -R out/hive-server-macos "out/Hive Server.app" s/ && ditto -c -k s server.zip && notarize server.zip
           xcrun stapler staple "out/Hive Server.app"
           ditto -c -k --keepParent "out/Hive Server.app" out/hive-server-macos.zip
-          # What people download: a disk image showing Hive Server beside Applications, so the app never lands in Downloads
-          # (a browser unpacks a zip there). The zip stays for links that already point at it.
-          mkdir sdmg && mv "out/Hive Server.app" sdmg/ && ln -s /Applications sdmg/Applications
-          hdiutil create -volname "Hive Server" -srcfolder sdmg -format UDZO out/Hive-Server.dmg
+          # What people download: a disk image with Hive Server alone, to double-click: it installs itself into Applications,
+          # puts the disk image away and opens (server/mac/App.swift). The app never lands in Downloads, as a zip's would.
+          mkdir sdmg && mv "out/Hive Server.app" sdmg/
+          hdiutil create -volname "Install Hive Server" -srcfolder sdmg -format UDZO out/Hive-Server.dmg
           codesign -s "$id" --timestamp out/Hive-Server.dmg && notarize out/Hive-Server.dmg && xcrun stapler staple out/Hive-Server.dmg
           rm -rf sdmg
           mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications

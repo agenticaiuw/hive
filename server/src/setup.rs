@@ -12,8 +12,8 @@ use std::time::Duration;
 /// What the person sees and answers. `show` gets the whole current step each time.
 pub trait Ui: Sync {
     fn show(&self, step: Value);
-    /// "codex" or "claude".
-    fn engine(&self) -> String;
+    /// "codex" or "claude". `found` says which the owner already has signed in on this computer ({"codex": true, …}).
+    fn engine(&self, found: &Value) -> String;
     /// A code the person pasted from the sign-in page, if one came since the last call.
     fn pasted(&self) -> Option<String>;
 }
@@ -25,12 +25,73 @@ pub fn engine(state: &Path) -> String {
     match std::fs::read_to_string(state.join("engine")).unwrap_or_default().trim() { "claude" => "claude".into(), _ => "codex".into() }
 }
 
+/// The engine's program: the owner's own when setup found it signed in (`<state>/engine-bin`), else Hive's copy.
+pub fn engine_bin(state: &Path, name: &str) -> PathBuf {
+    std::fs::read_to_string(state.join("engine-bin")).ok().map(|p| PathBuf::from(p.trim())).filter(|p| p.exists())
+        .unwrap_or_else(|| exe(&state.join("bin"), name))
+}
+
+/// Where the engine keeps its sign-in: the owner's own (`<state>/engine-home`; empty means the program's own default), else
+/// Hive's folder for it.
+pub fn engine_env(state: &Path, name: &str) -> Vec<(String, String)> {
+    let var = if name == "claude" { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" };
+    match std::fs::read_to_string(state.join("engine-home")) {
+        Ok(h) if h.trim().is_empty() => vec![],
+        Ok(h) => vec![(var.into(), h.trim().into())],
+        Err(_) => vec![(var.into(), state.join(name).to_string_lossy().into_owned())],
+    }
+}
+
+fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()) }
+
+/// A program the owner installed, wherever their own terminal would find it (an app opened from Finder doesn't get their PATH).
+fn installed(name: &str) -> Option<PathBuf> {
+    let h = home();
+    let mut places: Vec<PathBuf> = if cfg!(windows) {
+        vec![h.join(".local").join("bin").join(format!("{name}.exe")), h.join("AppData").join("Roaming").join("npm").join(format!("{name}.cmd"))]
+    } else {
+        vec![h.join(".local/bin").join(name), "/opt/homebrew/bin".into(), "/usr/local/bin".into(), h.join(".npm-global/bin").join(name), h.join(".claude/local").join(name)]
+            .into_iter().map(|p| if p.ends_with("bin") { p.join(name) } else { p }).collect()
+    };
+    let shell = if cfg!(windows) { Command::new("where").arg(name).output() }
+        else { Command::new(std::env::var("SHELL").unwrap_or("/bin/zsh".into())).args(["-lc", &format!("command -v {name}")]).output() };
+    if let Some(p) = shell.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(|l| PathBuf::from(l.trim()))) { places.insert(0, p) }
+    places.into_iter().find(|p| p.is_file())
+}
+
+/// The owner's own Codex or Claude Code, if they're signed in to it on this computer: its program (None when Hive should use
+/// its own copy of the program but their sign-in) and where its sign-in lives ("" for the program's default).
+fn found(name: &str) -> Option<(Option<PathBuf>, String)> {
+    if name == "codex" {
+        let home = std::env::var("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".codex"));
+        if !home.join("auth.json").exists() { return None }
+        // Hive runs agents' tools through Codex's code-mode host, which a native install has beside it (an npm one doesn't).
+        let bin = installed("codex").filter(|b| b.canonicalize().is_ok_and(|c| c.with_file_name(if cfg!(windows) { "codex-code-mode-host.exe" } else { "codex-code-mode-host" }).exists()));
+        return Some((bin, home.to_string_lossy().into_owned()))
+    }
+    let bin = installed("claude")?;
+    let out = no_window(Command::new(&bin).args(["auth", "status", "--json"]).env_remove("CLAUDE_CONFIG_DIR")).stdin(Stdio::null()).output().ok()?;
+    let signed = serde_json::from_slice::<Value>(&out.stdout).is_ok_and(|v| v["loggedIn"] == true);
+    signed.then(|| (Some(bin), String::new()))
+}
+
 /// The whole first run. `install` makes Hive start with the computer; the result is the dashboard's link.
 pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), String>) -> Result<String, String> {
     std::fs::create_dir_all(state.join("bin")).map_err(|e| format!("Couldn't make {}: {e}", state.display()))?;
-    let engine = if state.join("engine").exists() { engine(state) } else { ui.engine() };
+    let engine = if state.join("engine").exists() { engine(state) } else {
+        // What the owner already has signed in here, Hive uses as it is: no download, no second sign-in.
+        let have: Vec<(&str, Option<(Option<PathBuf>, String)>)> = ["claude", "codex"].iter().map(|n| (*n, found(n))).collect();
+        let chosen = ui.engine(&json!(have.iter().map(|(n, f)| (n.to_string(), json!(f.is_some()))).collect::<serde_json::Map<_, _>>()));
+        if let Some((_, Some((bin, home)))) = have.into_iter().find(|(n, _)| *n == chosen) {
+            if let Some(b) = bin { std::fs::write(state.join("engine-bin"), b.to_string_lossy().as_bytes()).ok(); }
+            std::fs::write(state.join("engine-home"), home).ok();
+        }
+        chosen
+    };
     std::fs::write(state.join("engine"), &engine).map_err(|e| e.to_string())?;
-    if engine == "claude" { get_claude(state, ui)?; sign_in_claude(state, ui)?; } else { get_codex(state, ui)?; sign_in_codex(state, ui)?; }
+    let own = state.join("engine-bin").exists();
+    if engine == "claude" { if !own { get_claude(state, ui)?; } sign_in_claude(state, ui)?; }
+    else { if !own { get_codex(state, ui)?; } sign_in_codex(state, ui)?; }
     // At home, the owner's devices reach Hive through their own Tailscale network; a cloud VM has a public address.
     let home = crate::tailnet::on(state) || (!state.join("reach").exists() && !crate::tailnet::cloud());
     if home {
@@ -200,14 +261,15 @@ fn no_window(c: &mut Command) -> &mut Command {
     c
 }
 
-pub fn codex_signed_in(state: &Path) -> bool { state.join("codex").join("auth.json").exists() }
+pub fn codex_signed_in(state: &Path) -> bool {
+    engine_env(state, "codex").first().map(|(_, h)| PathBuf::from(h)).unwrap_or_else(|| home().join(".codex")).join("auth.json").exists()
+}
 
 /// ChatGPT's device sign-in: a link and a one-time code to enter there.
 pub(crate) fn sign_in_codex(state: &Path, ui: &dyn Ui) -> Result<(), String> {
-    let home = state.join("codex");
-    std::fs::create_dir_all(&home).ok();
     if codex_signed_in(state) { return Ok(()) }
-    let mut child = no_window(Command::new(exe(&state.join("bin"), "codex")).args(["login", "--device-auth"]).env("CODEX_HOME", &home))
+    for (_, h) in engine_env(state, "codex") { std::fs::create_dir_all(h).ok(); }
+    let mut child = no_window(Command::new(engine_bin(state, "codex")).args(["login", "--device-auth"]).envs(engine_env(state, "codex")))
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start Codex: {e}"))?;
     let rx = lines(&mut child);
     let (mut url, mut code) = (String::new(), String::new());
@@ -228,7 +290,7 @@ fn is_code(l: &str) -> bool {
 }
 
 pub fn claude_signed_in(state: &Path) -> bool {
-    let out = no_window(Command::new(exe(&state.join("bin"), "claude")).args(["auth", "status", "--json"]).env("CLAUDE_CONFIG_DIR", state.join("claude")))
+    let out = no_window(Command::new(engine_bin(state, "claude")).args(["auth", "status", "--json"]).envs(engine_env(state, "claude")))
         .stdin(Stdio::null()).output();
     out.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()).is_some_and(|v| v["loggedIn"] == true)
 }
@@ -236,10 +298,9 @@ pub fn claude_signed_in(state: &Path) -> bool {
 /// Claude's own subscription sign-in (`claude auth login`, as T3 Code does it): it opens the browser itself; on a computer with
 /// no browser, the page shows a code to paste back.
 fn sign_in_claude(state: &Path, ui: &dyn Ui) -> Result<(), String> {
-    let home = state.join("claude");
-    std::fs::create_dir_all(&home).ok();
     if claude_signed_in(state) { return Ok(()) }
-    let mut child = no_window(Command::new(exe(&state.join("bin"), "claude")).args(["auth", "login"]).env("CLAUDE_CONFIG_DIR", &home))
+    for (_, h) in engine_env(state, "claude") { std::fs::create_dir_all(h).ok(); }
+    let mut child = no_window(Command::new(engine_bin(state, "claude")).args(["auth", "login"]).envs(engine_env(state, "claude")))
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start Claude Code: {e}"))?;
     let mut stdin = child.stdin.take();
     let rx = lines(&mut child);
@@ -292,9 +353,11 @@ impl Ui for Terminal {
         if *last != line { eprintln!("{line}"); *last = line; }
     }
 
-    fn engine(&self) -> String {
+    fn engine(&self, found: &Value) -> String {
         if let Ok(e) = std::env::var("HIVE_ENGINE") { return if e == "claude" { e } else { "codex".into() } }
-        eprintln!("Which AI should Hive's agents use?\n  1. ChatGPT (Codex), with your ChatGPT account\n  2. Claude (Claude Code), with your Claude account");
+        let here = |n: &str| if found[n] == true { " (already signed in on this computer)" } else { "" };
+        eprintln!("Which AI should Hive's agents use?\n  1. ChatGPT (Codex), with your ChatGPT account{}\n  2. Claude (Claude Code), with your Claude account{}",
+            here("codex"), here("claude"));
         loop {
             eprint!("Type 1 or 2: ");
             let mut l = String::new();
@@ -323,8 +386,8 @@ pub struct Window { step: std::sync::Mutex<Value>, engine: (std::sync::Mutex<Opt
 
 impl Ui for Window {
     fn show(&self, v: Value) { *self.step.lock().unwrap() = v; }
-    fn engine(&self) -> String {
-        self.show(json!({ "step": "choose" }));
+    fn engine(&self, found: &Value) -> String {
+        self.show(json!({ "step": "choose", "found": found }));
         let mut g = self.engine.0.lock().unwrap();
         while g.is_none() { g = self.engine.1.wait(g).unwrap(); }
         g.take().unwrap()
@@ -393,8 +456,8 @@ pub fn window(state: &Path, install: &'static (dyn Fn(&Path) -> Result<(), Strin
 
 /// Set up already: its engine is here and signed in, and Hive has its address.
 fn ready(state: &Path) -> bool {
-    let bin = state.join("bin");
-    let signed = if engine(state) == "claude" { exe(&bin, "claude").exists() && claude_signed_in(state) } else { exe(&bin, "codex").exists() && codex_signed_in(state) };
+    let e = engine(state);
+    let signed = engine_bin(state, &e).exists() && if e == "claude" { claude_signed_in(state) } else { codex_signed_in(state) };
     signed && state.join("engine").exists() && crate::address(state).is_some()
 }
 
@@ -409,6 +472,33 @@ mod tests {
         assert!(is_code(&plain("   \x1b[94mYAEW-V8YGE\x1b[0m")));
         assert!(!is_code("2. Enter this one-time code (expires in 15 minutes)"));
     }
+    #[test]
+    fn finds_the_owners_own_signed_in_codex() {
+        let h = std::env::temp_dir().join(format!("hive-home-{}", std::process::id()));
+        std::fs::create_dir_all(h.join(".codex")).unwrap();
+        std::fs::create_dir_all(h.join(".local/bin")).unwrap();
+        std::env::set_var("HOME", &h);
+        std::env::set_var("SHELL", "/usr/bin/false");
+        std::env::remove_var("CODEX_HOME");
+        assert!(found("codex").is_none(), "not signed in yet");
+        std::fs::write(h.join(".codex/auth.json"), "{}").unwrap();
+        // Signed in but no native Codex: Hive uses its own copy with the owner's sign-in.
+        let (bin, home) = found("codex").unwrap();
+        assert!(bin.is_none() && home.ends_with(".codex"));
+        for f in ["codex", "codex-code-mode-host"] { std::fs::write(h.join(".local/bin").join(f), "").unwrap(); }
+        let (bin, _) = found("codex").unwrap();
+        assert_eq!(bin.unwrap(), h.join(".local/bin/codex"));
+        // Chosen: the engine's place follows.
+        let state = h.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("engine-home"), h.join(".codex").to_string_lossy().as_bytes()).unwrap();
+        assert!(codex_signed_in(&state));
+        assert_eq!(engine_env(&state, "codex")[0].1, h.join(".codex").to_string_lossy());
+        std::fs::write(state.join("engine-home"), "").unwrap();
+        assert!(engine_env(&state, "claude").is_empty(), "an empty home means the program's own default");
+        std::fs::remove_dir_all(&h).ok();
+    }
+
     #[test]
     fn engine_defaults_to_codex() {
         let d = std::env::temp_dir().join(format!("hive-engine-{}", std::process::id()));
