@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive</title>
+<style>
+:root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #b45309; --soft: #fef3c7; --warn: #b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f5f5f4; --muted: #a8a29e; --line: #2c2926; --card: #1f1c1a; --accent: #f59e0b; --soft: #2a2117; --warn: #f87171; } }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column; -webkit-user-select: none; user-select: none; cursor: default; }
+main { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 32px 40px; max-width: 520px; width: 100%; margin: 0 auto; }
+.logo { width: 56px; height: 56px; border-radius: 14px; margin-bottom: 18px; }
+h1 { font-size: 24px; line-height: 1.25; margin: 0 0 8px; font-weight: 650; letter-spacing: -0.01em; }
+p { margin: 0 0 14px; color: var(--muted); }
+.choices { display: grid; gap: 10px; margin: 8px 0 4px; }
+.choice { display: flex; gap: 14px; align-items: center; text-align: left; width: 100%; background: var(--card); color: var(--fg);
+  border: 1.5px solid var(--line); border-radius: 12px; padding: 14px 16px; font: inherit; cursor: pointer; }
+.choice:hover { border-color: var(--accent); }
+.choice b { display: block; font-size: 16px; }
+.choice span { color: var(--muted); font-size: 13px; }
+.mark { flex: none; width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; color: #fff; }
+.mark.codex { background: #10a37f; } .mark.claude { background: #d97757; }
+.bar { height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; margin: 18px 0 8px; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .3s; }
+.bar.busy i { width: 35%; animation: slide 1.4s ease-in-out infinite; }
+@keyframes slide { from { margin-left: -35%; } to { margin-left: 100%; } }
+.small { font-size: 13px; color: var(--muted); }
+button.go, a.go { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 10px 18px;
+  font: inherit; font-weight: 600; cursor: pointer; text-decoration: none; }
+button.plain { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 9px 16px; font: inherit; cursor: pointer; }
+.code { font: 600 30px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .08em; background: var(--soft);
+  border-radius: 12px; padding: 14px 18px; margin: 6px 0 16px; text-align: center; -webkit-user-select: all; user-select: all; }
+.paste { display: flex; gap: 8px; margin-top: 18px; }
+.paste input { flex: 1; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font: inherit; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.err { color: var(--warn); }
+footer { text-align: center; padding: 0 0 18px; }
+</style>
+</head>
+<body>
+<main id="view"></main>
+<footer class="small">Hive Server</footer>
+<script>
+const token = location.hash.slice(1);
+const api = (path, body) => fetch(path, { method: body ? 'POST' : 'GET', headers: { 'x-hive-setup': token, 'content-type': 'application/json' },
+  body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const logo = '<img class="logo" src="icon.png" alt="">';
+const names = { codex: 'ChatGPT', claude: 'Claude' };
+let shown = '', typing = false;
+
+function render(s) {
+  const key = JSON.stringify(s);
+  if (key === shown || typing) return;
+  shown = key;
+  const v = document.getElementById('view');
+  if (s.step === 'checking') v.innerHTML = `${logo}<h1>Getting ready…</h1><div class="bar busy"><i></i></div>`;
+  else if (s.step === 'choose') v.innerHTML = `${logo}<h1>Welcome to Hive</h1>
+    <p>Hive's agents work on your computer, phone and browser for you. Which AI should they think with? They use your own account.</p>
+    <div class="choices">
+      <button class="choice" onclick="choose('claude')"><div class="mark claude">C</div><div><b>Claude</b><span>Claude Code, with your Claude Pro or Max plan</span></div></button>
+      <button class="choice" onclick="choose('codex')"><div class="mark codex">G</div><div><b>ChatGPT</b><span>Codex, with your ChatGPT Plus or Pro plan</span></div></button>
+    </div>`;
+  else if (s.step === 'download') {
+    const mb = n => Math.round(n / 1048576);
+    const pct = s.total ? Math.min(100, 100 * s.done / s.total) : 0;
+    v.innerHTML = `${logo}<h1>Downloading ${esc(s.label)}</h1>
+      <p>This is the program Hive's agents run on. It comes straight from its maker.</p>
+      <div class="bar${s.total ? '' : ' busy'}"><i style="width:${pct}%"></i></div>
+      <div class="small">${mb(s.done)}${s.total ? ` of ${mb(s.total)}` : ''} MB</div>`;
+  }
+  else if (s.step === 'signin' && s.engine === 'codex') v.innerHTML = s.code ? `${logo}<h1>Sign in to ChatGPT</h1>
+      <p>Open the sign-in page, sign in, and enter this code:</p><div class="code">${esc(s.code)}</div>
+      <div class="row"><a class="go" href="${esc(s.url)}" target="_blank">Open the sign-in page</a></div>
+      <p class="small" style="margin-top:16px">This window carries on by itself once you're signed in.</p>`
+    : `${logo}<h1>Sign in to ChatGPT</h1><div class="bar busy"><i></i></div>`;
+  else if (s.step === 'signin') v.innerHTML = `${logo}<h1>Sign in to Claude</h1>
+      <p>Your browser opened Claude's sign-in page. Sign in there and allow access; this window carries on by itself.</p>
+      ${s.url ? `<div class="row"><a class="go" href="${esc(s.url)}" target="_blank">Open the sign-in page again</a></div>
+      <div class="small" style="margin-top:18px">If the page shows a code instead, paste it here:</div>
+      <div class="paste"><input id="code" placeholder="Code from the sign-in page" onfocus="typing=true" onblur="typing=false"><button class="plain" onclick="paste()">Continue</button></div>`
+      : '<div class="bar busy"><i></i></div>'}`;
+  else if (s.step === 'starting') v.innerHTML = `${logo}<h1>Starting your Hive</h1>
+      <p>Signed in. Hive is starting and getting a secure web address for your dashboard. This takes up to 3 minutes.</p><div class="bar busy"><i></i></div>`;
+  else if (s.step === 'done') v.innerHTML = `${logo}<h1>Your Hive is running</h1>
+      <p>It starts by itself whenever this computer does, so you can close this window. Next, open your dashboard and click
+      <b>Pair a device</b> to add your phone, browser and other computers.</p>
+      <div class="row"><a class="go" href="${esc(s.dashboard)}" target="_blank">Open your dashboard</a></div>
+      <p class="small" style="margin-top:16px">The dashboard's link signs you in, so keep it to yourself. ${s.os === 'macos'
+        ? 'Open Hive Server from Applications any time to get back to it.' : s.os === 'windows' ? 'Hive in the Start menu gets you back to it.' : ''}</p>`;
+  else if (s.step === 'error') v.innerHTML = `${logo}<h1>Something went wrong</h1><p class="err">${esc(s.message)}</p>
+      <div class="row"><button class="go" onclick="retry()">Try again</button></div>`;
+}
+
+function choose(engine) { api('/engine', { engine }).then(poll); }
+function paste() { const c = document.getElementById('code').value.trim(); if (c) { typing = false; api('/paste', { code: c }); } }
+function retry() { shown = ''; api('/retry', {}).then(poll); }
+function poll() { api('/step').then(render).catch(() => {}); }
+setInterval(poll, 500); poll();
+addEventListener('pagehide', () => navigator.sendBeacon('/closed?' + token));
+</script>
+</body>
+</html>
