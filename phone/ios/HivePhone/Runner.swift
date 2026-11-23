@@ -23,6 +23,8 @@ final class Runner {
     private var queue: [(String, String, String, (Int, String) -> Void)] = []
     private var busy = false
     private var failure: String?
+    /// Apps that said they were in front when Home was pressed: iOS can keep saying so after they've left.
+    private var stale = Set<String>()
     private(set) var inCall = false
 
     /// A failed XCUITest call (HivePhone.record) becomes the error of the call that made it.
@@ -94,6 +96,7 @@ final class Runner {
             }
             return (200, NSNull())
         case ("POST", "wda/homescreen"):
+            stale = Set(candidates.filter { XCUIApplication(bundleIdentifier: $0).state == .runningForeground })
             XCUIDevice.shared.press(.home)
             return (200, NSNull())
         case ("POST", "wda/keys"):
@@ -102,6 +105,7 @@ final class Runner {
         case ("POST", "wda/apps/activate"):
             guard let id = b["bundleId"] as? String, !id.isEmpty else { return Runner.fail(400, "invalid argument", "no bundleId") }
             XCUIApplication(bundleIdentifier: id).activate()
+            stale.remove(id)
             if failure == nil { remember(id) }
             return (200, NSNull())
         case ("GET", "wda/locked"):
@@ -124,6 +128,7 @@ final class Runner {
 
     // MARK: Apps
 
+    private var candidates: [String] { recent + ["app.hive"] + Runner.system }
     private var recent: [String] { UserDefaults.standard.stringArray(forKey: "recentApps") ?? [] }
 
     private func remember(_ id: String) {
@@ -135,10 +140,12 @@ final class Runner {
     /// its icon reads as SpringBoard: XCUITest's public calls can't name it.
     private func front() -> String {
         if Runner.locked() { return Runner.springboard }
-        // An app left by Home can still say it's in front; home-screen icons a tap would reach say SpringBoard is.
-        let icon = XCUIApplication(bundleIdentifier: Runner.springboard).icons.firstMatch
-        if icon.exists && icon.isHittable { return Runner.springboard }
-        for id in recent + ["app.hive"] + Runner.system where XCUIApplication(bundleIdentifier: id).state == .runningForeground { return id }
+        for id in candidates {
+            let up = XCUIApplication(bundleIdentifier: id).state == .runningForeground
+            // An app left by Home can keep saying it's in front; once it stops saying so, it's believed again.
+            if !up { stale.remove(id); continue }
+            if !stale.contains(id) { return id }
+        }
         return Runner.springboard
     }
 
