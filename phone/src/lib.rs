@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 /// read here. GitHub Pages, since a release download redirects to a short-lived signed address, which iOS's installer isn't
 /// known to follow.
 pub const SITE: &str = "https://agenticaiuw.github.io/hive";
+/// Where the owner adds an iPhone to that build: phone.yml's "Run workflow", given the iPhone's UDID.
+pub const REGISTER: &str = "https://github.com/agenticaiuw/hive/actions/workflows/phone.yml";
 
 fn tools() -> Vec<Value> {
     let xy = || json!({ "x": n("x in the latest screenshot"), "y": n("y in the latest screenshot") });
@@ -70,9 +72,22 @@ pub fn update(version: &str) -> Option<String> {
     (want.len() >= 7 && !want.starts_with(version) && !version.starts_with(want)).then(|| link.to_string())
 }
 
-/// For the dashboard: whether Hive Phone is connected and a passcode is saved.
+/// An iPhone plugged into the owner's Mac: the Hive app there asks for its pairing identity by its UDID (desktop/src/phone_setup.rs).
+pub fn seen(state: &Path, udid: &str) {
+    let file = state.join("iphones");
+    let known = std::fs::read_to_string(&file).unwrap_or_default();
+    if bootstrap::valid(udid) && !known.lines().any(|l| l == udid) { std::fs::write(&file, format!("{known}{udid}\n")).ok(); }
+}
+
+/// For the dashboard: whether Hive Phone is connected and a passcode is saved, and the iPhones plugged into the owner's Mac
+/// that the newest signed build doesn't list yet, with where to add them and the link that installs it.
 pub fn status(state: &Path) -> Value {
-    json!({ "connected": link::connected(), "passcode": state.join(phone::PASSCODE).exists(), "paused": state.join(phone::PAUSED).exists() })
+    let r = release();
+    let listed = r["devices"].as_array().cloned().unwrap_or_default();
+    let known = std::fs::read_to_string(state.join("iphones")).unwrap_or_default();
+    let unregistered: Vec<&str> = known.lines().filter(|u| !listed.contains(&json!(listing(u)))).collect();
+    json!({ "connected": link::connected(), "passcode": state.join(phone::PASSCODE).exists(), "paused": state.join(phone::PAUSED).exists(),
+        "unregistered": unregistered, "register": REGISTER, "install": r["install"] })
 }
 
 /// The owner saves the iPhone's passcode (tied to the connected iPhone) so Hive can type it at the lock screen; empty forgets it.
@@ -95,5 +110,13 @@ mod tests {
     fn lists_an_iphone_the_same_however_its_udid_is_written() {
         assert_eq!(super::listing("00008110-001a2b3c00000000"), super::listing("00008110001A2B3C00000000 "));
         assert_eq!(super::listing("x").len(), 64);
+    }
+    #[test]
+    fn remembers_each_iphone_once() {
+        let root = std::env::temp_dir().join(format!("hive-iphones-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for u in ["00008110-001A2B3C00000000", "00008110-001A2B3C00000000", "../nope"] { super::seen(&root, u); }
+        assert_eq!(std::fs::read_to_string(root.join("iphones")).unwrap(), "00008110-001A2B3C00000000\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
