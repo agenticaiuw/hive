@@ -300,7 +300,11 @@ function agentSessions() {
     if (!group) groups.set(key, {...t});
     else group.id = Math.min(group.id, t.id);
   }
-  return [...groups.values()];
+  const priority = {needs: 0, working: 1, open: 1};
+  return [...groups.values()].map(group => {
+    const current = sessionTask(group.id);
+    return {...current, id: group.id};
+  }).sort((a, b) => (priority[a.status] ?? 2) - (priority[b.status] ?? 2));
 }
 function sessionTask(id) {
   const task = state.tasks.find(t => t.id === id);
@@ -371,7 +375,7 @@ function updateSessions() {
 }
 function updateTasks() {
   const board = $('#task-board'); if (!board) return;
-  const sections = [ ['Working', ['open', 'working']], ['Needs me', ['needs']], ['Done', ['done']] ];
+  const sections = [ ['Needs me', ['needs']], ['Working', ['open', 'working']], ['Done', ['done']] ];
   const html = sections.map(([label, statuses]) => {
     const tasks = state.tasks.filter(t => statuses.includes(t.status));
     return `<section><h2>${label}</h2>${tasks.map(t => `<div role="button" tabindex="0" data-task="${t.id}" class="card item" onclick="openTask(${t.id})"><b>#${t.id} ${esc(t.title)}</b>${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
