@@ -43,7 +43,16 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 .badge.working { color: var(--accent); border-color: var(--accent); }
 .badge.done { color: var(--ok); border-color: var(--ok); }
 .log { max-height: 60vh; overflow: auto; font-size: 14px; }
-.log div { padding: 4px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
+.log > div { padding: 4px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-log { padding: 12px 4px; }
+.chat-log .message { display: flex; border: 0; padding: 8px 0; white-space: normal; }
+.chat-log .message-body { min-width: 0; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-log .message.owner { justify-content: flex-end; }
+.chat-log .message.owner .message-body { max-width: 80%; padding: 10px 12px; border-radius: 16px; background: var(--line); }
+.chat-log .message.agent .message-body { padding: 4px 0; }
+.chat-log .activity { padding: 5px 0; color: var(--muted); overflow-wrap: anywhere; }
+.chat-log .activity summary { cursor: pointer; }
+.chat-log .activity-body { white-space: pre-wrap; }
 .log .who { color: var(--accent); font-weight: 600; margin-right: 6px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
@@ -71,7 +80,7 @@ button:disabled { opacity: .5; cursor: wait; }
 </header>
 <nav id="tabs"></nav>
 <main>
-  <div id="orchestrator" class="card"><b>Orchestrator</b><div id="orchestrator-log" class="log"></div><div class="composer" data-composer="main">
+  <div id="orchestrator" class="card"><b>Orchestrator</b><div id="orchestrator-log" class="log chat-log"></div><div class="composer" data-composer="main">
     <textarea id="ask" rows="2" placeholder="Tell Hive what to do"></textarea>
     <div class="attachments"></div>
     <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
@@ -194,8 +203,12 @@ function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="$
 addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Tasks', 'Past'].includes(tab)) tab = 'Sessions'; chat = null; chatAfter = 0; tabs(); render(); });
 
 function logEntry(l) {
-  if (l.who.endsWith(' input')) return `<details><summary>${esc(l.who)}</summary><div>${esc(l.text)}</div></details>`;
-  return `<div><span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`;
+  const who = String(l.who || '');
+  if (who === 'owner' || who.startsWith('owner via '))
+    return `<div class="message owner" aria-label="Your message"><div class="message-body">${esc(l.text)}</div></div>`;
+  if (['agent', 'hive', 'done', 'needs you'].includes(who))
+    return `<div class="message agent" aria-label="${esc(who === 'hive' ? 'Hive' : 'Agent')}"><div class="message-body">${esc(l.text)}</div></div>`;
+  return `<details class="activity"><summary>${esc(who)}</summary><div class="activity-body">${esc(l.text)}</div></details>`;
 }
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 function taskCard(t, click = true) {
@@ -208,7 +221,7 @@ function taskCard(t, click = true) {
 async function openChat(id) { if (chat === id) return; chat = id; chatAfter = 0; render(); }
 function chatPane() {
   return `<div class="card"><div class="row"><b>Task #${chat}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
-    <div id="chatlog" class="log"></div>
+    <div id="chatlog" class="log chat-log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
 let chatLoading = false, orchestratorLoading = false, orchestratorAfter = 0;
