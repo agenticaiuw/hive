@@ -16,8 +16,8 @@ jobs:
   mac:
     runs-on: macos-latest
     # Signed with the repo's Developer ID and notarized with its App Store Connect key, here and only here: every Mac downloads
-    # this build (Safari runs Hive for Safari only from a notarized app). People download Hive-Mac.dmg (Hive.app beside a
-    # shortcut to Applications); installed apps update from Hive-Mac.zip. The server goes out the same way, as Hive-Server.dmg
+    # this build (Safari runs Hive for Safari only from a notarized app). People download Hive-Mac.dmg (Hive.app alone, to
+    # double-click: it installs itself into Applications and opens); installed apps update from Hive-Mac.zip. The server goes out the same way, as Hive-Server.dmg
     # (and Hive Server.app in hive-server-macos.zip, for older links): macOS warns about malware on any bare program a browser
     # downloads, notarized or not, since only an app can carry its ticket. Servers update from the bare hive-server-macos.
     steps:
@@ -61,8 +61,9 @@ jobs:
           hdiutil create -volname "Install Hive Server" -srcfolder sdmg -format UDZO out/Hive-Server.dmg
           codesign -s "$id" --timestamp out/Hive-Server.dmg && notarize out/Hive-Server.dmg && xcrun stapler staple out/Hive-Server.dmg
           rm -rf sdmg
-          mkdir dmg && mv out/Hive.app dmg/ && ln -s /Applications dmg/Applications
-          hdiutil create -volname Hive -srcfolder dmg -format UDZO out/Hive-Mac.dmg
+          # The same for the Hive app: double-clicked, it installs itself, puts the disk image away and opens (desktop/mac/mac.rs).
+          mkdir dmg && mv out/Hive.app dmg/
+          hdiutil create -volname "Install Hive" -srcfolder dmg -format UDZO out/Hive-Mac.dmg
           codesign -s "$id" --timestamp out/Hive-Mac.dmg && notarize out/Hive-Mac.dmg && xcrun stapler staple out/Hive-Mac.dmg
           rm -rf key.p8 app.zip server.zip notary.log s dmg
       # What people download must open with macOS's plain "downloaded from the internet" question, never "Apple could not

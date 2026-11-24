@@ -357,7 +357,13 @@ pub fn install() {
     let dest = std::path::Path::new("/Applications/Hive.app");
     let app = std::env::current_exe().ok().and_then(|e| e.ancestors().nth(3).map(|a| a.to_path_buf()));
     if let Some(app) = app.filter(|a| a.extension().is_some_and(|e| e == "app") && a.as_path() != dest) {
-        if copy_app(&app, dest) && Command::new("open").arg(dest).status().is_ok_and(|s| s.success()) { std::process::exit(0) }
+        if copy_app(&app, dest) && Command::new("open").arg(dest).status().is_ok_and(|s| s.success()) {
+            // Opened from its disk image ("Install Hive"): put the image away once this copy, which runs from it, has quit.
+            if let Some(image) = app.parent().filter(|v| v.starts_with("/Volumes")) {
+                Command::new("/bin/sh").args(["-c", "sleep 3; /usr/bin/hdiutil detach \"$0\" -quiet"]).arg(image).spawn().ok();
+            }
+            std::process::exit(0)
+        }
     }
 }
 
