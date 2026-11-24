@@ -15,14 +15,14 @@
 + (id)configurationFromCommandLineArguments:(NSArray *)arguments userDefaults:(NSUserDefaults *)defaults requiresTestBundleURL:(BOOL)required outError:(NSError **)error;
 @end
 
-@interface HiveBootstrap : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>
+@interface HiveLauncher : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow *window;
 @property(nonatomic, strong) UILabel *status;
 @property(nonatomic) BOOL started;
 @property(nonatomic) UIBackgroundTaskIdentifier backgroundTask;
 @end
 
-@implementation HiveBootstrap
+@implementation HiveLauncher
 - (void)showInScene:(UIWindowScene *)scene {
     if (self.window) return;
     self.window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -53,7 +53,7 @@
     return configuration;
 }
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
-    if ([scene isKindOfClass:UIWindowScene.class]) [(HiveBootstrap *)UIApplication.sharedApplication.delegate showInScene:(UIWindowScene *)scene];
+    if ([scene isKindOfClass:UIWindowScene.class]) [(HiveLauncher *)UIApplication.sharedApplication.delegate showInScene:(UIWindowScene *)scene];
 }
 - (void)endBackgroundTask {
     if (self.backgroundTask == UIBackgroundTaskInvalid) return;
@@ -65,10 +65,10 @@
     self.backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"Hive Phone Control" expirationHandler:^{ [self endBackgroundTask]; }];
 }
 - (void)applicationWillResignActive:(UIApplication *)application { [self continueInBackground]; }
-- (void)sceneWillResignActive:(UIScene *)scene { [(HiveBootstrap *)UIApplication.sharedApplication.delegate continueInBackground]; }
+- (void)sceneWillResignActive:(UIScene *)scene { [(HiveLauncher *)UIApplication.sharedApplication.delegate continueInBackground]; }
 - (void)applicationDidBecomeActive:(UIApplication *)application { [self endBackgroundTask]; [self start]; }
 - (void)sceneDidBecomeActive:(UIScene *)scene {
-    HiveBootstrap *app = (HiveBootstrap *)UIApplication.sharedApplication.delegate;
+    HiveLauncher *app = (HiveLauncher *)UIApplication.sharedApplication.delegate;
     [app endBackgroundTask];
     [app start];
 }
@@ -143,5 +143,5 @@
 @end
 
 int main(int argc, char **argv) {
-    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(HiveBootstrap.class)); }
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(HiveLauncher.class)); }
 }

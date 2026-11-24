@@ -4,7 +4,8 @@
 #import <sys/select.h>
 #import <arpa/inet.h>
 
-extern int hive_mount_ddi(const char *, const char *, const char *, bool);
+// src/lib.rs: the port is the phone's Remote Pairing listener on Hive's loopback VPN.
+extern int hive_mount_ddi(uint16_t, const char *, const char *, bool);
 
 // Discover only the local phone's listener. The saved identity is verified by
 // Rust before any tunnel is requested; discovery never initiates pair setup.
@@ -128,8 +129,7 @@ static uint16_t pairingPort(void) {
     }
     [session finishTasksAndInvalidate];
     if (!downloaded) { dispatch_async(dispatch_get_main_queue(), ^{ progress(@"Hive couldn’t download its phone control files. Check the connection and reopen Hive."); completion(NO); }); return; }
-    NSString *endpoint = [NSString stringWithFormat:@"10.7.0.1:%u", pairingPort()];
-    int result = hive_mount_ddi(endpoint.UTF8String, identity.path.fileSystemRepresentation, directory.path.fileSystemRepresentation, cryptex);
+    int result = hive_mount_ddi(pairingPort(), identity.path.fileSystemRepresentation, directory.path.fileSystemRepresentation, cryptex);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (result) progress(@"Hive couldn’t prepare phone control. Reopen Hive to try again.");
         completion(result == 0);

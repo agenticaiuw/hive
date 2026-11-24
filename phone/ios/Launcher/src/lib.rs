@@ -1,5 +1,5 @@
-#[cfg(feature = "usb-setup")]
-pub mod usb;
+//! The launcher's Rust half, linked into Hive's first executable (Main.m and
+//! Mount.m) and its loopback packet tunnel (../Loopback).
 
 // The mount API has no pairing setup, unmount, restart or identity replacement.
 use idevice::{
@@ -17,11 +17,16 @@ use idevice::{
 };
 use std::{
     ffi::{CStr, c_char},
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     path::Path,
     time::Duration,
 };
 use tokio::net::TcpStream;
+
+/// The phone's own Remote Pairing listener, as seen through Hive's loopback VPN,
+/// and the VPN's address for Hive: the tunnel reflects packets between the two.
+const PHONE: [u8; 4] = [10, 7, 0, 1];
+const HIVE: [u8; 4] = [10, 7, 1, 1];
 
 /// Stable, non-sensitive errors for the launcher's status UI. Raw protocol errors
 /// and pairing file contents must never enter logs or dashboard diagnostics.
@@ -41,10 +46,10 @@ pub enum Failure {
 }
 
 /// Verify an existing Remote Pairing identity and ensure the DDI is mounted.
-/// `endpoint` is the phone's Remote Pairing listener through Hive's loopback VPN.
+/// `port` is the phone's Remote Pairing listener, reached through Hive's loopback VPN.
 /// `assets` contains a complete, downloaded DDI bundle selected by the launcher.
 pub async fn ensure_mounted(
-    endpoint: SocketAddr,
+    port: u16,
     identity: &Path,
     assets: &Path,
     cryptex: bool,
@@ -52,6 +57,7 @@ pub async fn ensure_mounted(
     let mut identity = RpPairingFile::read_from_file(identity)
         .await
         .map_err(|_| Failure::Identity)?;
+    let endpoint = SocketAddr::from((Ipv4Addr::from(PHONE), port));
     let stream = TcpStream::connect(endpoint)
         .await
         .map_err(|_| Failure::Unreachable)?;
@@ -171,28 +177,24 @@ fn has_developer_image(devices: &[plist::Value]) -> bool {
 /// only after the mounted image was verified. All pointers are borrowed.
 ///
 /// # Safety
-/// Arguments must point to valid NUL-terminated UTF-8 strings for this call.
+/// Path arguments must point to valid NUL-terminated UTF-8 strings for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hive_mount_ddi(
-    endpoint: *const c_char,
+    port: u16,
     identity: *const c_char,
     assets: *const c_char,
     cryptex: bool,
 ) -> i32 {
-    if endpoint.is_null() || identity.is_null() || assets.is_null() {
+    if identity.is_null() || assets.is_null() {
         return Failure::Arguments as i32;
     }
     let strings = unsafe {
         (
-            CStr::from_ptr(endpoint).to_str(),
             CStr::from_ptr(identity).to_str(),
             CStr::from_ptr(assets).to_str(),
         )
     };
-    let (Ok(endpoint), Ok(identity), Ok(assets)) = strings else {
-        return Failure::Arguments as i32;
-    };
-    let Ok(endpoint) = endpoint.parse() else {
+    let (Ok(identity), Ok(assets)) = strings else {
         return Failure::Arguments as i32;
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -204,7 +206,7 @@ pub unsafe extern "C" fn hive_mount_ddi(
     match runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(300),
-            ensure_mounted(endpoint, Path::new(identity), Path::new(assets), cryptex),
+            ensure_mounted(port, Path::new(identity), Path::new(assets), cryptex),
         )
         .await
     }) {
@@ -231,17 +233,16 @@ mod tests {
     }
     #[test]
     fn invalid_identity_returns_without_touching_network() {
-        let endpoint = std::ffi::CString::new("127.0.0.1:1").unwrap();
         let missing = std::ffi::CString::new("/nonexistent/hive-pairing.plist").unwrap();
         assert_eq!(
-            unsafe { hive_mount_ddi(endpoint.as_ptr(), missing.as_ptr(), missing.as_ptr(), false) },
+            unsafe { hive_mount_ddi(1, missing.as_ptr(), missing.as_ptr(), false) },
             Failure::Identity as i32
         );
     }
     #[test]
     fn null_ffi_arguments_fail_without_accessing_device() {
         assert_eq!(
-            unsafe { hive_mount_ddi(std::ptr::null(), std::ptr::null(), std::ptr::null(), false) },
+            unsafe { hive_mount_ddi(1, std::ptr::null(), std::ptr::null(), false) },
             Failure::Arguments as i32
         );
     }
@@ -259,8 +260,8 @@ fn reflect_ipv4(packet: &mut [u8]) -> bool {
     if header < 20
         || length < header
         || length != packet.len()
-        || packet[12..16] != [10, 7, 1, 1]
-        || packet[16..20] != [10, 7, 0, 1]
+        || packet[12..16] != HIVE
+        || packet[16..20] != PHONE
     {
         return false;
     }
@@ -287,8 +288,8 @@ mod packet_tests {
         let mut p = vec![0; 40];
         p[0] = 0x45;
         p[2..4].copy_from_slice(&40u16.to_be_bytes());
-        p[12..16].copy_from_slice(&[10, 7, 1, 1]);
-        p[16..20].copy_from_slice(&[10, 7, 0, 1]);
+        p[12..16].copy_from_slice(&HIVE);
+        p[16..20].copy_from_slice(&PHONE);
         p[20..24].copy_from_slice(&[0xab, 0xcd, 0xc0, 0x00]);
         p
     }

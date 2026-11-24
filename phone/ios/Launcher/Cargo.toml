@@ -1,15 +1,11 @@
 [package]
-name = "hive-phone-bootstrap"
+name = "hive-phone-launcher"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
-
 [lib]
-crate-type = ["staticlib", "rlib"]
-
-[features]
-usb-setup = ["idevice/usbmuxd", "idevice/core_device_proxy", "idevice/house_arrest"]
+crate-type = ["staticlib"]
 
 [dependencies]
 idevice = { git = "https://github.com/jkcoxson/idevice", rev = "c8fff6d7fb2690eaeb591ce510754effa7b1e19b", default-features = false, features = ["remote_pairing", "tcp", "tunnel_tcp_stack", "rsd", "mobile_image_mounter", "cryptexd", "tss", "ring"] }

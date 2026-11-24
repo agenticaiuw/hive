@@ -82,8 +82,8 @@ if [ "$1" = test ]; then
   executable=$(plutil -extract CFBundleExecutable raw $app/Info.plist)
   xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 -fobjc-arc \
     -framework UIKit -framework Foundation -framework CoreFoundation -Wl,-rpath,@executable_path/Frameworks \
-    phone/ios/Bootstrap/Main.m -o $app/$executable
-  if otool -L $app/$executable | grep -q XCTest; then echo "Bootstrap links XCTest before mount" >&2; exit 1; fi
+    phone/ios/Launcher/Main.m -o $app/$executable
+  if otool -L $app/$executable | grep -q XCTest; then echo "The launcher links XCTest before mount" >&2; exit 1; fi
   dress $app
   xcrun simctl uninstall "$sim" $id 2> /dev/null || true
   xcrun simctl install "$sim" $app
@@ -127,14 +127,14 @@ app=$out/Payload/Hive.app
 ditto $out/derived/Build/Products/Debug-iphoneos/HivePhone-Runner.app $app
 # The normal UIKit executable runs before the DDI exists; the .xctest bundle
 # stays inside the app and loads only after the image is mounted.
-archive=${CARGO_TARGET_DIR:-target/phone-bootstrap}/aarch64-apple-ios/release/libhive_phone_bootstrap.a
+archive=${CARGO_TARGET_DIR:-target/phone-launcher}/aarch64-apple-ios/release/libhive_phone_launcher.a
 if [ ! -f "$archive" ]; then
-  CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/phone-bootstrap} cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
+  CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/phone-launcher} cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/Launcher/Cargo.toml
 fi
-phone/ios/Bootstrap/build.sh
+phone/ios/Launcher/build.sh
 phone/ios/Loopback/build.sh
 executable=$(plutil -extract CFBundleExecutable raw $app/Info.plist)
-cp target/HivePhone/HiveBootstrap $app/$executable
+cp target/HivePhone/HiveLauncher $app/$executable
 ditto target/HivePhone/HiveLoopback.appex $app/PlugIns/HiveLoopback.appex
 plutil -replace UIFileSharingEnabled -bool true $app/Info.plist
 plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control." $app/Info.plist

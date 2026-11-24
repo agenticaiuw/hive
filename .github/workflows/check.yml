@@ -11,7 +11,8 @@ jobs:
       - run: node --test .github/privacy.test.mjs
       - uses: actions/setup-go@v5
         with: { go-version-file: tailnet/go.mod, cache-dependency-path: tailnet/go.sum }
-      - run: cd tailnet && go vet ./... && go build -o /dev/null .
+      # One Go module: the native hive-tailnet, and the browser extension's build of it.
+      - run: cd tailnet && go vet ./... && go build -o /dev/null . && GOOS=js GOARCH=wasm go vet . && ./wasm.sh
   windows:
     runs-on: windows-latest
     steps:

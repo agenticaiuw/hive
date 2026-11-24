@@ -1,4 +1,6 @@
 /target/
+# Built by tailnet/wasm.sh.
+/browser/tailnet/
 .env
 .env.*
 .DS_Store
