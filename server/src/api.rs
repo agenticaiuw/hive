@@ -151,7 +151,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
             "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
             where l.id>? and ((l.task_id=0 and l.request_id>0) or
-            (l.task_id>0 and l.who in ('agent','done','needs you','hive') and
+            (l.task_id>0 and l.who in ('agent','done','needs you','hive','image') and
             (t.request_id>0 or exists (select 1 from log r where r.task_id=l.task_id and r.request_id>0))))
             order by l.id limit 2000",
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),

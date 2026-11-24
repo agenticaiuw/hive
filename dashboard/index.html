@@ -229,6 +229,13 @@ function openTask(id) { boardSelection = id; location.hash = 'Sessions'; }
 
 function logEntry(l) {
   const who = String(l.who || '');
+  if (who === 'image') {
+    try {
+      const image = JSON.parse(l.text);
+      if (/^api\/files\/\d+$/.test(image.url))
+        return `<figure class="message screenshot"><a href="${image.url}" target="_blank" rel="noopener"><img src="${image.url}" alt="${esc(image.tool)}" style="display:block;max-width:100%;height:auto"></a></figure>`;
+    } catch {}
+  }
   if (who === 'owner' || who.startsWith('owner via '))
     return `<div class="message owner" aria-label="Your message"><div class="message-body">${esc(l.text)}</div></div>`;
   if (['agent', 'hive', 'done', 'needs you'].includes(who))
@@ -303,7 +310,7 @@ async function loadOrchestrator() {
     const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
     for (const l of rows) {
-      appendLogEntry(box, l.task_id > 0 ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
+      appendLogEntry(box, l.task_id > 0 && l.who !== 'image' ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
       orchestratorAfter = l.id;
     }
     if (atEnd) box.scrollTop = box.scrollHeight;

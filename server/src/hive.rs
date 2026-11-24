@@ -771,6 +771,22 @@ impl Hive {
         match self.tool_inner(name, a, agent, task) {
             Ok(v) if v["error"].is_null() => {
                 let images: Vec<String> = v["images"].as_array().map(|i| i.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                for image in &images {
+                    if let Some((header, encoded)) = image.split_once(",") {
+                        let ext = match header {
+                            "data:image/png;base64" => "png",
+                            "data:image/jpeg;base64" => "jpg",
+                            "data:image/webp;base64" => "webp",
+                            _ => continue,
+                        };
+                        if let Some(bytes) = b64::decode(encoded) {
+                            let path = self.save_file(&format!("{name}.{ext}"), &bytes, "agent");
+                            if let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.split('-').next()) {
+                                self.log(agent, task, 0, "image", &json!({"url": format!("api/files/{id}"), "tool": name}).to_string());
+                            }
+                        }
+                    }
+                }
                 (true, if v.is_string() { s(&v) } else { s(&v["text"]) }, images)
             }
             Ok(v) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {}", s(&v["error"]))); (false, s(&v["error"]), vec![]) }
