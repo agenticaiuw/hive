@@ -70,7 +70,9 @@ final class Tailnet {
 
     /// The peers that may be the owner's Hive Server, as hosts to try: online, named hive-something (as Hive Server names
     /// its node), and not one of these iPhone apps' own nodes.
-    static func hives(in status: [String: Any]) -> [String] {
+    static func hives(in status: [String: Any], savedHost: String? = nil) -> [String] {
+        // A saved server may temporarily be offline. Keep its selection across reconnects.
+        if let savedHost { return [savedHost] }
         let peers = (status["Peer"] as? [String: Any] ?? [:]).values.compactMap { $0 as? [String: Any] }
         return peers.compactMap { p -> (String, String)? in
             let name = (p["HostName"] as? String ?? "").lowercased()

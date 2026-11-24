@@ -85,6 +85,8 @@ final class HivePhone: XCTestCase {
               "nodekey:e": {"HostName": "laptop", "DNSName": "laptop.tail1234.ts.net.", "Online": true}}}
             """#.utf8)) as? [String: Any] ?? [:]
         XCTAssertEqual(Tailnet.hives(in: status), ["hive.tail1234.ts.net", "100.101.1.3"])
+        let savedHost = "hive-2.tail1234.ts.net"
+        XCTAssertEqual(Tailnet.hives(in: status, savedHost: savedHost), [savedHost])
         XCTAssertNotNil(Pairing.checked(["url": "ws://hive.tail1234.ts.net/phone/device", "token": String(repeating: "t", count: 40)]))
 
         let sid = call("GET", "/status")["sessionId"] as? String ?? ""

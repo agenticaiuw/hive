@@ -49,9 +49,9 @@ final class TailnetPairing {
     private var busy = false, last = Date.distantPast
 
     /// Tries every 10 seconds while it's asked to, once the node runs.
-    func look(_ found: @escaping (Pairing) -> Void) {
+    func look(savedHost: String?, _ found: @escaping (Pairing) -> Void) {
         guard !busy, Tailnet.shared.running, let proxy = Tailnet.shared.proxy, last.timeIntervalSinceNow < -10 else { return }
-        let hosts = Tailnet.hives(in: Tailnet.shared.status)
+        let hosts = Tailnet.hives(in: Tailnet.shared.status, savedHost: savedHost)
         guard !hosts.isEmpty else { return }
         busy = true
         last = Date()
@@ -68,13 +68,15 @@ final class TailnetPairing {
                 var r = URLRequest(url: base.appendingPathComponent("api/phone/tailnet"))
                 r.httpMethod = "POST"
                 guard let (b, res) = try? await session.data(for: r), (res as? HTTPURLResponse)?.statusCode == 200 else { continue }
-                pairing = Pairing.checked(try? JSONSerialization.jsonObject(with: b))
+                let candidate = Pairing.checked(try? JSONSerialization.jsonObject(with: b))
+                if let savedHost, candidate?.host.caseInsensitiveCompare(savedHost) != .orderedSame { continue }
+                pairing = candidate
             }
             session.invalidateAndCancel()
             let result = pairing
             await MainActor.run {
                 self.busy = false
-                if let result { result.save(); found(result) }
+                if let result { found(result) }
             }
         }
     }

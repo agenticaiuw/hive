@@ -5,8 +5,7 @@ import Foundation
 /// status, body}) through `calls`, in this process; nothing can reach in. The Hive Server, on the owner's tailnet, is
 /// dialled through Tailscale inside the app (Tailnet.swift).
 ///
-/// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it looks for a pairing from the Hive
-/// Server on the owner's tailnet (Pairing.swift).
+/// A new phone discovers a Hive on the owner's tailnet. A paired phone reconnects to its saved server.
 @objc(HiveLink) public final class Link: NSObject, URLSessionWebSocketDelegate {
     @objc public static let shared = Link()
     static let protocolVersion = 1
@@ -54,14 +53,25 @@ import Foundation
     /// Unpaired: Tailscale first (signed in from the dashboard), then the Hive Server on it. Failing: it may bring a new
     /// pairing.
     private func lookForPairing() {
+        // The Mac can select a different server over USB while this app is running.
+        if let saved = Pairing.load(), saved != pairing {
+            adopt(saved)
+            return
+        }
         guard pairing == nil || failing else { return }
         if pairing == nil { Tailnet.shared.start() }
-        auto.look { [weak self] in self?.adopt($0) }
+        let previous = pairing
+        auto.look(savedHost: previous?.host) { [weak self] found in
+            guard let self, self.pairing == previous, Pairing.load() == previous,
+                  (previous == nil || self.failing), found != previous else { return }
+            found.save()
+            self.adopt(found)
+        }
     }
 
     private func adopt(_ found: Pairing) {
-        guard pairing == nil || failing else { return }
         pairing = found
+        update = nil
         refused = false
         failing = false
         retry = 0
@@ -100,6 +110,8 @@ import Foundation
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         guard webSocketTask == socket else { return }
         connected = true
+        failing = false
+        retry = 0
         refused = false
         changed()
     }
