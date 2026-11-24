@@ -5,6 +5,7 @@ pub mod b64;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,13 @@ pub const VERSION: &str = env!("HIVE_GIT");
 pub const DEVICES: &str = env!("HIVE_DEVICES");
 /// Where every device and downloaded server gets each new build: GitHub builds (and signs) one for every push to main.
 pub const RELEASES: &str = "https://github.com/agenticaiuw/hive/releases/download/latest";
+
+/// A download from Releases: it gives up only once it stops arriving for a minute, never for taking long, so a slow line
+/// still gets the update (a 9 MB app at 30 KB/s outlasts any fixed limit worth having).
+pub fn release(name: &str) -> Result<ureq::Response, String> {
+    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(60)).build()
+        .get(&format!("{RELEASES}/{name}")).call().map_err(|e| e.to_string())
+}
 
 pub struct Conf { pub server: String, pub token: String, pub id: String }
 
@@ -82,6 +90,8 @@ pub fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> V
 pub fn s(d: &str) -> Value { json!({ "type": "string", "description": d }) }
 pub fn n(d: &str) -> Value { json!({ "type": "number", "description": d }) }
 
+static UPDATING: AtomicBool = AtomicBool::new(false);
+
 /// Serve the device forever: hello, take calls, answer them (each call on its own thread).
 pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static) -> ! {
     let (c, handle) = (Arc::new(c), Arc::new(handle));
@@ -95,9 +105,14 @@ pub fn run(c: Conf, node: Node, handle: impl Fn(&str, &Value) -> Result<Value, S
                     last_hello = Instant::now();
                     let want = v["version"].as_str().unwrap_or("").to_string();
                     let again = tried.0 != want || tried.1.elapsed() > Duration::from_secs(600);
-                    if !want.is_empty() && !want.starts_with(DEVICES) && !DEVICES.starts_with(want.as_str()) && again {
+                    // On its own thread: on a slow line it takes minutes, and calls keep coming meanwhile.
+                    if !want.is_empty() && !want.starts_with(DEVICES) && !DEVICES.starts_with(want.as_str()) && again && !UPDATING.swap(true, SeqCst) {
                         tried = (want.clone(), Instant::now());
-                        if let Err(e) = download(node.package, &want) { eprintln!("update to {want}: {e}"); }
+                        let package = node.package;
+                        std::thread::spawn(move || {
+                            if let Err(e) = download(package, &want) { eprintln!("update to {want}: {e}"); }
+                            UPDATING.store(false, SeqCst);
+                        });
                     }
                 }
                 Ok((st, v)) => { eprintln!("hello: {st} {v}"); std::thread::sleep(Duration::from_secs(10)); continue; }
@@ -135,7 +150,7 @@ pub fn download(package: &str, want: &str) -> Result<(), String> {
         "macos" => format!("{package}-macos"), "windows" => format!("{package}-windows.exe"),
         "linux" => format!("{package}-linux-{}", std::env::consts::ARCH), os => return Err(format!("no downloads for {os}")),
     };
-    let r = ureq::get(&format!("{RELEASES}/{name}")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
+    let r = release(&name)?;
     let mut bytes = Vec::new();
     r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -156,7 +171,7 @@ pub fn download(package: &str, want: &str) -> Result<(), String> {
 
 /// A downloaded Mac app: unpack GitHub's Hive-Mac.zip next to this one and swap the whole app.
 fn download_app(app: &std::path::Path, package: &str, want: &str) -> Result<(), String> {
-    let r = ureq::get(&format!("{RELEASES}/Hive-Mac.zip")).timeout(Duration::from_secs(300)).call().map_err(|e| e.to_string())?;
+    let r = release("Hive-Mac.zip")?;
     let mut bytes = Vec::new();
     r.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let dir = app.with_extension("update");

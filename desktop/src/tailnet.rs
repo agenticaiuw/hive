@@ -74,8 +74,7 @@ fn helper() -> Result<PathBuf, String> {
         ("macos", "aarch64") => "hive-tailnet-macos-arm64", ("macos", _) => "hive-tailnet-macos-x86_64",
         ("windows", _) => "hive-tailnet-windows.exe", _ => return Err("no Tailscale helper for this computer".into()),
     };
-    let r = ureq::get(&format!("{}/{name}", hive_protocol::RELEASES)).timeout(Duration::from_secs(300)).call()
-        .map_err(|e| format!("Couldn't download Tailscale: {e}"))?;
+    let r = hive_protocol::release(name).map_err(|e| format!("Couldn't download Tailscale: {e}"))?;
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     let part = bin.join("hive-tailnet.part");
     std::io::copy(&mut r.into_reader(), &mut std::fs::File::create(&part).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
