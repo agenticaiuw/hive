@@ -55,25 +55,33 @@ async function work(c) {
   $('workBox').hidden = !tasks.length;
 }
 
-// This browser's Tailscale, for a Hive on its owner's tailnet: its sign-in button while it needs one, and how pairing through
-// it is going (the worker pairs, once it's signed in).
+// This browser's Tailscale. Unpaired, "Sign in with Tailscale" asks the worker to join the owner's Hive Server through it,
+// and opens Tailscale's sign-in page as soon as there is one (the worker carries on once the popup closes for it). Paired,
+// it's the button to sign in again when Tailscale asks.
+let signIn = false;
 async function tailscale() {
-  const { tailnet: t, pairing, pairNote } = await chrome.storage.local.get(['tailnet', 'pairing', 'pairNote']);
-  $('ts').hidden = !t?.url || t.state === 'Running';
-  $('tsLogin').onclick = () => chrome.tabs.create({ url: t.url });
-  if (pairNote) $('pairNote').textContent = pairNote;
-  else if (pairing) $('pairNote').textContent = $('ts').hidden ? 'Connecting through Tailscale…' : 'Sign in to Tailscale, and this browser connects to your Hive Server by itself.';
+  const { hive, tailnet: t, pairing, joining, pairNote } = await chrome.storage.local.get(['hive', 'tailnet', 'pairing', 'joining', 'pairNote']);
+  const url = t?.state !== 'Running' && t?.url;
+  $('ts').hidden = !hive || !url;
+  $('tsLogin').onclick = () => chrome.tabs.create({ url });
+  if (signIn && url) { signIn = false; chrome.tabs.create({ url }); }
+  if (pairNote || pairing || joining) $('pairNote').textContent = pairNote || (url ? 'Sign in to Tailscale in the tab that opened, then this browser connects by itself.' : 'Connecting through Tailscale…');
 }
 chrome.storage.onChanged.addListener((ch) => { tailscale(); if (ch.hive?.newValue) show(); });
 tailscale();
 
-$('pair').onsubmit = async (e) => {
+$('join').onclick = async () => {
+  signIn = true;
+  await chrome.storage.local.set({ joining: true, pairNote: '' });
+  tailscale();
+};
+$('linkForm').onsubmit = async (e) => {
   e.preventDefault();
   $('pairNote').textContent = 'Connecting…';
   const link = $('link').value.trim();
-  if (onTailnet(link)) return chrome.storage.local.set({ pairing: link, pairNote: '' });
+  if (onTailnet(link)) { signIn = true; return chrome.storage.local.set({ pairing: link, pairNote: '' }); }
   try {
-    await pair($('link').value);
+    await pair(link);
     show();
   } catch (err) {
     $('pairNote').textContent = err.message;

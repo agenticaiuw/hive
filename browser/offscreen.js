@@ -10,7 +10,7 @@ const node = start({
   status: (status) => send({ tailnet: 'status', status }),
 });
 chrome.runtime.onMessage.addListener((m, _, reply) => {
-  if (m.tailnet !== 'fetch') return;
-  node.then((f) => f(m.url, m.init)).then(reply, (e) => reply({ error: String(e?.message || e) }));
+  if (m.tailnet !== 'call') return;
+  node.then((n) => n[m.op](...m.args)).then(reply, (e) => reply({ error: String(e?.message || e) }));
   return true;
 });
