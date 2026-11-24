@@ -4,6 +4,9 @@
 #import <UIKit/UIKit.h>
 #import <TargetConditionals.h>
 #import <dlfcn.h>
+#if !TARGET_OS_SIMULATOR
+#import "Mount.h"
+#endif
 
 @interface HiveBootstrap : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow *window;
@@ -52,9 +55,10 @@
     // The simulator has no personalized DDI; build.sh embeds its XCTest runtime.
     dispatch_async(dispatch_get_main_queue(), ^{ [self runXCTest]; });
 #else
-    // The physical-device path is enabled by the mount coordinator once its
-    // identity, loopback tunnel and image assets are ready.
-    self.status.text = @"Preparing Hive’s phone control…";
+    [HiveMount start:^(NSString *status) { self.status.text = status; } completion:^(BOOL mounted) {
+        if (mounted) [self runXCTest];
+        else self.started = NO;
+    }];
 #endif
 }
 - (void)runXCTest {

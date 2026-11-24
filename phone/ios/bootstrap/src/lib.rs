@@ -1,5 +1,7 @@
-//! The part of Hive that runs before XCTest is available. No pairing setup,
-//! unmount, device restart or identity replacement is reachable from this API.
+#[cfg(feature = "usb-setup")]
+pub mod usb;
+
+// The mount API has no pairing setup, unmount, restart or identity replacement.
 use idevice::{
     RsdService,
     remote_pairing::{
