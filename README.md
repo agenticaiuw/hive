@@ -7,11 +7,25 @@ The club's one project: agents that use your computer, phone and browser the way
 ## How it fits together
 
 - **One brain.** The server is the only place agents run, on whichever computer the owner made their Hive; every computer starts it the same way, and the owner's devices reach it through their own Tailscale network, built in. Codex is signed in there and nowhere else.
-- **Every request goes to the orchestrator first**, which only routes it: to the agent already on that task, or to a new one. The agent that takes it writes the rules (standing instructions, scoped to everywhere, a node, a site, an app or a folder) and any further tasks, since it has the context; a Claude Code session does the same with `hive rule` and `hive task`.
+- **Every request goes to the orchestrator first**, which only routes it: to the agent already on that task, or to a new one. The agent that takes it writes the rules (standing instructions, scoped to everywhere, a node, a site, an app or a folder) and any further tasks, since it has the context; an agent outside Hive (Claude Code, Codex, Cursor, …) does the same with Hive's MCP tools (below).
 - **One agent per task**, with the tools of the nodes the task needs. A turn ends with done and the outcome, or exactly why it stopped and what the owner must do; there is no "stuck".
 - **Nodes bring their own tools.** A Mac or Windows computer, the iPhone, a browser or a wearable says what agents can do with it when it connects. Tools that share a lock (the Mac's keyboard and mouse, the phone's screen) go to one agent at a time; everything else runs in parallel.
 - **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
 - **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive and pushes to GitHub, which builds and signs what every device downloads and updates to.
+
+## Adding Hive to your agents
+
+With the Hive app on your computer, any agent you use there (Claude Code, Codex, Cursor, Claude Desktop, …) saves the work you give it as your Hive tasks, and follows and adds to your rules, through `hive mcp`, an MCP server with five tools: `add_task`, `end_task`, `task_status`, `add_rule` and `get_rules`. On a Mac the program is `/Applications/Hive.app/Contents/MacOS/hive`; on Windows use the path of `hive-windows.exe` instead.
+
+- **Claude Code:** `claude mcp add --scope user hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`. So every prompt also goes to Hive's orchestrator first, add the hook to `~/.claude/settings.json`: `"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}], "PostToolUse": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}]}`.
+- **Codex:** `codex mcp add hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`, or in `~/.codex/config.toml`:
+
+  ```toml
+  [mcp_servers.hive]
+  command = "/Applications/Hive.app/Contents/MacOS/hive"
+  args = ["mcp"]
+  ```
+- **Anything else** that speaks MCP over stdio: the command `/Applications/Hive.app/Contents/MacOS/hive` with the argument `mcp`.
 
 ## Where things are
 
@@ -23,7 +37,7 @@ Folders follow the parts of Hive, not the club's teams: parts last longer than t
 | `server/` | The brain, its own download (`hive-server`): orchestrator, agents, database, API | Cloud |
 | `vm/` | How the VM runs Hive: its services, installer and screen | Cloud |
 | `dashboard/` | The dashboard the server shows at `/` | Product Design |
-| `desktop/` | The Hive app for Mac and Windows (`hive`, no window; fn's type bar on a Mac): the computer as a node (screen, mouse, keyboard, shell, files); also Claude Code's hook | Automation |
+| `desktop/` | The Hive app for Mac and Windows (`hive`, no window; fn's type bar on a Mac): the computer as a node (screen, mouse, keyboard, shell, files); also every agent's way into Hive (`hive mcp`, `hive hook`) | Automation |
 | `browser/` | The browser extension as a node: agents use the owner's browser, site rules apply on every page, any page can ask Hive; Tailscale built in (`tailnet/wasm.sh`) reaches the Hive Server on its owner's tailnet | Automation |
 | `tailnet/` | Tailscale built into Hive (`hive-tailnet`, Go): how a Hive Server, on a laptop or a cloud VM, is reached by its owner's own devices, privately and encrypted, with nobody installing Tailscale; the browser extension's is the same module, built for the browser (`wasm.go`) | Cloud |
 | `phone/` | The iPhone as a node: the Hive app (`ios/`) dials in to the server over a WebSocket and shows the dashboard (it reaches the Hive Server through Tailscale built in), and the server runs the phone's tools (this crate), on any computer | Automation |
