@@ -9,7 +9,8 @@ use std::io::{BufRead, Write};
 const INSTRUCTIONS: &str = "Hive is the owner's own agent system: every piece of work they give you is saved as one of their Hive \
     tasks, whichever app you run in. When the owner asks for new work, call add_task with their exact words before you start; \
     when it ends, call end_task. When they give a standing instruction (always, never, from now on, a preference), call add_rule. \
-    Call get_rules when you start in a folder and follow every rule it gives.";
+    Call get_rules when you start in a folder and follow every rule it gives. Work for Hive's own agents (on another of the owner's \
+    devices, or that should outlast this session) goes to hand_off.";
 
 /// One call to the Hive Server through this computer's door: its answer, or why it didn't come.
 pub fn call(method: &str, path: &str, body: Option<&Value>, secs: u64) -> Result<Value, String> {
@@ -26,19 +27,35 @@ pub fn rules(rows: &Value) -> String {
         .map(|x| format!("- R{} {}", x["id"], x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")
 }
 
+/// Gives Hive's orchestrator a request, as the hook, `add_task` and `hand_off` all do. `agent` names the session outside Hive
+/// it comes from (which then writes its tasks itself); without one, Hive's own agents take it. `wait` waits for the
+/// orchestrator's answer: `{id, reply, tasks, rules}`.
+pub fn ask(hive: Hive, text: &str, folder: &str, agent: Option<&str>, wait: bool) -> Result<Value, String> {
+    let mut body = json!({ "text": text, "node": crate::os::KIND, "context": { "folder": folder } });
+    if let Some(a) = agent { body["agent"] = json!(a); }
+    hive("POST", if wait { "/api/requests?wait=1" } else { "/api/requests" }, Some(&body))
+}
+
 fn tools() -> Vec<Value> {
     vec![
         tool("add_task", "Save the work the owner just gave you as a task in their Hive; you work on it yourself. Call it once per new \
             piece of work, before you start, not when they continue one of your tasks. Returns the task's id.",
             json!({ "title": s("A short title"), "quote": s("The owner's exact words that asked for it"),
                 "request": n("The request id Hive's hook gave you for this prompt, if it gave one") }), &["title", "quote"]),
+        tool("hand_off", "Hand work to the owner's Hive, for Hive's own agents to do instead of you: work on another of the owner's \
+            devices (their phone, browser, another computer), work that should keep going after this session ends, or work the owner \
+            asked you to pass to Hive. For work you do yourself, use add_task instead. Waits for Hive's orchestrator, then returns \
+            its reply, the request's id and the tasks it made; follow them with task_status.",
+            json!({ "request": s("What should be done: the owner's exact words when it's their ask, otherwise yours, said fully"),
+                "context": s("What Hive's agents need to know that the request doesn't say (files, links, what's done so far)") }), &["request"]),
         tool("end_task", "Say how one of your Hive tasks ended: done with the outcome, or not done with exactly why you stopped and \
             exactly what the owner must do. Stop only when you truly need the owner.",
             json!({ "task": n("The task's id"), "done": { "type": "boolean", "description": "Everything the owner asked for is done" },
                 "outcome": s("When done: what was done"), "why": s("When not done: exactly why you stopped"),
                 "need": s("When not done: exactly what the owner must do") }), &["task", "done"]),
         tool("task_status", "See a Hive task: its status, outcome or what it needs, and its latest log (including the owner's messages \
-            to it). Without a task, lists the owner's open tasks.", json!({ "task": n("The task's id") }), &[]),
+            to it). With a request (from hand_off) instead, lists its open tasks; with neither, all of the owner's open tasks.",
+            json!({ "task": n("The task's id"), "request": n("A request's id, from hand_off") }), &[]),
         tool("add_rule", "Save a standing instruction from the owner (always, never, from now on, a preference) as a Hive rule, which \
             every agent then follows. Scope it as far as they meant: folder:<path> for this project, \"\" only when they clearly mean \
             everything they do (also node:<kind>, site:<host>, app:<name>).",
@@ -60,7 +77,7 @@ impl Session {
     }
 }
 
-type Hive<'a> = &'a dyn Fn(&str, &str, Option<&Value>) -> Result<Value, String>;
+pub type Hive<'a> = &'a dyn Fn(&str, &str, Option<&Value>) -> Result<Value, String>;
 
 /// One tool call: what the agent reads back.
 fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String> {
@@ -71,11 +88,20 @@ fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String
             let request = match a["request"].as_i64() {
                 Some(r) => r,
                 // No hook gave one: the owner's words go to the orchestrator first, as a request from this session.
-                None => hive("POST", "/api/requests", Some(&json!({ "text": text("quote"), "node": crate::os::KIND, "agent": me.name,
-                    "context": { "folder": me.folder } })))?["id"].as_i64().ok_or("Hive didn't save the request")?,
+                None => ask(hive, &text("quote"), &me.folder, Some(&me.name), false)?["id"].as_i64().ok_or("Hive didn't save the request")?,
             };
             let t = hive("POST", "/api/tasks", Some(&json!({ "request": request, "title": text("title"), "quote": text("quote"), "nodes": [crate::os::KIND] })))?;
             Ok(format!("Task #{} is saved in Hive, and it's yours. When it ends, call end_task.", t["id"]))
+        }
+        "hand_off" => {
+            let context = text("context");
+            let words = if context.trim().is_empty() { text("request") } else { format!("{}\n\nContext: {context}", text("request")) };
+            let r = ask(hive, &words, &me.folder, None, true)?;
+            let tasks: Vec<String> = r["tasks"].as_array().into_iter().flatten()
+                .map(|t| format!("- #{} [{}] {}", t["id"], t["status"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""))).collect();
+            let mut out = format!("Hive has it as request #{}. Its orchestrator says: {}", r["id"], r["reply"].as_str().unwrap_or("(still planning)"));
+            if !tasks.is_empty() { out += &format!("\nTasks:\n{}", tasks.join("\n")); }
+            Ok(out + &format!("\nFollow it with task_status (request {}, or a task's id).", r["id"]))
         }
         "end_task" => {
             let body = json!({ "done": a["done"] == true, "outcome": text("outcome"), "why": text("why"), "need": text("need") });
@@ -85,8 +111,14 @@ fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String
         "task_status" => {
             let line = |t: &Value| format!("#{} [{}] {}", t["id"], t["status"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
             let Some(task) = a["task"].as_i64() else {
-                let open: Vec<String> = hive("GET", "/api/state", None)?["tasks"].as_array().into_iter().flatten().map(line).collect();
-                return Ok(if open.is_empty() { "The owner has no open tasks.".into() } else { open.join("\n") });
+                let request = a["request"].as_i64();
+                let open: Vec<String> = hive("GET", "/api/state", None)?["tasks"].as_array().into_iter().flatten()
+                    .filter(|t| request.is_none() || t["request_id"].as_i64() == request).map(line).collect();
+                return Ok(match (open.is_empty(), request) {
+                    (false, _) => open.join("\n"),
+                    (true, Some(r)) => format!("Request #{r} has no open tasks: they're done, or Hive answered it without one."),
+                    (true, None) => "The owner has no open tasks.".into(),
+                });
             };
             let r = hive("GET", &format!("/api/tasks/{task}"), None)?;
             let t = &r["task"];
@@ -130,7 +162,8 @@ pub fn handle(m: &Value, me: &mut Option<Session>, folder: &str, hive: Hive) -> 
 /// Serve MCP on stdin and stdout, one JSON-RPC message per line, until the agent closes stdin.
 pub fn serve() {
     let folder = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-    let hive = |method: &str, path: &str, body: Option<&Value>| call(method, path, body, 30);
+    // Waiting for the orchestrator (hand_off) takes up to three minutes; everything else is quick.
+    let hive = |method: &str, path: &str, body: Option<&Value>| call(method, path, body, if path.ends_with("wait=1") { 180 } else { 30 });
     let mut me = None;
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -155,6 +188,8 @@ mod tests {
             calls.borrow_mut().push((format!("{method} {path}"), body.cloned().unwrap_or(Value::Null)));
             Ok(match path {
                 "/api/requests" => json!({ "id": 7 }),
+                "/api/requests?wait=1" => json!({ "id": 8, "reply": "Your phone will do it.", "tasks": [{ "id": 13, "status": "working", "title": "Book it" }] }),
+                "/api/state" => json!({ "tasks": [{ "id": 13, "request_id": 8, "status": "working", "title": "Book it" }, { "id": 12, "request_id": 7, "status": "needs", "title": "Fix it" }] }),
                 "/api/tasks" => json!({ "id": 12 }),
                 "/api/tasks/12" => json!({ "task": { "id": 12, "status": "needs", "title": "Fix it", "why": "no key", "need": "add one" },
                     "log": [{ "who": "owner", "text": "use the old one" }] }),
@@ -168,7 +203,7 @@ mod tests {
         let init = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "Codex MCP" } } }));
         assert!(init["result"]["instructions"].as_str().unwrap().contains("add_task"));
         let names: Vec<Value> = send(json!({ "id": 2, "method": "tools/list" }))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
-        assert_eq!(names, ["add_task", "end_task", "task_status", "add_rule", "get_rules"]);
+        assert_eq!(names, ["add_task", "hand_off", "end_task", "task_status", "add_rule", "get_rules"]);
         let tool = |send: &mut dyn FnMut(Value) -> Value, name: &str, a: Value| {
             let r = send(json!({ "id": 3, "method": "tools/call", "params": { "name": name, "arguments": a } }));
             (r["result"]["isError"] == true, r["result"]["content"][0]["text"].as_str().unwrap().to_string())
@@ -182,6 +217,11 @@ mod tests {
         assert_eq!(tool(&mut send, "end_task", json!({ "task": 12, "done": true, "outcome": "fixed" })), (false, "Recorded in Hive.".into()));
         assert!(tool(&mut send, "end_task", json!({ "done": true })).0, "a task id is needed");
         assert_eq!(tool(&mut send, "get_rules", json!({})).1, "The owner's rules here (follow every one):\n- R3 Use tabs");
+        // Handed off: Hive's own agents take it (no agent on the request), and the answer says how to follow it.
+        assert_eq!(tool(&mut send, "hand_off", json!({ "request": "book the table on my phone", "context": "for 4 at 7pm" })),
+            (false, "Hive has it as request #8. Its orchestrator says: Your phone will do it.\nTasks:\n- #13 [working] Book it\n\
+                Follow it with task_status (request 8, or a task's id).".into()));
+        assert_eq!(tool(&mut send, "task_status", json!({ "request": 8 })).1, "#13 [working] Book it");
         assert_eq!(tool(&mut send, "add_rule", json!({ "scope": "", "rule": "r", "quote": "q" })), (true, "Hive refused".into()));
         let calls = calls.into_inner();
         let session = calls[0].1["agent"].as_str().unwrap();
@@ -191,5 +231,7 @@ mod tests {
         assert_eq!((calls[2].0.as_str(), &calls[2].1["request"]), ("POST /api/tasks", &json!(5)));
         assert_eq!((calls[4].0.as_str(), &calls[4].1), ("POST /api/tasks/12/end", &json!({ "done": true, "outcome": "fixed", "why": "", "need": "" })));
         assert_eq!(calls[5].0, format!("GET /api/rules?folder=/work/my%20app&node={}", crate::os::KIND));
+        assert_eq!((calls[6].0.as_str(), &calls[6].1), ("POST /api/requests?wait=1", &json!({ "text": "book the table on my phone\n\nContext: for 4 at 7pm",
+            "node": crate::os::KIND, "context": { "folder": "/work/my app" } })));
     }
 }

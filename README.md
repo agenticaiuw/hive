@@ -15,7 +15,7 @@ The club's one project: agents that use your computer, phone and browser the way
 
 ## Adding Hive to your agents
 
-With the Hive app on your computer, any agent you use there (Claude Code, Codex, Cursor, Claude Desktop, …) saves the work you give it as your Hive tasks, and follows and adds to your rules, through `hive mcp`, an MCP server with five tools: `add_task`, `end_task`, `task_status`, `add_rule` and `get_rules`. On a Mac the program is `/Applications/Hive.app/Contents/MacOS/hive`; on Windows use the path of `hive-windows.exe` instead.
+With the Hive app on your computer, any agent you use there (Claude Code, Codex, Cursor, Claude Desktop, …) saves the work you give it as your Hive tasks, and follows and adds to your rules, through `hive mcp`, an MCP server with six tools: `add_task`, `end_task`, `task_status`, `add_rule` and `get_rules`, and `hand_off` for work Hive's own agents should do (on your phone, say). On a Mac the program is `/Applications/Hive.app/Contents/MacOS/hive`; on Windows use the path of `hive-windows.exe` instead.
 
 - **Claude Code:** `claude mcp add --scope user hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`. So every prompt also goes to Hive's orchestrator first, add the hook to `~/.claude/settings.json`: `"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}], "PostToolUse": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}]}`.
 - **Codex:** `codex mcp add hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`, or in `~/.codex/config.toml`:

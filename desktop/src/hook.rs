@@ -2,7 +2,7 @@
 //! session gets back the rules for this folder, its tasks and, between tool calls, messages for it. The session writes the
 //! prompt's tasks and rules itself, with Hive's MCP tools (`hive mcp`, mcp.rs): it has the context the orchestrator lacks.
 //! The hook sees every prompt, which an MCP server can't. If Hive can't be reached, the prompt goes ahead untouched.
-use crate::mcp::{call, rules};
+use crate::mcp::{ask, call, rules};
 use serde_json::{json, Value};
 use std::io::Read;
 
@@ -18,8 +18,8 @@ pub fn run() {
     let prompt = e["prompt"].as_str().unwrap_or("").trim_start();
     let from_owner = !["<task-notification>", "<side-sessions-event>", "<ci-monitor-event>", "<cross-session-message"].iter().any(|t| prompt.starts_with(t));
     if event == "UserPromptSubmit" && from_owner {
-        let body = json!({ "text": e["prompt"], "node": crate::os::KIND, "agent": format!("claude:{session}"), "context": { "folder": e["cwd"] } });
-        if let Ok(r) = call("POST", "/api/requests?wait=1", Some(&body), 180) {
+        let hive = |method: &str, path: &str, body: Option<&Value>| call(method, path, body, 180);
+        if let Ok(r) = ask(&hive, prompt, e["cwd"].as_str().unwrap_or(""), Some(&format!("claude:{session}")), true) {
             out += &format!("Hive (the owner's orchestrator) saved this prompt as request #{id}. It says: {}\n\
                 You write this prompt's tasks and rules, not Hive, with Hive's MCP tools. New work: add_task with request {id}, a short \
                 title and the owner's exact words; none when it continues one of your tasks. A standing instruction (always, never, \
