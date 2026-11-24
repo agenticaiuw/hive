@@ -1,6 +1,7 @@
 //! The node side of the protocol (protocol/README.md), for nodes written in Rust: say hello with your tools,
 //! take calls, answer them, and update yourself to GitHub's build when the server's devices' code changes.
 pub mod b64;
+pub mod mcp;
 
 use serde_json::{json, Value};
 use std::io::Read;

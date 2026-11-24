@@ -136,30 +136,6 @@ impl Parser {
     }
 }
 
-/// An MCP Streamable HTTP message (JSON-RPC in, JSON out), for one agent's tools. None for a notification (202, no body).
-pub fn mcp(m: &Value, tools: impl FnOnce() -> Vec<Value>, call: impl FnOnce(&str, &Value) -> (bool, String, Vec<String>)) -> Option<Value> {
-    let id = m.get("id").cloned()?;
-    let ok = |result: Value| Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-    match m["method"].as_str().unwrap_or("") {
-        "initialize" => ok(json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} },
-            "serverInfo": { "name": "hive", "version": "1" } })),
-        "ping" => ok(json!({})),
-        "tools/list" => ok(json!({ "tools": tools() })),
-        "tools/call" => {
-            let (success, text, images) = call(m["params"]["name"].as_str().unwrap_or(""), &m["params"]["arguments"]);
-            let mut content = vec![json!({ "type": "text", "text": text })];
-            for url in &images {
-                // Devices send images as data URLs.
-                if let Some((mime, data)) = url.strip_prefix("data:").and_then(|u| u.split_once(";base64,")) {
-                    content.push(json!({ "type": "image", "data": data, "mimeType": mime }));
-                }
-            }
-            ok(json!({ "content": content, "isError": !success }))
-        }
-        method => Some(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Hive has no {method}") } })),
-    }
-}
-
 /// The tool a Claude agent ends every turn with, since stream-json has no final-message schema like Codex's.
 pub fn end_turn() -> Value {
     let st = |d: &str| json!({ "type": "string", "description": d });
@@ -228,25 +204,6 @@ mod tests {
         assert_eq!(p.read(&failed), vec![Out::Ended { error: Some("Not logged in · Please run /login".into()), queued: 0 }]);
         assert_eq!(p.read(&json!({ "type": "result", "subtype": "error_max_turns", "queued_turn_count": 1 })),
             vec![Out::Ended { error: Some("error_max_turns".into()), queued: 1 }]);
-    }
-
-    #[test]
-    fn answers_mcp() {
-        let tools = || vec![json!({ "name": "info", "description": "d", "inputSchema": { "type": "object" } })];
-        let none = |_: &str, _: &Value| -> (bool, String, Vec<String>) { unreachable!() };
-        let init = mcp(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }), tools, none).unwrap();
-        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
-        assert!(mcp(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), tools, none).is_none());
-        let list = mcp(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }), tools, none).unwrap();
-        assert_eq!(list, json!({ "jsonrpc": "2.0", "id": 2, "result": { "tools": tools() } }));
-        let call = mcp(&json!({ "jsonrpc": "2.0", "id": "3", "method": "tools/call", "params": { "name": "shot", "arguments": { "a": 1 } } }), tools,
-            |name, a| { assert_eq!((name, a), ("shot", &json!({ "a": 1 }))); (true, "here".into(), vec!["data:image/jpeg;base64,AAAA".into()]) }).unwrap();
-        assert_eq!(call["id"], "3");
-        assert_eq!(call["result"], json!({ "isError": false, "content": [{ "type": "text", "text": "here" },
-            { "type": "image", "data": "AAAA", "mimeType": "image/jpeg" }] }));
-        let failed = mcp(&json!({ "id": 4, "method": "tools/call", "params": { "name": "x" } }), tools, |_, _| (false, "no".into(), vec![])).unwrap();
-        assert_eq!(failed["result"]["isError"], true);
-        assert_eq!(mcp(&json!({ "id": 5, "method": "resources/list" }), tools, none).unwrap()["error"]["code"], -32601);
     }
 
     #[test]

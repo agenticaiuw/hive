@@ -766,7 +766,7 @@ impl Hive {
             t.push(crate::claude::end_turn());
             t
         };
-        Ok(crate::claude::mcp(m, tools, |name, a| {
+        Ok(hive_protocol::mcp::answer(m, "", tools, |name, a| {
             if name != "end_turn" { return self.run_tool(name, a, agent, tid); }
             // What a Codex agent's final message would be: after_turn reads it when the turn's result comes.
             let end = json!({ "done": a["done"], "outcome": s(&a["outcome"]), "why": s(&a["why"]), "need": s(&a["need"]) });
