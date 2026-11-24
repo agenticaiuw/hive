@@ -1,0 +1,5 @@
+// libtailscale's C API (its header, from build.sh), as the Swift module Tailscale.
+module Tailscale {
+  header "../../../target/libtailscale/include/tailscale.h"
+  export *
+}

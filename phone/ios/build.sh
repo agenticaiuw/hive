@@ -62,7 +62,9 @@ if [ "$1" = test ]; then
   docs() { echo "$(xcrun simctl get_app_container "$sim" $id data 2> /dev/null)/Documents"; }
   # 1. Every call the server makes, with the runner started by xcodebuild.
   xcodebuild build-for-testing $project -destination "id=$sim" -derivedDataPath $out/sim ARCHS=arm64
-  smoke=$out/sim/Build/Products/Debug-iphonesimulator/HivePhone-Runner.app
+  products=$out/sim/Build/Products/Debug-iphonesimulator
+  smoke=$products/HivePhone-Runner.app
+  ditto $products/HiveApp.framework $smoke/Frameworks/HiveApp.framework
   plutil -replace UILaunchScreen -json '{}' $smoke/Info.plist
   codesign -f -s - --timestamp=none $smoke
   TEST_RUNNER_HIVE_SMOKE=1 xcodebuild test-without-building $project -destination "id=$sim" -derivedDataPath $out/sim -resultBundlePath $out/smoke.xcresult \
@@ -73,7 +75,7 @@ if [ "$1" = test ]; then
   # disk image, so this one keeps the XCTest frameworks Xcode put in it.
   app=$out/icon/Hive.app
   rm -rf $out/icon; mkdir -p $out/icon
-  ditto $out/sim/Build/Products/Debug-iphonesimulator/HivePhone-Runner.app $app
+  ditto $smoke $app
   # A simulator has no developer disk image: what xcodebuild would take from Xcode goes in the app (lib_TestingInterop.dylib,
   # for one, which Testing.framework loads), until nothing is missing.
   dev=$(xcrun --sdk iphonesimulator --show-sdk-platform-path)/Developer
@@ -146,8 +148,9 @@ ditto target/HivePhone/HiveLoopback.appex $app/PlugIns/HiveLoopback.appex
 plutil -replace UIFileSharingEnabled -bool true $app/Info.plist
 plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control." $app/Info.plist
 plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plist
-# The XCTest frameworks come from the phone's developer disk image, matched to its iOS.
+# The XCTest frameworks come from the phone's developer disk image, matched to its iOS; HiveApp comes with Hive.
 rm -rf $app/Frameworks
+ditto $out/derived/Build/Products/Debug-iphoneos/HiveApp.framework $app/Frameworks/HiveApp.framework
 dress $app
 # Signed by the owner’s Apple Development certificate (HIVE_IOS_IDENTITY, its SHA-1) with the profiles hive-provision made
 # for this build in $out/profiles (phone/src/bin/hive-provision.rs), which list every registered iPhone. Those iPhones

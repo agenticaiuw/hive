@@ -17,6 +17,7 @@
 		A10000000000000000000008 /* libtailscale.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* libtailscale.xcframework */; };
 		A10000000000000000000009 /* Dashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* Dashboard.swift */; };
 		A1000000000000000000000A /* Probe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* Probe.swift */; };
+		A1000000000000000000000B /* HiveApp.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* HiveApp.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,10 +34,29 @@
 		A2000000000000000000000B /* HivePhone.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HivePhone.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000000C /* Dashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dashboard.swift; sourceTree = "<group>"; };
 		A2000000000000000000000D /* Probe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Probe.swift; sourceTree = "<group>"; };
+		A2000000000000000000000E /* HiveApp.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = HiveApp.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		AA0000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A60000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000000000000000000002;
+			remoteInfo = HiveApp;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000000B /* HiveApp.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A30000000000000000000004 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -50,8 +70,8 @@
 		A40000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				A40000000000000000000013 /* App */,
 				A40000000000000000000002 /* HivePhone */,
-				A40000000000000000000013 /* Shared */,
 				A2000000000000000000000A /* libtailscale.xcframework */,
 				A40000000000000000000003 /* Products */,
 			);
@@ -61,10 +81,8 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* HivePhone.swift */,
-				A2000000000000000000000C /* Dashboard.swift */,
 				A20000000000000000000002 /* Runner.swift */,
 				A20000000000000000000003 /* Tree.swift */,
-				A20000000000000000000004 /* Link.swift */,
 				A2000000000000000000000D /* Probe.swift */,
 				A20000000000000000000007 /* Catch.m */,
 				A20000000000000000000008 /* Catch.h */,
@@ -73,18 +91,21 @@
 			path = HivePhone;
 			sourceTree = "<group>";
 		};
-		A40000000000000000000013 /* Shared */ = {
+		A40000000000000000000013 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				A2000000000000000000000C /* Dashboard.swift */,
+				A20000000000000000000004 /* Link.swift */,
 				A20000000000000000000006 /* Pairing.swift */,
 				A20000000000000000000005 /* Tailnet.swift */,
 			);
-			path = Shared;
+			path = App;
 			sourceTree = "<group>";
 		};
 		A40000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				A2000000000000000000000E /* HiveApp.framework */,
 				A2000000000000000000000B /* HivePhone.xctest */,
 			);
 			name = Products;
@@ -103,11 +124,28 @@
 			buildRules = (
 			);
 			dependencies = (
+				A90000000000000000000001 /* PBXTargetDependency */,
 			);
 			name = HivePhone;
 			productName = HivePhone;
 			productReference = A2000000000000000000000B /* HivePhone.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		A50000000000000000000002 /* HiveApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A70000000000000000000003 /* Build configuration list for PBXNativeTarget "HiveApp" */;
+			buildPhases = (
+				A30000000000000000000003 /* Sources */,
+				A30000000000000000000004 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HiveApp;
+			productName = HiveApp;
+			productReference = A2000000000000000000000E /* HiveApp.framework */;
+			productType = "com.apple.product-type.framework";
 		};
 /* End PBXNativeTarget section */
 
@@ -136,6 +174,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				A50000000000000000000002 /* HiveApp */,
 				A50000000000000000000001 /* HivePhone */,
 			);
 		};
@@ -147,18 +186,33 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* HivePhone.swift in Sources */,
-				A10000000000000000000009 /* Dashboard.swift in Sources */,
 				A10000000000000000000002 /* Runner.swift in Sources */,
 				A10000000000000000000003 /* Tree.swift in Sources */,
-				A10000000000000000000004 /* Link.swift in Sources */,
 				A1000000000000000000000A /* Probe.swift in Sources */,
-				A10000000000000000000005 /* Tailnet.swift in Sources */,
-				A10000000000000000000006 /* Pairing.swift in Sources */,
 				A10000000000000000000007 /* Catch.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A30000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000009 /* Dashboard.swift in Sources */,
+				A10000000000000000000004 /* Link.swift in Sources */,
+				A10000000000000000000006 /* Pairing.swift in Sources */,
+				A10000000000000000000005 /* Tailnet.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A90000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A50000000000000000000002 /* HiveApp */;
+			targetProxy = AA0000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A80000000000000000000001 /* Debug */ = {
@@ -171,21 +225,13 @@
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../target/libtailscale/include";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MARKETING_VERSION = 1.0;
 				ONLY_ACTIVE_ARCH = YES;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-framework",
-					Security,
-					"-framework",
-					CoreFoundation,
-					"-lresolv",
-				);
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/App";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -212,6 +258,27 @@
 			};
 			name = Debug;
 		};
+		A80000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEFINES_MODULE = YES;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					CoreFoundation,
+					"-lresolv",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.hive.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -227,6 +294,14 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A80000000000000000000002 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A70000000000000000000003 /* Build configuration list for PBXNativeTarget "HiveApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000003 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

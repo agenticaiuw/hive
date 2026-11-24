@@ -1,5 +1,6 @@
 import UIKit
 import XCTest
+@testable import HiveApp
 
 /// What iOS says about Hive's own window while the runner works, for the simulator runs in build.sh test: the app's state,
 /// its scenes and windows, and the taps the window took, one JSON line per step in Documents/probe-<run>.log with a

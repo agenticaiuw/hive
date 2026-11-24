@@ -1,9 +1,11 @@
 import UIKit
 import XCTest
+@testable import HiveApp
 
 /// Hive, the iPhone app. iOS lets an app see and touch the whole screen only as a UI test, so Hive is one, run by Xcode's
 /// test runner app, which starts from its icon (build.sh): testRun never ends. It shows its window whenever it's in front
-/// (Dashboard.swift), keeps the link to its Hive Server (Link.swift) and answers the server's phone calls (Runner.swift).
+/// and keeps the link to its Hive Server (HiveApp: Dashboard.swift, Link.swift), and answers the server's phone calls
+/// (Runner.swift).
 final class HivePhone: XCTestCase {
     /// `build.sh test` sets HIVE_SMOKE: testSmoke checks the runner on a simulator, and testRun stands aside.
     static let smoke = ProcessInfo.processInfo.environment["HIVE_SMOKE"] != nil
@@ -34,6 +36,7 @@ final class HivePhone: XCTestCase {
             opened = url
             XCUIDevice.shared.system.open(url)
         }
+        Link.shared.calls = Runner.shared.handle
         Link.shared.start()
         if probe { Probe.icon() }
         // The main run loop, as an app's own: the window takes touches, and the link and the server's calls run.
