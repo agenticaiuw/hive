@@ -69,6 +69,12 @@ fn main() {
         Ok(hive) => {
             std::thread::sleep(std::time::Duration::from_secs(5));
             eprintln!("Hive is at {}", hive_server::address(&state).unwrap_or_default());
+            // A Mac shows it in the menu bar while it runs (launchd runs it in the owner's session).
+            #[cfg(target_os = "macos")]
+            if std::env::var_os("HIVE_REPO").is_none() {
+                std::thread::spawn(move || { hive.join().ok(); std::process::exit(1) });
+                hive_server::menubar::run(state);
+            }
             hive.join().ok();
         }
         Err(e) => eprintln!("{e}"),

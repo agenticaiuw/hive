@@ -393,7 +393,13 @@ pub fn window(state: &Path, install: &'static (dyn Fn(&Path) -> Result<(), Strin
     let flow = {
         let (ui, state) = (ui.clone(), state.to_path_buf());
         move || {
-            let done = if ready(&state) { Ok(dashboard(&state)) } else { run(&state, &*ui, install) };
+            let done = if ready(&state) {
+                // Quit from the menu bar, it runs again once Hive Server is opened.
+                #[cfg(target_os = "macos")]
+                { let plist = std::env::var("HOME").unwrap_or_default() + "/Library/LaunchAgents/app.hive.server.plist";
+                  Command::new("launchctl").args(["load", "-w", &plist]).output().ok(); }
+                Ok(dashboard(&state))
+            } else { run(&state, &*ui, install) };
             ui.show(match done {
                 Ok(link) => json!({ "step": "done", "dashboard": link, "os": std::env::consts::OS,
                     "devices": crate::tailnet::on(&state).then(|| crate::address(&state)).flatten() }),

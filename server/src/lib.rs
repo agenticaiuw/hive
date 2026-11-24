@@ -9,6 +9,8 @@ pub mod cred;
 mod db;
 mod hive;
 mod http;
+#[cfg(target_os = "macos")]
+pub mod menubar;
 pub mod tailnet;
 mod tls;
 mod tools;
