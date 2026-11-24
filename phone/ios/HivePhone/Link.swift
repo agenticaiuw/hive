@@ -2,10 +2,10 @@ import Foundation
 
 /// Hive Phone's link to its Hive (the server's side is phone/src/link.rs). It dials out to the server over one WebSocket,
 /// takes its phone calls ({id, method, path, body}) and answers each ({id, status, body}) with Runner, in this process;
-/// nothing can reach in. A Hive on a tailnet (*.ts.net) is dialled through Tailscale inside the app (Tailnet.swift).
+/// nothing can reach in. The Hive Server, on the owner's tailnet, is dialled through Tailscale inside the app (Tailnet.swift).
 ///
-/// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it looks for a pairing
-/// (Pairing.swift): from the Hive Server on the owner's tailnet, or from the clipboard. A connected phone never reads it.
+/// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it looks for a pairing from the Hive
+/// Server on the owner's tailnet (Pairing.swift).
 final class Link: NSObject, URLSessionWebSocketDelegate {
     static let shared = Link()
     static let protocolVersion = 1
@@ -16,7 +16,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
     private var failing = false, retry = 0
-    private let watch = PairingWatch(), auto = TailnetPairing()
+    private let auto = TailnetPairing()
 
     static var version: String {
         let v = Bundle.main.object(forInfoDictionaryKey: "HiveVersion") ?? Bundle(for: Link.self).object(forInfoDictionaryKey: "HiveVersion")
@@ -27,10 +27,10 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         pairing = Pairing.load()
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { [weak self] _ in
             // Once Tailscale is up, the first dial; after a failure the backoff in reconnect dials again.
-            if let self, self.socket == nil, !self.failing, self.pairing?.tailnet == true, Tailnet.shared.running { self.connect() }
+            if let self, self.socket == nil, !self.failing, self.pairing != nil, Tailnet.shared.running { self.connect() }
         }
         connect()
-        // Unpaired or refused: look at the clipboard whenever it changes.
+        // Unpaired or refused: look for the Hive Server.
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.lookForPairing() }
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let ws = self?.socket else { return }
@@ -43,13 +43,12 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
-    /// Unpaired: Tailscale first (its sign-in opens in Safari, HivePhone.testRun), then the Hive Server on it, with the
-    /// clipboard alongside. Failing: either may bring a new pairing.
+    /// Unpaired: Tailscale first (its sign-in opens in Safari, HivePhone.testRun), then the Hive Server on it. Failing: it
+    /// may bring a new pairing.
     private func lookForPairing() {
         guard pairing == nil || failing else { return }
         if pairing == nil { Tailnet.shared.start() }
         auto.look { [weak self] in self?.adopt($0) }
-        watch.look { [weak self] in self?.adopt($0) }
     }
 
     private func adopt(_ found: Pairing) {
@@ -70,12 +69,12 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
 
     private func connect() {
         guard socket == nil, let p = pairing else { return }
-        if p.tailnet && !Tailnet.shared.running { Tailnet.shared.start(); return }
+        if !Tailnet.shared.running { Tailnet.shared.start(); return }
         if session == nil {
             let cfg = URLSessionConfiguration.ephemeral
             cfg.timeoutIntervalForRequest = 25
             cfg.timeoutIntervalForResource = 30
-            if p.tailnet, let proxy = Tailnet.shared.proxy { cfg.proxyConfigurations = [proxy] }
+            if let proxy = Tailnet.shared.proxy { cfg.proxyConfigurations = [proxy] }
             session = URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
         }
         var r = URLRequest(url: p.url)
@@ -104,16 +103,14 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
     var summary: String {
         let t = Tailnet.shared
         guard let p = pairing else {
-            let lead = t.running ? "Signed in to Tailscale. Looking for your Hive Server there (on the same Tailscale account)…" :
+            return t.running ? "Signed in to Tailscale. Looking for your Hive Server there (on the same Tailscale account)…" :
                 "Sign in with Tailscale (the same account as your Hive Server)."
-            return lead + "\nA Hive Server not on Tailscale (a cloud VM): on its dashboard, Nodes → Connect an iPhone copies a " +
-                "pairing; Hive picks it up from the clipboard."
         }
-        if p.tailnet && !t.running {
+        if !t.running {
             return t.loginURL != nil ? "Your Hive Server is on your tailnet: sign Hive in with Tailscale to reach it." :
                 t.state.hasPrefix("Tailscale didn't") ? t.state : "Starting Tailscale…"
         }
-        if refused { return "\(p.host) turned this pairing down: connect the iPhone again from the dashboard." }
+        if refused { return "\(p.host) turned this pairing down: Hive asks it again through Tailscale." }
         return connected ? "Connected to \(p.host)." : "Connecting to \(p.host)…"
     }
 
@@ -123,8 +120,8 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         failing = true
         connected = false
         let status = (ws.response as? HTTPURLResponse)?.statusCode ?? 0
-        // The server turned this pairing down: take a new one from the clipboard when it comes.
-        if status == 401 || status == 403 { refused = true; watch.reset() }
+        // The server turned this pairing down: lookForPairing asks it for a new one.
+        if status == 401 || status == 403 { refused = true }
         ws.cancel(with: .goingAway, reason: nil)
         changed()
         let delay = refused ? 60 : min(30, 1 << min(retry, 5))

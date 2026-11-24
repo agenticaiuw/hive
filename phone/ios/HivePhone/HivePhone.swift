@@ -70,13 +70,10 @@ final class HivePhone: XCTestCase {
         spin(2)
         note("started by xcodebuild")
 
-        // The pairing the dashboard copies.
-        let pairing = "hive-phone:" + Data(#"{"url":"wss://hive.example.ts.net/phone/device","token":"\#(String(repeating: "t", count: 40))"}"#.utf8)
-            .base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-        let p = Pairing.from(pairing)
-        XCTAssertEqual(p?.tailnet, true)
-        XCTAssertEqual(p?.dashboard.absoluteString.hasPrefix("https://hive.example.ts.net/#key="), true)
-        XCTAssertNil(Pairing.from("hive-phone:e30"))
+        // The pairing the Hive Server gives over Tailscale, and its dashboard.
+        let p = Pairing.checked(["url": "ws://hive.example.ts.net/phone/device", "token": String(repeating: "t", count: 40)])
+        XCTAssertEqual(p?.dashboard.absoluteString, "http://hive.example.ts.net/")
+        XCTAssertNil(Pairing.checked(["url": "ws://hive.example.com/phone/device", "token": String(repeating: "t", count: 40)]))
 
         // Finding the Hive Server among the node's peers (ipnstate.Status, as /localapi/v0/status has it).
         let status = try JSONSerialization.jsonObject(with: Data(#"""
