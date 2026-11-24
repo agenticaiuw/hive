@@ -58,7 +58,25 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 .split { display: grid; grid-template-columns: minmax(180px, 300px) minmax(0, 1fr); gap: 12px; height: 100%; min-height: 0; }
-@media (max-width: 760px) { main { padding: 8px; } .split { grid-template-columns: minmax(110px, 32%) minmax(0, 1fr); gap: 8px; } .card { padding: 8px; } }
+.session-toggle { display: none; }
+@media (max-width: 760px) {
+  header { padding: 8px 12px; flex-wrap: nowrap; }
+  #nodes { flex-wrap: nowrap; overflow: auto; white-space: nowrap; min-width: 0; }
+  #nodes .dot { flex-shrink: 0; }
+  nav { flex-wrap: nowrap; overflow-x: auto; padding: 6px 8px; flex-shrink: 0; }
+  nav a { flex-shrink: 0; padding: 10px; }
+  main { padding: 8px; }
+  .split { display: flex; flex-direction: column; gap: 8px; }
+  .session-toggle { display: block; align-self: flex-start; min-height: 44px; }
+  .split .session-list { display: none; }
+  .split.choosing .session-list { display: block; flex: 1; }
+  .split.choosing .chat-panel { display: none; }
+  .chat-panel { flex: 1; overflow: hidden; }
+  .card { padding: 10px; }
+  textarea, input { font-size: 16px; }
+  button { min-height: 44px; }
+  .composer > .muted { display: none; }
+}
 .task-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .task-board h2 { font-size: 16px; margin: 0 0 10px; }
 .task-board .item { overflow-wrap: anywhere; }
@@ -258,7 +276,7 @@ function taskCard(t, click = true) {
     ${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}
     ${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`;
 }
-async function openChat(id) { if (id !== null) id = sessionId(id); if (chat === id) return; chat = id; chatAfter = 0; render(); }
+async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; chatAfter = 0; render(); }
 function chatPane() {
   return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log chat-log"></div>
@@ -338,7 +356,7 @@ async function render() {
   $('main').insertBefore(orchestrator, v);
   orchestrator.classList.remove('active');
   if (sessions) {
-    if (!$('#session-list')) v.innerHTML = `<div class="split"><aside id="session-list" class="session-list" aria-label="Sessions"><div role="button" tabindex="0" class="card item" onclick="openChat(null)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openChat(null)}">Orchestrator · pinned</div></aside><section class="chat-panel"></section></div>`;
+    if (!$('#session-list')) v.innerHTML = `<div class="split"><button class="plain session-toggle" onclick="this.parentElement.classList.toggle('choosing')">Sessions</button><aside id="session-list" class="session-list" aria-label="Sessions"><div role="button" tabindex="0" class="card item" onclick="openChat(null)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openChat(null)}">Orchestrator · pinned</div></aside><section class="chat-panel"></section></div>`;
     updateSessions();
     if (chat === null) {
       $('.chat-panel').replaceChildren(orchestrator); orchestrator.classList.add('active');

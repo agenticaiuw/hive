@@ -78,7 +78,7 @@ import WebKit
         reload.setTitle("Reload", for: .normal)
         reload.addAction(UIAction { [weak self] _ in Dashboard.taps += 1; self?.shown = nil; self?.refresh() }, for: .touchUpInside)
         install.setTitle("Update Hive", for: .normal)
-        install.addAction(UIAction { _ in if let u = Link.shared.update { UIApplication.shared.open(u) } }, for: .touchUpInside)
+        install.addAction(UIAction { [weak self] _ in self?.updateHive() }, for: .touchUpInside)
         for b in [install, signIn, reload] {
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -112,10 +112,25 @@ import WebKit
             web.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4),
             web.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             web.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            web.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            web.bottomAnchor.constraint(equalTo: g.bottomAnchor),
         ])
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { [weak self] _ in self?.refresh() }
         refresh()
+    }
+
+    private func updateHive() {
+        guard let url = Link.shared.update else { return }
+        install.isEnabled = false
+        install.setTitle("Opening installer…", for: .normal)
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            guard let self else { return }
+            self.install.isEnabled = true
+            self.install.setTitle("Update Hive", for: .normal)
+            let alert = UIAlertController(title: opened ? "Hive update" : "Couldn't open the installer",
+                message: opened ? "Confirm Install in the iOS prompt. Hive updates on your Home Screen; reopen it when the download finishes." : "iOS couldn't open the Hive install link. Try Update Hive again.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            self.present(alert, animated: true)
+        }
     }
 
     private func refresh() {
