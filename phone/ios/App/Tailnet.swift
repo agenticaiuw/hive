@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Tailscale
 
 /// Tailscale inside Hive (tailscale/libtailscale, built by build.sh), for a Hive Server at home on the owner's tailnet:
 /// the app finds it there (TailnetPairing) and reaches it through its node's local SOCKS5 proxy, so the iPhone needs

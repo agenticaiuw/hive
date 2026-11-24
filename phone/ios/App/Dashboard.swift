@@ -1,17 +1,18 @@
 import UIKit
 import WebKit
 
-/// Hive's window, shown by the test that is Hive (HivePhone.swift) in its own runner app whenever that app is in front:
-/// the paired Hive Server's dashboard (Pairing.dashboard), which signs the owner's own devices in, and above it how the link
-/// stands, with Tailscale's sign-in while the node needs it. The link and the automation run on behind it.
-final class Dashboard: UIViewController, WKNavigationDelegate {
+/// Hive's window, from the moment the app opens (Launcher/Main.m) and whenever it's in front: the paired Hive Server's
+/// dashboard (Pairing.dashboard), which signs the owner's own devices in, and above it how the link stands, with
+/// Tailscale's sign-in while the node needs it, and while phone control is off, a card on how to turn it on. The link and
+/// the automation run on behind it.
+@objc(HiveDashboard) public final class Dashboard: UIViewController, WKNavigationDelegate {
     private(set) static var window: UIWindow?
     /// Taps on Reload, which the probes count to see the window take touches.
     static var taps = 0
 
-    /// Shows the window now, and puts it back in whichever scene the runner app has when one connects or comes to the
-    /// front: an icon launch, or coming back from another app, may bring a new one.
-    static func show() {
+    /// Shows the window now, and puts it back in whichever scene the app has when one connects or comes to the front: an
+    /// icon launch, or coming back from another app, may bring a new one.
+    @objc public static func show() {
         attach()
         for n in [UIScene.willConnectNotification, UIScene.willEnterForegroundNotification, UIScene.didActivateNotification,
                   UIApplication.didBecomeActiveNotification] {
@@ -19,7 +20,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         }
     }
 
-    /// The runner's window scene: the one in front, else any; nil if it has none.
+    /// The app's window scene: the one in front, else any; nil if it has none.
     static var scene: UIWindowScene? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first { $0.activationState == .foregroundInactive } ?? scenes.first
@@ -56,6 +57,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     }
 
     private let status = UILabel()
+    private let control = UILabel()
     private let signIn = UIButton(type: .system)
     private let reload = UIButton(type: .system)
     private let install = UIButton(type: .system)
@@ -64,8 +66,8 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     private var page = "nothing yet"
 
     /// The status on its own lines across the top, the buttons on a row of their own under it (so neither squeezes the
-    /// other), and the web view filling the rest.
-    override func viewDidLoad() {
+    /// other), phone control's card, and the web view filling the rest.
+    public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         status.numberOfLines = 0
@@ -83,9 +85,23 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         }
         let buttons = UIStackView(arrangedSubviews: [install, signIn, reload, UIView()])
         buttons.spacing = 20
-        let bar = UIStackView(arrangedSubviews: [status, buttons])
+        control.numberOfLines = 0
+        control.font = .preferredFont(forTextStyle: .callout)
+        control.translatesAutoresizingMaskIntoConstraints = false
+        let card = UIView()
+        card.backgroundColor = .secondarySystemBackground
+        card.layer.cornerRadius = 12
+        card.addSubview(control)
+        NSLayoutConstraint.activate([
+            control.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            control.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
+            control.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            control.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+        ])
+        let bar = UIStackView(arrangedSubviews: [status, buttons, card])
         bar.axis = .vertical
         bar.spacing = 4
+        bar.setCustomSpacing(8, after: buttons)
         web.navigationDelegate = self
         for v in [bar, web] { v.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(v) }
         let g = view.safeAreaLayoutGuide
@@ -106,6 +122,8 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         status.text = Link.shared.summary
         signIn.isHidden = Tailnet.shared.loginURL == nil || Tailnet.shared.running
         install.isHidden = Link.shared.update == nil
+        control.text = Link.shared.control
+        control.superview?.isHidden = Link.shared.calls != nil || Link.shared.control.isEmpty
         guard let p = Link.shared.pairing, Tailnet.shared.running, shown != p.dashboard else { return }
         // WebKit's network process takes its proxy from the data store, so it's set before each new page.
         web.configuration.websiteDataStore.proxyConfigurations = Tailnet.shared.proxy.map { [$0] } ?? []
@@ -114,8 +132,8 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         web.load(URLRequest(url: p.dashboard))
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { page = "loaded \(webView.url?.host ?? "the probe's page")" }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
+    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { page = "loaded \(webView.url?.host ?? "the probe's page")" }
+    public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
+    public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
     private func failed(_ error: Error) { shown = nil; page = "failed: \(error.localizedDescription)" }
 }

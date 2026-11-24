@@ -1,9 +1,10 @@
 import UIKit
 import XCTest
+@testable import HiveApp
 
-/// Hive, the iPhone app. iOS lets an app see and touch the whole screen only as a UI test, so Hive is one, run by Xcode's
-/// test runner app, which starts from its icon (build.sh): testRun never ends. It shows its window whenever it's in front
-/// (Dashboard.swift), keeps the link to its Hive Server (Link.swift) and answers the server's phone calls (Runner.swift).
+/// Phone control in Hive, the iPhone app. iOS lets an app see and touch the whole screen only as a UI test, so phone control
+/// is one, which the app (Launcher/Main.m, with its dashboard and link already up: HiveApp) starts once the developer image
+/// is mounted: testRun never ends. It answers the server's phone calls (Runner.swift) that the app's link takes.
 final class HivePhone: XCTestCase {
     /// `build.sh test` sets HIVE_SMOKE: testSmoke checks the runner on a simulator, and testRun stands aside.
     static let smoke = ProcessInfo.processInfo.environment["HIVE_SMOKE"] != nil
@@ -18,14 +19,13 @@ final class HivePhone: XCTestCase {
 
     func testRun() throws {
         try XCTSkipIf(HivePhone.smoke, "the smoke test runs instead")
-        Dashboard.show()
         // UI-test initialization can background its runner. Opening Hive ends
         // with its dashboard in front, before the server starts sending calls.
         if UIApplication.shared.applicationState != .active {
             XCUIApplication(bundleIdentifier: Bundle.main.bundleIdentifier ?? "").activate()
         }
         let probe = ProcessInfo.processInfo.environment["HIVE_PROBE"] != nil
-        // The window's button signs Tailscale in; when Hive isn't in front to show it, the sign-in opens in Safari, once
+        // The dashboard's button signs Tailscale in; when Hive isn't in front to show it, the sign-in opens in Safari, once
         // for each new link.
         var opened: URL?
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { _ in
@@ -34,7 +34,7 @@ final class HivePhone: XCTestCase {
             opened = url
             XCUIDevice.shared.system.open(url)
         }
-        Link.shared.start()
+        Link.shared.calls = Runner.shared.handle
         if probe { Probe.icon() }
         // The main run loop, as an app's own: the window takes touches, and the link and the server's calls run.
         while true { _ = RunLoop.main.run(mode: .default, before: .distantFuture) }

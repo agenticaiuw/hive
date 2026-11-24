@@ -1,7 +1,9 @@
-// Hive's initial executable uses only system frameworks. XCTest is loaded only
-// after the developer image is mounted, so a reboot cannot prevent this app
-// from reaching its mount code.
+// Hive's initial executable uses only system frameworks and HiveApp (the dashboard,
+// Tailscale and the link to Hive Server), which are up from launch. XCTest, for
+// phone control, is loaded only after the developer image is mounted, so a reboot
+// or a phone that isn't set up yet cannot keep the app from the rest.
 #import <UIKit/UIKit.h>
+#import <HiveApp/HiveApp-Swift.h>
 #import <TargetConditionals.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
@@ -16,44 +18,21 @@
 @end
 
 @interface HiveLauncher : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>
-@property(nonatomic, strong) UIWindow *window;
-@property(nonatomic, strong) UILabel *status;
-@property(nonatomic) BOOL started;
+@property(nonatomic) BOOL started, waiting;
 @property(nonatomic) UIBackgroundTaskIdentifier backgroundTask;
 @end
 
 @implementation HiveLauncher
-- (void)showInScene:(UIWindowScene *)scene {
-    if (self.window) return;
-    self.window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    UIViewController *controller = [UIViewController new];
-    controller.view.backgroundColor = UIColor.systemBackgroundColor;
-    self.status = [UILabel new];
-    self.status.text = @"Starting Hive…";
-    self.status.numberOfLines = 0;
-    self.status.textAlignment = NSTextAlignmentCenter;
-    self.status.translatesAutoresizingMaskIntoConstraints = NO;
-    [controller.view addSubview:self.status];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.status.leadingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.leadingAnchor constant:24],
-        [self.status.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-24],
-        [self.status.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor]
-    ]];
-    self.window.rootViewController = controller;
-    [self.window makeKeyAndVisible];
-}
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     self.backgroundTask = UIBackgroundTaskInvalid;
-    if (![NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"]) [self showInScene:nil];
+    [HiveDashboard show];
+    [HiveLink.shared start];
     return YES;
 }
 - (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:@"Hive" sessionRole:session.role];
     configuration.delegateClass = self.class;
     return configuration;
-}
-- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
-    if ([scene isKindOfClass:UIWindowScene.class]) [(HiveLauncher *)UIApplication.sharedApplication.delegate showInScene:(UIWindowScene *)scene];
 }
 - (void)endBackgroundTask {
     if (self.backgroundTask == UIBackgroundTaskInvalid) return;
@@ -74,18 +53,34 @@
 }
 - (void)start {
     if (self.started) return;
-    self.started = YES;
 #if TARGET_OS_SIMULATOR
     // The simulator has no personalized DDI; build.sh embeds its XCTest runtime.
+    self.started = YES;
     [self scheduleXCTest];
 #else
-    [HiveMount start:^(NSString *status) { self.status.text = status; } completion:^(BOOL mounted) {
+    // Hive on a computer writes the pairing identity into Documents over USB once the
+    // iPhone trusts it (desktop/src/phone_setup.rs): look for it until it's there.
+    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *identity = [documents URLByAppendingPathComponent:@"developer-pairing.plist"];
+    if (![NSFileManager.defaultManager fileExistsAtPath:identity.path]) {
+        HiveLink.shared.control = @"Turn on phone control: plug this iPhone into a computer running Hive once and tap Trust.";
+        if (self.waiting) return;
+        self.waiting = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            self.waiting = NO;
+            [self start];
+        });
+        return;
+    }
+    self.started = YES;
+    [HiveMount start:identity progress:^(NSString *status) { HiveLink.shared.control = status; } completion:^(BOOL mounted) {
         if (mounted) [self scheduleXCTest];
         else self.started = NO;
     }];
 #endif
 }
 - (void)scheduleXCTest {
+    HiveLink.shared.control = @"Starting phone control…";
     // _XCTestMain and testRun keep running the main run loop. Starting them
     // inside a GCD main-queue block would keep that serial block alive forever,
     // starving WebKit and XCTest's own application-state callbacks. Apple's
@@ -107,7 +102,7 @@
     void (*run)(id) = runtime ? (void (*)(id))dlsym(runtime, "_XCTestMain") : NULL;
     Class configurationClass = NSClassFromString(@"XCTestConfiguration");
     if (!run || !configurationClass) {
-        self.status.text = @"Hive couldn’t load phone control from the developer image.";
+        HiveLink.shared.control = @"Hive couldn’t load phone control from the developer image.";
         return;
     }
     // Match the runner's configured test bundle while deferring every reference
@@ -121,7 +116,7 @@
             configuration = [factory configurationFromCommandLineArguments:NSProcessInfo.processInfo.arguments
                 userDefaults:NSUserDefaults.standardUserDefaults requiresTestBundleURL:NO outError:&error];
         }
-        if (error) { self.status.text = @"Hive couldn’t configure phone control."; return; }
+        if (error) { HiveLink.shared.control = @"Hive couldn’t configure phone control."; return; }
         if (!configuration) {
             configuration = [configurationClass new];
             [configuration setValue:@YES forKey:@"reportResultsToIDE"];
@@ -137,7 +132,7 @@
         }
         run(configuration);
     } @catch (NSException *exception) {
-        self.status.text = @"Hive couldn’t start phone control.";
+        HiveLink.shared.control = @"Hive couldn’t start phone control.";
     }
 }
 @end

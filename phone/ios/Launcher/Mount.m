@@ -47,14 +47,7 @@ static uint16_t pairingPort(void) {
 }
 
 @implementation HiveMount
-+ (void)start:(void (^)(NSString *))progress completion:(void (^)(BOOL))completion {
-    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-    NSURL *identity = [documents URLByAppendingPathComponent:@"developer-pairing.plist"];
-    if (![NSFileManager.defaultManager fileExistsAtPath:identity.path]) {
-        progress(@"Connect this iPhone to Hive on your Mac once to set up phone control.");
-        completion(NO);
-        return;
-    }
++ (void)start:(NSURL *)identity progress:(void (^)(NSString *))progress completion:(void (^)(BOOL))completion {
     [NSFileManager.defaultManager setAttributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
                                  ofItemAtPath:identity.path error:nil];
     progress(@"Connecting phone control…");
