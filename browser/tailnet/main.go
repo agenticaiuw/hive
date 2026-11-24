@@ -1,7 +1,7 @@
 // Tailscale inside Hive's browser extension, for a Hive at home that only its owner's tailnet reaches: a userspace node
 // (netstack; control over HTTPS; data over Tailscale's DERP relays by WebSocket, since a browser has no UDP), started the
 // way tailscale.com/cmd/tsconnect starts one. tsconnect's own fetch is GET-only, so this is the small part Hive needs:
-// hiveTailnet.start and hiveTailnet.fetch, used by ../tailnet.js. build.sh builds it.
+// hiveTailnet.start, .fetch and .peers, used by ../tailnet.js. build.sh builds it.
 package main
 
 import (
@@ -22,7 +22,6 @@ import (
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/net/netns"
-	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/tsd"
 	"tailscale.com/types/logid"
@@ -36,7 +35,7 @@ var (
 )
 
 func main() {
-	js.Global().Set("hiveTailnet", js.ValueOf(map[string]any{"start": js.FuncOf(start), "fetch": js.FuncOf(fetch)}))
+	js.Global().Set("hiveTailnet", js.ValueOf(map[string]any{"start": js.FuncOf(start), "fetch": js.FuncOf(fetch), "peers": js.FuncOf(peers)}))
 	select {}
 }
 
@@ -81,9 +80,9 @@ func start(_ js.Value, args []js.Value) any {
 	if err := ns.Start(lb); err != nil {
 		return err.Error()
 	}
-	// js/wasm has no system roots (and can't see the browser's): tlsdial verifies against Let's Encrypt's, baked in, which
-	// issue every .ts.net certificate.
-	client = &http.Client{Transport: &http.Transport{DialContext: dialer.UserDial, TLSClientConfig: tlsdial.Config(sys.HealthTracker.Get(), nil)}}
+	// A home Hive Server is plain HTTP inside the tailnet (WireGuard encrypts it), so no TLS here; control and the relays
+	// go over the browser's own HTTPS and WebSocket.
+	client = &http.Client{Transport: &http.Transport{DialContext: dialer.UserDial}}
 
 	state, url := "Starting", ""
 	lb.SetNotifyCallback(func(n ipn.Notify) {
@@ -161,6 +160,23 @@ func fetch(_ js.Value, args []js.Value) any {
 		}
 		return map[string]any{"status": res.StatusCode, "headers": headers, "body": string(body)}, nil
 	})
+}
+
+// peers() → [{online, hostName, dnsName, ips}], the other machines on the owner's tailnet (none until it's connected), for
+// ../hive.js to find their Hive Server among.
+func peers(js.Value, []js.Value) any {
+	all := []any{}
+	if lb == nil || lb.State() != ipn.Running {
+		return all
+	}
+	for _, p := range lb.Status().Peer {
+		ips := []any{}
+		for _, ip := range p.TailscaleIPs {
+			ips = append(ips, ip.String())
+		}
+		all = append(all, map[string]any{"online": p.Online, "hostName": p.HostName, "dnsName": p.DNSName, "ips": ips})
+	}
+	return all
 }
 
 // The node's state, as hex strings in the extension's storage.

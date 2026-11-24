@@ -15,13 +15,20 @@
   [hidden] { display: none; }
 </style>
 <p id="ts" hidden><button id="tsLogin">Sign in to Tailscale</button> <span class="muted">This browser reaches your Hive Server through Tailscale.</span></p>
-<form id="pair" hidden>
+<div id="pair" hidden>
   <h1>Connect this browser to Hive</h1>
-  <p class="muted">On your Hive Server's dashboard, choose Pair a device, then paste the link here.</p>
-  <input id="link" placeholder="Pairing link" required>
-  <button>Connect</button>
-  <p id="pairNote" class="muted"></p>
-</form>
+  <button id="join">Sign in with Tailscale</button>
+  <p class="muted">Use the same Tailscale account as your Hive Server, and this browser finds it and connects by itself.</p>
+  <p id="pairNote"></p>
+  <details>
+    <summary class="muted">Or paste a pairing link</summary>
+    <form id="linkForm">
+      <p class="muted">For a Hive Server on a cloud computer: on its dashboard, choose Pair a device, then paste the link here.</p>
+      <input id="link" placeholder="Pairing link" required>
+      <button>Connect</button>
+    </form>
+  </details>
+</div>
 <div id="main" hidden>
   <form id="ask">
     <textarea id="text" placeholder="Ask Hive about this page, or anything"></textarea>

@@ -40,11 +40,13 @@ export const tailnet = {
   // Chrome, Edge and Brave run the node in an offscreen document, opened here when it isn't already. Safari has none: its
   // background page runs the node and replaces this (worker.js). Calls at once share one opening, so none asks before it
   // has loaded; a later one finds it open.
-  fetch: async (url, init) => {
+  call: async (op, ...args) => {
     await (opening ||= chrome.offscreen?.createDocument({ url: 'offscreen.html', reasons: ['WORKERS'], justification: "Runs Tailscale's client, which reaches the owner's Hive on their tailnet." })
       .catch(() => {}).finally(() => { opening = null; }));
-    return chrome.runtime.sendMessage({ tailnet: 'fetch', url, init });
+    return chrome.runtime.sendMessage({ tailnet: 'call', op, args });
   },
+  fetch: (url, init) => tailnet.call('fetch', url, init),
+  peers: () => tailnet.call('peers'),
 };
 let opening;
 async function request(url, { signal, ...init }) {
@@ -54,17 +56,45 @@ async function request(url, { signal, ...init }) {
   return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
 }
 
+/** The owner's Hive Server on their tailnet, as hive-tailnet's find does: an online machine named hive (hive-1, … when
+ * there's more than one) that answers /health as Hive. Null when there's none, or this browser's Tailscale isn't signed in. */
+export async function findServer() {
+  const peers = await tailnet.peers();
+  if (peers?.error) throw new Error(peers.error);
+  for (const p of peers) {
+    const host = p.dnsName.replace(/\.$/, '') || p.ips[0];
+    if (!p.online || !/^hive/i.test(p.hostName) || !host) continue;
+    try {
+      const r = await request(`http://${host}/health`, { timeout: 5000 });
+      if ((await r.json()).ok === true) return `http://${host}`;
+    } catch {}
+  }
+  return null;
+}
+
+/** "Sign in with Tailscale": join the Hive Server on the owner's tailnet, which knows this browser is theirs by its
+ * Tailscale account, so no pairing link. */
+export async function joinTailnet() {
+  const server = await findServer();
+  if (!server) throw Object.assign(new Error('Looking for your Hive Server… Make sure it is on and signed in to the same Tailscale account.'), { again: true });
+  return connect(server, '/api/pair/tailnet', {});
+}
+
 /** Connect this browser with the link the dashboard's "Pair a device" copies: https://<server>/#pair=<code>. */
 export async function pair(link, id) {
   const [server, code] = link.trim().split('/#pair=');
-  if (!code) throw new Error("That isn't a pairing link. On your Hive dashboard, choose Pair a device and paste the link it copies.");
+  if (!code) throw new Error("That isn't a pairing link. On your Hive Server's dashboard, choose Pair a device and paste the link it copies.");
+  return connect(server, '/api/pair', { code }, id);
+}
+
+async function connect(server, path, body, id) {
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
   const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
   const name = safari ? 'Safari' : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
-  const r = await request(`${server}/api/pair`, {
+  const r = await request(server + path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ code, kind: 'browser', name }),
+    body: JSON.stringify({ ...body, kind: 'browser', name }),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `Hive answered ${r.status}`);

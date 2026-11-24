@@ -1,7 +1,7 @@
 // Tailscale built into the extension (tailnet/), for a Hive at home that only its owner's tailnet reaches. Chrome, Edge and
 // Brave run it in offscreen.html; Safari, which has no offscreen documents, in its background page (worker.js).
 
-/** Starts this browser's node and returns its fetch. store keeps its state (so it stays signed in); status gets {state, url}. */
+/** Starts this browser's node and returns it: {fetch, peers}. store keeps its state (so it stays signed in); status gets {state, url}. */
 export async function start(store) {
   await import('./tailnet/wasm_exec.js');
   const go = new Go();
@@ -12,7 +12,7 @@ export async function start(store) {
   if (!state.hostname) store.save('hostname', (state.hostname = `hive-browser-${crypto.randomUUID().slice(0, 8)}`));
   const err = hiveTailnet.start({ getState: (k) => state[k] || '', setState: (k, v) => { state[k] = v; store.save(k, v); } }, state.hostname, store.status);
   if (err) throw new Error(err);
-  return (url, init) => hiveTailnet.fetch(url, init);
+  return { fetch: (url, init) => hiveTailnet.fetch(url, init), peers: async () => hiveTailnet.peers() };
 }
 
 /** The node's state and status in this extension's storage, for wherever chrome.storage is (not an offscreen document). */

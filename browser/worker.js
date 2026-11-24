@@ -1,6 +1,6 @@
 // This browser as a Hive node: it says hello with its tools, runs the calls Hive's agents make, and applies the owner's site
 // rules (their page code) on every page as it loads. It needs nothing else on the computer.
-import { api, conf, pair, tailnet } from './hive.js';
+import { api, conf, joinTailnet, pair, tailnet } from './hive.js';
 import { start, storage } from './tailnet.js';
 
 const str = (description) => ({ type: 'string', description });
@@ -180,7 +180,7 @@ chrome.alarms.create('hive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => { loop(); pending(); });
 chrome.storage.onChanged.addListener((ch) => {
   if (ch.hive?.newValue) loop();
-  if (ch.pairing?.newValue || ch.tailnet?.newValue?.state === 'Running') pending();
+  if (ch.pairing?.newValue || ch.joining?.newValue || ch.tailnet?.newValue?.state === 'Running') pending();
 });
 loop();
 
@@ -188,29 +188,31 @@ loop();
 // its state and status through here; Safari's runs here, in its background page, and answers the popup's requests.
 if (!chrome.offscreen) {
   let node;
-  tailnet.fetch = (url, init) => (node ||= start(storage)).then((f) => f(url, init)).catch((e) => ({ error: String(e?.message || e) }));
+  tailnet.call = (op, ...args) => (node ||= start(storage)).then((n) => n[op](...args)).catch((e) => ({ error: String(e?.message || e) }));
 }
 chrome.runtime.onMessage.addListener((m, _, reply) => {
   if (m.tailnet === 'load') { storage.load().then(reply); return true; }
   if (m.tailnet === 'save') storage.save(m.key, m.value);
   if (m.tailnet === 'status') storage.status(m.status);
-  if (m.tailnet === 'fetch' && !chrome.offscreen) { tailnet.fetch(m.url, m.init).then(reply); return true; }
+  if (m.tailnet === 'call' && !chrome.offscreen) { tailnet.call(m.op, ...m.args).then(reply); return true; }
 });
 
-// A .ts.net pairing link from the popup pairs here once this browser's Tailscale is signed in (the popup shows the sign-in
-// button), since the popup closes when the sign-in tab opens. Until then each try just waits and fails, and it's tried again.
+// Connecting through Tailscale happens here, not in the popup, which closes when Tailscale's sign-in tab opens: joining (the
+// popup's "Sign in with Tailscale": find the owner's Hive Server on their tailnet and join it), or a pairing link to a Hive
+// Server on the tailnet. Until this browser's Tailscale is signed in each try just fails quietly, and runs again once it is
+// (and every half minute while no Hive Server is online yet).
 let busy = false;
 async function pending() {
-  const { pairing: link } = await chrome.storage.local.get('pairing');
-  if (!link || busy) return;
+  const { pairing: link, joining } = await chrome.storage.local.get(['pairing', 'joining']);
+  if (!(link || joining) || busy) return;
   busy = true;
   try {
-    await pair(link);
-    await chrome.storage.local.remove('pairing');
+    await (link ? pair(link) : joinTailnet());
+    await chrome.storage.local.remove(['pairing', 'joining', 'pairNote']);
   } catch (e) {
     if ((await chrome.storage.local.get('tailnet')).tailnet?.state === 'Running') {
       await chrome.storage.local.set({ pairNote: e.message });
-      await chrome.storage.local.remove('pairing');
+      if (!e.again) await chrome.storage.local.remove(['pairing', 'joining']);
     }
   } finally {
     busy = false;
