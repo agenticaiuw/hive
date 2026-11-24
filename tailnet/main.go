@@ -1,5 +1,8 @@
-// hive-tailnet: Tailscale built into Hive (tailscale.com/tsnet), so a Hive on a laptop at home is reachable by its owner's own
-// devices from anywhere, with nobody installing the Tailscale app. Traffic between them is end-to-end encrypted (WireGuard).
+//go:build !js
+
+// hive-tailnet: Tailscale built into Hive (tailscale.com/tsnet). Hive Server is on its owner's tailnet wherever it runs (a
+// laptop or a VM), and their devices reach it there, with nobody installing the Tailscale app. Traffic between them is
+// end-to-end encrypted (WireGuard).
 //
 //	hive-tailnet serve --state DIR --name hive --to 127.0.0.1:8790
 //	    the Hive server: joins the owner's tailnet as `name` and serves http://<name>.<tailnet>.ts.net (its 100.x address
@@ -10,11 +13,13 @@
 //	    owner's Hive Server on their tailnet itself and says {"server": url}
 //
 // The server tells Hive whose device each request comes from (X-Hive-Tailnet-Owner: 1 when the device is signed in to the
-// same Tailscale account as the server, X-Hive-Tailnet-Device: its name), so the owner's own devices need no pairing link.
+// same Tailscale account as the server, X-Hive-Tailnet-Device: its name).
 //
 // It says what's happening as one JSON line per change on stdout: {"login": url} until the owner signs in, {"address": url}
 // once serving, {"server": url} when `auto` found the server, {"error": text}. It
 // stops when its stdin closes, so it never outlives the program that started it.
+//
+// The browser extension's Tailscale is this module too, built for the browser: wasm.go, built by wasm.sh.
 package main
 
 import (
@@ -165,38 +170,19 @@ func ownerOf(s *tsnet.Server) tailcfg.UserID {
 	return 0
 }
 
-// find looks on the owner's tailnet for their Hive Server: a machine named hive (hive-1, … when there's more than one) that
-// answers as Hive and is online: the first one in Tailscale's list.
+// find waits for the owner's Hive Server to be online on their tailnet (server.go).
 func find(s *tsnet.Server) string {
 	lc, err := s.LocalClient()
 	if err != nil {
 		return ""
 	}
-	c := s.HTTPClient()
-	c.Timeout = 5 * time.Second
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		st, err := lc.Status(ctx)
 		cancel()
 		if err == nil {
-			for _, p := range st.Peer {
-				if !p.Online || !strings.HasPrefix(strings.ToLower(p.HostName), "hive") {
-					continue
-				}
-				host := strings.TrimSuffix(p.DNSName, ".")
-				if host == "" && len(p.TailscaleIPs) > 0 {
-					host = p.TailscaleIPs[0].String()
-				}
-				r, err := c.Get("http://" + host + "/health")
-				if err != nil {
-					continue
-				}
-				var h struct{ Ok bool }
-				json.NewDecoder(r.Body).Decode(&h)
-				r.Body.Close()
-				if h.Ok {
-					return "http://" + host
-				}
+			if server := hiveServer(st, s.HTTPClient()); server != "" {
+				return server
 			}
 		}
 		say(map[string]string{"looking": "no Hive Server is online on this Tailscale account yet"})

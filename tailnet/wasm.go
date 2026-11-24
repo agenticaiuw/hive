@@ -1,7 +1,10 @@
-// Tailscale inside Hive's browser extension, for a Hive at home that only its owner's tailnet reaches: a userspace node
+//go:build js && wasm
+
+// Tailscale inside Hive's browser extension, which reaches Hive Server on its owner's tailnet: a userspace node
 // (netstack; control over HTTPS; data over Tailscale's DERP relays by WebSocket, since a browser has no UDP), started the
 // way tailscale.com/cmd/tsconnect starts one. tsconnect's own fetch is GET-only, so this is the small part Hive needs:
-// hiveTailnet.start, .fetch and .peers, used by ../tailnet.js. build.sh builds it.
+// hiveTailnet.start, .fetch, .peers and .find, used by ../browser/tailnet.js. wasm.sh builds it; the native hive-tailnet
+// (main.go) is the same module.
 package main
 
 import (
@@ -35,7 +38,7 @@ var (
 )
 
 func main() {
-	js.Global().Set("hiveTailnet", js.ValueOf(map[string]any{"start": js.FuncOf(start), "fetch": js.FuncOf(fetch), "peers": js.FuncOf(peers)}))
+	js.Global().Set("hiveTailnet", js.ValueOf(map[string]any{"start": js.FuncOf(start), "fetch": js.FuncOf(fetch), "peers": js.FuncOf(peers), "find": js.FuncOf(find)}))
 	select {}
 }
 
@@ -80,7 +83,7 @@ func start(_ js.Value, args []js.Value) any {
 	if err := ns.Start(lb); err != nil {
 		return err.Error()
 	}
-	// A home Hive Server is plain HTTP inside the tailnet (WireGuard encrypts it), so no TLS here; control and the relays
+	// Hive Server is plain HTTP inside the tailnet (WireGuard encrypts it), so no TLS here; control and the relays
 	// go over the browser's own HTTPS and WebSocket.
 	client = &http.Client{Transport: &http.Transport{DialContext: dialer.UserDial}}
 
@@ -177,6 +180,20 @@ func peers(js.Value, []js.Value) any {
 		all = append(all, map[string]any{"online": p.Online, "hostName": p.HostName, "dnsName": p.DNSName, "ips": ips})
 	}
 	return all
+}
+
+// find() → Promise<url or null>: the owner's Hive Server on their tailnet (server.go), null when there's none or this node
+// isn't connected yet.
+func find(js.Value, []js.Value) any {
+	return promise(func() (any, error) {
+		if lb == nil || lb.State() != ipn.Running {
+			return nil, nil
+		}
+		if server := hiveServer(lb.Status(), client); server != "" {
+			return server, nil
+		}
+		return nil, nil
+	})
 }
 
 // The node's state, as hex strings in the extension's storage.

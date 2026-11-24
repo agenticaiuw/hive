@@ -24,11 +24,11 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 } # the devices' version is the last commit to their code
       - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
-      # The extension's Tailscale (browser/tailnet/), built here and never committed (it's large), before Hive for Safari takes
-      # in browser/.
+      # The extension's Tailscale (tailnet/wasm.go into browser/tailnet/), built here and never committed (it's large), before
+      # Hive for Safari takes in browser/.
       - uses: actions/setup-go@v5
-        with: { go-version-file: browser/tailnet/go.mod, cache-dependency-path: browser/tailnet/go.sum }
-      - run: browser/tailnet/build.sh
+        with: { go-version-file: tailnet/go.mod, cache-dependency-path: tailnet/go.sum }
+      - run: tailnet/wasm.sh
       - run: |
           cargo build --release -p hive -p hive-server --target aarch64-apple-darwin
           cargo build --release -p hive -p hive-server --target x86_64-apple-darwin
@@ -124,10 +124,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: out, merge-multiple: true }
-      # The extension's Tailscale (browser/tailnet/), built here and never committed: it's large.
+      # The extension's Tailscale (tailnet/wasm.go into browser/tailnet/), built here and never committed: it's large.
       - uses: actions/setup-go@v5
-        with: { go-version-file: browser/tailnet/go.mod, cache-dependency-path: browser/tailnet/go.sum }
-      - run: browser/tailnet/build.sh
+        with: { go-version-file: tailnet/go.mod, cache-dependency-path: tailnet/go.sum }
+      - run: tailnet/wasm.sh
       - run: cd browser && zip -qr ../out/Hive-Browser.zip . -x '.*' 'tailnet/*' && zip -q ../out/Hive-Browser.zip tailnet/tailnet.wasm tailnet/wasm_exec.js
       - env:
           GH_TOKEN: ${{ github.token }}
