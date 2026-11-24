@@ -38,6 +38,11 @@ td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: lef
 .item { cursor: pointer; }
 .item.sel { outline: 2px solid var(--accent); }
 img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+.composer.dragging { outline: 2px dashed var(--accent); }
+.attachments { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.attachment { display: flex; gap: 6px; align-items: center; max-width: 100%; }
+.attachment img { width: 64px; height: 64px; object-fit: contain; border-radius: 6px; }
+button:disabled { opacity: .5; cursor: wait; }
 #login { max-width: 360px; margin: 18vh auto; }
 </style>
 </head>
@@ -52,9 +57,11 @@ img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
 </header>
 <nav id="tabs"></nav>
 <main>
-  <div class="card">
+  <div class="card composer" data-composer="main">
     <textarea id="ask" rows="2" placeholder="Tell Hive what to do"></textarea>
-    <p class="row" style="margin:8px 0 0"><button onclick="send()">Send</button><span id="reply" class="muted"></span></p>
+    <div class="attachments"></div>
+    <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
+    <span class="muted">Drop or paste pictures here, or choose from your photos.</span>
   </div>
   <div id="view"></div>
 </main>
@@ -90,13 +97,80 @@ function addPhone(udid, github) {
   document.execCommand('copy'); t.remove();
   open(github, '_blank');
 }
-async function send() {
-  const text = $('#ask').value.trim(); if (!text) return;
-  $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
-  const r = await api('api/requests?wait=1', { method: 'POST', body: { text, node: 'dashboard' } });
-  $('#reply').textContent = r.reply || r.status; refresh();
+// Drafts live outside the rendered task pane so polling cannot discard attachments.
+const drafts = new Map();
+function draft(key) {
+  if (!drafts.has(key)) drafts.set(key, { files: [], text: '', busy: false, status: '' });
+  return drafts.get(key);
 }
-$('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+function paintComposer(el) {
+  const d = draft(el.dataset.composer);
+  el.querySelector('.attachments').replaceChildren(...d.files.map(item => {
+    const box = document.createElement('div'); box.className = 'attachment';
+    const img = document.createElement('img'); img.src = item.url; img.alt = item.file.name;
+    const remove = document.createElement('button'); remove.className = 'plain';
+    remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${item.file.name}`);
+    remove.disabled = d.busy;
+    remove.onclick = () => { d.files.splice(d.files.indexOf(item), 1); URL.revokeObjectURL(item.url); paintComposer(el); };
+    box.append(img, remove); return box;
+  }));
+  el.querySelector('[data-send]').disabled = d.busy;
+  el.querySelector('[role=status]').textContent = d.status;
+  el.querySelector('textarea, input:not([type=file])').disabled = d.busy;
+  el.querySelector('input[type=file]').disabled = d.busy;
+}
+function addPictures(el, files) {
+  const d = draft(el.dataset.composer); if (d.busy) return;
+  const images = Array.from(files).filter(f => f.type.startsWith('image/'));
+  for (const file of images) {
+    if (file.size > 25 * 1024 * 1024) { d.status = 'Pictures must be 25 MB or smaller.'; continue; }
+    d.files.push({ file, url: URL.createObjectURL(file), path: null });
+  }
+  if (!images.length) d.status = 'Choose an image file.';
+  paintComposer(el);
+}
+document.addEventListener('change', e => {
+  const el = e.target.closest('.composer');
+  if (el && e.target.type === 'file') { addPictures(el, e.target.files); e.target.value = ''; }
+});
+document.addEventListener('input', e => {
+  const el = e.target.closest('.composer');
+  if (el && e.target.type !== 'file') draft(el.dataset.composer).text = e.target.value;
+});
+document.addEventListener('paste', e => {
+  const el = e.target.closest('.composer'); if (!el) return;
+  const files = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
+  if (files.length) { e.preventDefault(); addPictures(el, files); }
+});
+for (const event of ['dragover', 'dragleave', 'drop']) document.addEventListener(event, e => {
+  const el = e.target.closest('.composer'); if (!el) return;
+  if (event === 'dragover' || event === 'drop') e.preventDefault();
+  el.classList.toggle('dragging', event === 'dragover');
+  if (event === 'drop') addPictures(el, e.dataTransfer.files);
+});
+async function sendComposer(key, path) {
+  const d = draft(key); if (d.busy || (!d.text.trim() && !d.files.length)) return;
+  const el = Array.from(document.querySelectorAll('.composer')).find(el => el.dataset.composer === key);
+  d.busy = true; d.status = 'Sending…'; paintComposer(el);
+  try {
+    for (const item of d.files) {
+      if (!item.path) {
+        const r = await api(`api/files?name=${encodeURIComponent(item.file.name)}`, { method: 'POST', body: item.file });
+        if (!r.path) throw new Error(r.error || 'Picture upload failed');
+        item.path = r.path;
+      }
+    }
+    const pictures = d.files.length ? '\n\nAttached pictures saved on Hive (inspect these images; include their paths when passing this request to an agent):\n' + d.files.map(i => i.path).join('\n') : '';
+    const r = await api(path, { method: 'POST', body: { text: d.text.trim() + pictures, node: 'dashboard' } });
+    if (r.error || r.status === 'failed') throw new Error(r.error || r.reply || 'Sending failed');
+    d.files.forEach(i => URL.revokeObjectURL(i.url)); d.files = []; d.text = '';
+    el.querySelector('textarea, input:not([type=file])').value = '';
+    d.status = r.reply || r.status || 'Sent';
+  } catch (e) { d.status = `Could not send: ${e.message}. Your draft is kept; try again.`; }
+  finally { d.busy = false; if (el.isConnected) paintComposer(el); }
+}
+async function send() { await sendComposer('main', 'api/requests?wait=1'); refresh(); }
+$('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
 const TABS = ['Agents', 'Tasks', 'Past', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
 let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null;
@@ -115,7 +189,7 @@ async function openChat(id) { chat = id; chatAfter = 0; render(); }
 function chatPane() {
   return `<div class="card"><div class="row"><b>Task #${chat}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log"></div>
-    <div class="row" style="margin-top:8px"><input id="msg" placeholder="Message this agent"><button onclick="msgTask(${chat})">Send</button></div></div>`;
+    <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
 async function loadChat() {
   if (!chat || !$('#chatlog')) return;
@@ -124,9 +198,9 @@ async function loadChat() {
   for (const l of r.log) { box.insertAdjacentHTML('beforeend', `<div><span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`); chatAfter = l.id; }
   if (atEnd) box.scrollTop = box.scrollHeight;
 }
-async function msgTask(id) { const text = $('#msg').value.trim(); if (!text) return; $('#msg').value = ''; await api(`api/tasks/${id}/message`, { method: 'POST', body: { text } }); loadChat(); }
+async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${id}/message`); loadChat(); }
 async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
-$('#view').addEventListener('keydown', e => { if (e.target.id === 'msg' && e.key === 'Enter') msgTask(chat); });
+$('#view').addEventListener('keydown', e => { if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
 
 function table(rows) {
   if (!rows.length) return '<p class="muted">Nothing here.</p>';
@@ -141,11 +215,11 @@ async function render() {
     const groups = {};
     for (const t of list) (groups[tab === 'Tasks' ? (t.project || 'Other') : 'Active agents'] ??= []).push(t);
     v.innerHTML = `<div class="split"><div>${Object.entries(groups).map(([g, ts]) => `<p class="muted">${esc(g)}</p>${ts.map(t => taskCard(t)).join('')}`).join('') || '<p class="muted">No agents are working.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    chatAfter = 0; loadChat();
+    chatAfter = 0; document.querySelectorAll('.composer').forEach(paintComposer); loadChat();
   } else if (tab === 'Past') {
     const done = await api('api/tasks?status=done'), dropped = await api('api/tasks?status=dropped');
     v.innerHTML = `<div class="split"><div>${[...done, ...dropped].map(t => taskCard(t)).join('') || '<p class="muted">None yet.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    chatAfter = 0; loadChat();
+    chatAfter = 0; document.querySelectorAll('.composer').forEach(paintComposer); loadChat();
   } else if (tab === 'Rules') {
     const rules = await api('api/rules');
     v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
@@ -188,7 +262,7 @@ async function refresh() {
   state = await api('api/state');
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
   $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
-  if (['Agents', 'Tasks', 'Nodes'].includes(tab) && !document.activeElement?.matches('input,textarea')) render();
+  if (['Agents', 'Tasks', 'Nodes'].includes(tab) && !document.activeElement?.matches('input,textarea') && !Array.from(drafts.values()).some(d => d.busy)) render();
   else loadChat();
 }
 async function start() {
