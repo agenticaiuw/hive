@@ -53,6 +53,7 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 .chat-log .activity { padding: 5px 0; color: var(--muted); overflow-wrap: anywhere; }
 .chat-log .activity summary { cursor: pointer; }
 .chat-log .activity-body { white-space: pre-wrap; }
+.chat-log .command-group .activity { padding-left: 12px; }
 .log .who { color: var(--accent); font-weight: 600; margin-right: 6px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
@@ -210,6 +211,18 @@ function logEntry(l) {
     return `<div class="message agent" aria-label="${esc(who === 'hive' ? 'Hive' : 'Agent')}"><div class="message-body">${esc(l.text)}</div></div>`;
   return `<details class="activity"><summary>${esc(who)}</summary><div class="activity-body">${esc(l.text)}</div></details>`;
 }
+// Keep consecutive commands together, including commands arriving in later polls.
+function appendLogEntry(box, l) {
+  if (l.who !== 'command') { box.insertAdjacentHTML('beforeend', logEntry(l)); return; }
+  let group = box.lastElementChild;
+  if (!group?.classList.contains('command-group')) {
+    box.insertAdjacentHTML('beforeend', '<details class="activity command-group"><summary></summary></details>');
+    group = box.lastElementChild;
+  }
+  group.insertAdjacentHTML('beforeend', logEntry(l));
+  const count = group.children.length - 1;
+  group.firstElementChild.textContent = `${count} ${count === 1 ? 'command' : 'commands'}`;
+}
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 function taskCard(t, click = true) {
   return `<div role="button" tabindex="0" data-session="${t.id}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
@@ -233,7 +246,7 @@ async function loadChat() {
     const r = await api(`api/tasks/${selected}?after=${chatAfter}`);
     if (chat !== selected || box !== $('#chatlog')) return;
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-    for (const l of r.log) { box.insertAdjacentHTML('beforeend', logEntry(l)); chatAfter = l.id; }
+    for (const l of r.log) { appendLogEntry(box, l); chatAfter = l.id; }
     if (atEnd) box.scrollTop = box.scrollHeight;
   } finally { chatLoading = false; }
 }
@@ -245,7 +258,7 @@ async function loadOrchestrator() {
     const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
     for (const l of rows) {
-      box.insertAdjacentHTML('beforeend', logEntry(l));
+      appendLogEntry(box, l);
       orchestratorAfter = l.id;
     }
     if (atEnd) box.scrollTop = box.scrollHeight;
