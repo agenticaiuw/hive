@@ -458,7 +458,6 @@ impl Hive {
                 args!(task_id, kind, short(&s(&task["title"]), 60), now(), now()))
         };
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
-        self.log(agent, task_id, 0, "session input", &self.instructions(&task));
         let result = if on_claude { self.claude_turn(agent, "Start on your task now.") }
             else { self.new_thread(agent, &task).and_then(|_| self.start_turn_with(agent, "Start on your task now.", effort)) };
         if let Err(e) = result {
@@ -481,6 +480,19 @@ impl Hive {
         cwd
     }
 
+    /// Read the provider's transcript rather than reconstructing it from dashboard activity.
+    pub fn session_context(self: &Arc<Self>, task_id: i64) -> Result<Value, String> {
+        let a = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=? and a.task_id=t.id", args!(task_id)).ok_or("This task's live session has ended; its recorded inputs remain in the chat.")?;
+        if s(&a["kind"]) != "codex" { return Err("Provider transcript inspection is available for Codex sessions only.".into()); }
+        let thread = s(&a["thread"]);
+        if thread.is_empty() { return Err("The session has not started.".into()); }
+        let transcript = self.codex()?.request("thread/read", json!({"threadId":thread,"includeTurns":true}), 30)?;
+        Ok(json!({"thread":thread,"providerTranscript":transcript,
+            "hiveConfiguration":self.db.get("select text from log where task_id=? and who='session configuration' order by id desc limit 1",args!(task_id)),
+            "hiveInstructions":self.db.get("select text from log where task_id=? and who='session input' order by id desc limit 1",args!(task_id)),
+            "note":"Provider transcript and Hive instructions. The provider may compact older turns; hidden provider instructions and private reasoning are not exposed by its API."}))
+    }
+
     fn start_turn(self: &Arc<Self>, agent: i64, text: &str) -> Result<(), String> {
         if self.db.get("select 1 from agents where id=? and kind=?", args!(agent, CLAUDE_AGENT)).is_some() { return self.claude_turn(agent, text); }
         let level = self.db.get("select t.level from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).map(|r| s(&r["level"])).unwrap_or_default();
@@ -492,14 +504,17 @@ impl Hive {
     fn new_thread(self: &Arc<Self>, agent: i64, task: &Value) -> Result<String, String> {
         let model = LEVELS.iter().find(|l| l.0 == s(&task["level"])).copied().unwrap_or(LEVELS[1]).1;
         let tools = self.tools_for(&self.task_kinds(task));
+        let instructions = self.instructions(task);
         let r = self.codex()?.request("thread/start", json!({
             "model": model, "cwd": self.cwd(task).to_string_lossy(), "approvalPolicy": "never", "sandbox": "danger-full-access",
-            "developerInstructions": self.instructions(task), "dynamicTools": tools.iter().map(tools::for_codex).collect::<Vec<_>>(),
+            "developerInstructions": instructions, "dynamicTools": tools.iter().map(tools::for_codex).collect::<Vec<_>>(),
         }), 60)?;
         let thread = s(&r["thread"]["id"]);
         if thread.is_empty() { return Err("Codex gave no thread".to_string()); }
         self.db.run("update agents set thread=?, tools=? where id=?", args!(thread, names(&tools), agent));
         self.loaded.lock().unwrap().insert(thread.clone());
+        self.log(agent, task["id"].as_i64().unwrap_or(0), 0, "session input", &instructions);
+        self.log(agent, task["id"].as_i64().unwrap_or(0), 0, "session configuration", &json!({"threadId":thread,"model":model,"tools":tools,"cwd":self.cwd(task),"approvalPolicy":"never","sandbox":"danger-full-access"}).to_string());
         Ok(thread)
     }
 
@@ -523,6 +538,7 @@ impl Hive {
         }
         let r = codex.request("turn/start", json!({ "threadId": thread, "effort": effort, "input": [{ "type": "text", "text": text }],
             "outputSchema": end_schema() }), 60)?;
+        self.log(agent, task["id"].as_i64().unwrap_or(0), 0, "model input", &text);
         let turn = s(&r["turn"]["id"]);
         if !turn.is_empty() { self.turns.lock().unwrap().insert(thread, turn); }
         self.db.run("update agents set status='working', updated=? where id=?", args!(now(), agent));
@@ -560,7 +576,7 @@ impl Hive {
         if let Some(turn) = turn {
             let steered = self.codex()?.request("turn/steer", json!({ "threadId": thread, "expectedTurnId": turn,
                 "input": [{ "type": "text", "text": text }] }), 30);
-            if steered.is_ok() { return Ok(()); }
+            if steered.is_ok() { self.log(agent, task_id, request, "model input", &text); return Ok(()); }
         }
         self.nudges.lock().unwrap().remove(&agent);
         self.start_turn(agent, &text)
@@ -836,6 +852,8 @@ impl Hive {
         let running = self.claudes.lock().unwrap().get(&agent).cloned();
         // One that just exited fails to take it; a new process resumes its session.
         if running.map(|c| c.say(text)).is_none_or(|r| r.is_err()) { self.spawn_claude(agent)?.say(text)?; }
+        let task = self.db.get("select task_id from agents where id=?", args!(agent)).unwrap_or(json!({}));
+        self.log(agent, task["task_id"].as_i64().unwrap_or(0), 0, "model input", text);
         self.db.run("update agents set status='working', updated=? where id=?", args!(now(), agent));
         Ok(())
     }
@@ -851,6 +869,7 @@ impl Hive {
         let mut args: Vec<String> = ["--model", model, "--effort", effort].map(String::from).into();
         args.extend(["--append-system-prompt".into(), format!("{}\n\n{CLAUDE_NOTES}", self.instructions(&task)), "--mcp-config".into(), mcp.to_string()]);
         let thread = s(&a["thread"]);
+        if thread.is_empty() { self.log(agent, task["id"].as_i64().unwrap_or(0), 0, "session input", &format!("{}\n\n{CLAUDE_NOTES}", self.instructions(&task))); }
         if !thread.is_empty() { args.extend(["--resume".into(), thread]); }
         self.mcp.lock().unwrap().insert(token.clone(), agent);
         let me = self.clone();
@@ -1164,6 +1183,20 @@ mod tests {
         assert_eq!(hive.db.all("select * from info", &[]).len(), 1);
         assert!(hive.tool_inner("info", &json!({"key":"", "value":""}), 3, 3).unwrap().as_str().unwrap().contains("updated@example.test"));
         assert!(hive.db.all("select * from rules", &[]).is_empty());
+    }
+
+    #[test]
+    fn inactive_task_messages_never_enter_current_thread() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let agent = hive.db.run("insert into agents(task_id,kind,thread,status) values(10,'codex','current-thread','working')", &[]);
+        hive.db.run("insert into tasks(id,agent_id,status) values(10,?,'working')",args!(agent));
+        hive.db.run("insert into tasks(id,agent_id,status) values(11,?,'done')",args!(agent));
+        hive.message_task(11,0,"Follow up on the old task","owner").unwrap();
+        assert_eq!(hive.db.get("select status from tasks where id=11", &[]).unwrap()["status"],"queued");
+        assert_eq!(hive.db.get("select task_id from agents where id=?",args!(agent)).unwrap()["task_id"],10);
+        assert!(hive.db.all("select * from log where who='model input'", &[]).is_empty());
+        assert!(hive.session_context(11).unwrap_err().contains("live session has ended"));
     }
 
     #[test]

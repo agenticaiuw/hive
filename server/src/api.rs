@@ -151,9 +151,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
             "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
-            where l.id>? and ((l.task_id=0 and l.request_id>0) or
-            (l.task_id>0 and l.who in ('agent','done','needs you','hive','image') and
-            (t.request_id>0 or exists (select 1 from log r where r.task_id=l.task_id and r.request_id>0))))
+            where l.id>? and l.agent_id=0 and (l.task_id=0 or l.who='hive')
             order by l.id limit 2000",
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
@@ -170,15 +168,14 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let st = if req.q("status").is_empty() { "done" } else { req.q("status") };
             Res::json(&json!(hive.db.all("select * from tasks where status=? order by updated desc limit 200", args!(st))))
         }
+        ("GET", ["api", "tasks", _, "context"]) => match hive.session_context(id(2)) {
+            Ok(v) => Res::json(&v), Err(e) => Res::err(409, &e),
+        },
         ("GET", ["api", "tasks", _]) => Res::json(&json!({
             "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
             "usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=(select agent_id from tasks where id=?) having count(*)>0", args!(id(2))),
-            "log": hive.db.all("select * from log where id>?2 and (task_id=?1
-                or (?3 and (agent_id=(select agent_id from tasks where id=?1)
-                    or task_id in (select id from tasks where agent_id=(select agent_id from tasks where id=?1))))
-                or (task_id=0 and request_id>0 and request_id in
-                    (select request_id from tasks where id=?1 or (?3 and agent_id=(select agent_id from tasks where id=?1)))))
-                order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0), req.q("session") == "1")),
+            "log": hive.db.all("select * from log where id>?2 and task_id=?1 and agent_id>0
+                order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
         })),
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
         ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), 0, &s(&b["text"]), "owner") {
@@ -394,18 +391,14 @@ mod tests {
         };
         assert_eq!(get("/api/state", 0)["tasks"].as_array().unwrap().len(), 4);
         let log = get("/api/orchestrator", 0);
-        assert_eq!(log.as_array().unwrap().len(), 6);
-        assert_eq!(log[2]["text"], "Routed");
-        assert_eq!(log[3]["text"], "Checking the repair");
-        assert_eq!(log[4]["text"], "Fixed and tested");
-        assert_eq!(log[4]["task_title"], "Session");
-        assert_eq!(log[5]["text"], "Needs your decision");
-        assert_eq!(get("/api/orchestrator", log[5]["id"].as_i64().unwrap()), json!([]));
-        assert_eq!(get("/api/orchestrator", log[3]["id"].as_i64().unwrap()).as_array().unwrap().len(), 2);
+        assert_eq!(log.as_array().unwrap().len(), 2);
+        assert_eq!(log[0]["text"], "Request");
+        assert_eq!(log[1]["text"], "Routed");
+        assert_eq!(get("/api/orchestrator", log[1]["id"].as_i64().unwrap()), json!([]));
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
-    fn agent_session_combines_tasks_without_mixing_agents() {
+    fn agent_chat_excludes_other_tasks_and_orchestrator_context() {
         let state = std::env::temp_dir().join(format!("hive-agent-chat-test-{}", std::process::id()));
         std::fs::create_dir_all(&state).unwrap();
         let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
@@ -427,11 +420,11 @@ mod tests {
             serde_json::from_slice::<Value>(&res.body).unwrap()["log"].clone()
         };
         let log = get(1, "1", 0);
-        assert_eq!(log.as_array().unwrap().len(), 4);
-        assert_eq!(log, get(2, "1", 0));
-        assert_eq!(get(1, "", 0).as_array().unwrap().len(), 2);
-        assert_eq!(get(1, "1", log[1]["id"].as_i64().unwrap()).as_array().unwrap().len(), 2);
-        assert_eq!(get(1, "1", log[3]["id"].as_i64().unwrap()), json!([]));
+        assert_eq!(log.as_array().unwrap().len(), 1);
+        assert_eq!(log[0]["text"], "First answer");
+        assert_eq!(get(2, "1", 0)[0]["text"], "Second answer");
+        assert_eq!(get(1, "", 0), log);
+        assert_eq!(get(1, "1", log[0]["id"].as_i64().unwrap()), json!([]));
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]

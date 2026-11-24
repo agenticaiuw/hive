@@ -328,29 +328,11 @@ function appendLogEntry(box, l) {
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 // Session identity stays stable as the same agent takes on more tasks.
 function agentSessions() {
-  const groups = new Map();
-  for (const t of state.tasks) {
-    const key = t.agent_id ? `agent-${t.agent_id}` : `task-${t.id}`;
-    const group = groups.get(key);
-    if (!group) groups.set(key, {...t});
-    else group.id = Math.min(group.id, t.id);
-  }
-  const priority = {needs: 0, working: 1, open: 1};
-  return [...groups.values()].map(group => {
-    const current = sessionTask(group.id);
-    return {...current, id: group.id};
-  }).sort((a, b) => (priority[a.status] ?? 2) - (priority[b.status] ?? 2));
+  const priority = {needs: 0, working: 1, open: 1, queued: 2};
+  return [...state.tasks].sort((a,b) => (priority[a.status] ?? 3) - (priority[b.status] ?? 3) || b.id-a.id);
 }
-function sessionTask(id) {
-  const task = state.tasks.find(t => t.id === id);
-  if (!task?.agent_id) return task;
-  const agent = state.agents.find(a => a.id === task.agent_id);
-  return state.tasks.find(t => t.id === agent?.task_id) || state.tasks.find(t => t.agent_id === task.agent_id);
-}
-function sessionId(id) {
-  const task = state.tasks.find(t => t.id === id);
-  return agentSessions().find(t => task?.agent_id ? t.agent_id === task.agent_id : t.id === id)?.id ?? id;
-}
+function sessionTask(id) { return state.tasks.find(t => t.id === id); }
+function sessionId(id) { return id; }
 function taskCard(t, click = true) {
   const unread = t.latest_message > (seen[t.agent_id || `task-${t.id}`] || 0) && chat !== t.id;
   return `<div role="button" tabindex="0" data-session="${t.id}" title="${esc(t.title)}" aria-label="${esc(t.title)} · ${esc(t.status)}${unread ? ' · unread' : ''}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
@@ -365,9 +347,20 @@ function markSeen() {
 }
 async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; markSeen(); chatAfter = 0; render(); }
 function chatPane() {
-  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
+  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="showContext(${chat})">Context</button><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log chat-log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
+}
+async function showContext(id) {
+  const box = $('#chatlog');
+  try {
+    const context = await api(`api/tasks/${id}/context`);
+    if (chat !== id) return;
+    let panel = box.querySelector('[data-context]');
+    if (!panel) { panel = document.createElement('details'); panel.dataset.context = '1'; box.prepend(panel); }
+    panel.open = true;
+    panel.innerHTML = `<summary>Provider session context</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(context,null,2))}</pre>`;
+  } catch (e) { alert(e.message || String(e)); }
 }
 let chatLoading = false, orchestratorLoading = false, orchestratorAfter = 0;
 async function loadChat() {
