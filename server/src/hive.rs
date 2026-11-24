@@ -184,7 +184,7 @@ impl Hive {
             std::thread::spawn(move || me.start_agent(id));
         }
         // Claimed tasks wait while their agent works on its current task.
-        for a in self.db.all("select id from agents where kind!='claude' and status in ('idle','done') and exists (select 1 from tasks where agent_id=agents.id and status='queued')", &[]) {
+        for a in self.db.all("select id from agents where kind!='claude' and status in ('idle','done') and exists (select 1 from tasks where id=agents.task_id and status='done') and exists (select 1 from tasks where agent_id=agents.id and status='queued')", &[]) {
             let agent = a["id"].as_i64().unwrap_or(0);
             if let Some(t) = self.db.get("select id from tasks where agent_id=? and status='queued' order by id limit 1", args!(agent)) {
                 self.start_agent(t["id"].as_i64().unwrap_or(0));
@@ -426,6 +426,13 @@ impl Hive {
         Ok(())
     }
 
+    /// Task completion and turn completion are both required before reusing a session.
+    fn ready_for_task(&self, agent: i64) -> bool {
+        let Some(a) = self.db.get("select a.thread from agents a join tasks t on t.id=a.task_id where a.id=? and a.status in ('idle','done') and t.status='done'", args!(agent)) else { return false };
+        !self.turns.lock().unwrap().contains_key(&s(&a["thread"]))
+            && !self.claudes.lock().unwrap().get(&agent).is_some_and(|c| c.busy.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     pub fn start_agent(self: &Arc<Self>, task_id: i64) {
         let _assignment = self.assignments.lock().unwrap();
         let Some(task) = self.db.get("select * from tasks where id=?", args!(task_id)) else { return };
@@ -441,7 +448,7 @@ impl Hive {
         });
         let agent = if let Some(agent) = owner {
             self.db.run("update tasks set agent_id=?, status='queued' where id=?", args!(agent, task_id));
-            if self.db.get("select id from agents where id=? and status='working'", args!(agent)).is_some() { self.bump(); return; }
+            if !self.ready_for_task(agent) { self.bump(); return; }
             if let Some(c) = self.claudes.lock().unwrap().remove(&agent) { c.close(); }
             self.db.run("update agents set task_id=?, thread=null, tools='', status='working', updated=? where id=?", args!(task_id, now(), agent));
             agent
@@ -1140,6 +1147,7 @@ mod tests {
     fn claims_queue_without_displacing_current_work() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
             Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into tasks(id, status) values(10, 'working')", &[]);
         let agent = hive.db.run("insert into agents(task_id, kind, status) values(10, 'codex', 'working')", &[]);
         let other = hive.db.run("insert into agents(kind) values('codex')", &[]);
         let task = hive.add_task(0, &json!({"title":"Next", "quote":"next"}));
@@ -1161,6 +1169,36 @@ mod tests {
         assert_eq!(a["task_id"], next);
         assert_eq!(hive.db.get("select count(*) as n from agents", &[]).unwrap()["n"], 2);
         assert_eq!(hive.db.get("select agent_id from tasks where id=?", args!(task)).unwrap()["agent_id"], agent);
+    }
+
+    #[test]
+    fn handoff_requires_completed_task_and_ended_turn() {
+        for kind in ["codex", CLAUDE_AGENT] {
+            let engine = if kind == "codex" { Engine::Codex { cmd: String::new(), env: vec![] } }
+                else { Engine::Claude { cmd: String::new(), env: vec![] } };
+            let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+                engine, String::new(), String::new());
+            let current = hive.add_task(0, &json!({"title":"Current", "project":"handoff"}));
+            let agent = hive.db.run("insert into agents(task_id, kind, status, thread) values(?, ?, 'idle', 'thread')", args!(current, kind));
+            hive.db.run("update tasks set agent_id=? where id=?", args!(agent, current));
+            let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
+            for status in ["working", "needs", "dropped", "open"] {
+                hive.db.run("update tasks set status=? where id=?", args!(status, current));
+                hive.start_agent(next);
+                assert!(!hive.ready_for_task(agent));
+                assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], current);
+                assert_eq!(hive.db.get("select status from tasks where id=?", args!(next)).unwrap()["status"], "queued");
+                assert!(hive.db.all("select * from log where who='session input'", &[]).is_empty());
+            }
+            hive.db.run("update tasks set status='done' where id=?", args!(current));
+            hive.turns.lock().unwrap().insert("thread".into(), "turn".into());
+            hive.start_agent(next);
+            assert!(!hive.ready_for_task(agent));
+            hive.turns.lock().unwrap().clear();
+            assert!(hive.ready_for_task(agent));
+            hive.start_agent(next);
+            assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], next);
+        }
     }
 
     #[test]
