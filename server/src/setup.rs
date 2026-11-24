@@ -1,5 +1,5 @@
 //! First-run setup, the same steps everywhere: choose the AI Hive's agents think with (ChatGPT's Codex or Claude Code), get
-//! it, sign in to it, then start Hive. A window shows them on a Mac or PC (`hive-server ui`, the page in setup.html); a
+//! it, sign in to it, start Hive, and sign it in to the owner's Tailscale account. A window shows them on a Mac or PC (`hive-server ui`, the page in setup.html); a
 //! terminal on a computer with no screen, like a VM. Codex lives in <state>/bin with its login in <state>/codex; Claude Code
 //! in <state>/bin with its login in <state>/claude; <state>/engine says which one this Hive uses.
 use serde_json::{json, Value};
@@ -92,22 +92,12 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
     let own = state.join("engine-bin").exists();
     if engine == "claude" { if !own { get_claude(state, ui)?; } sign_in_claude(state, ui)?; }
     else { if !own { get_codex(state, ui)?; } sign_in_codex(state, ui)?; }
-    // At home, the owner's devices reach Hive through their own Tailscale network; a cloud VM has a public address.
-    let home = crate::tailnet::on(state) || (!state.join("reach").exists() && !crate::tailnet::cloud());
-    if home {
-        crate::tailnet::get(state, &download_step(ui, "Tailscale"))?;
-        std::fs::write(state.join("reach"), "tailnet").map_err(|e| e.to_string())?;
-    }
+    // The owner's devices reach Hive through their own Tailscale network, wherever this computer is.
+    crate::tailnet::get(state, &download_step(ui, "Tailscale"))?;
     ui.show(json!({ "step": "starting" }));
-    std::fs::remove_file(state.join("tls").join("why")).ok();
     install(state)?;
-    if home { connect_devices(state, ui)?; return Ok(shortcut(state)) }
-    for _ in 0..360 {
-        if crate::address(state).is_some() { return Ok(shortcut(state)) }
-        if let Some(why) = crate::why(state) { return Err(why); }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    Err("Hive Server is running, but Let's Encrypt hasn't given it a secure address yet. Open Hive Server again in a few minutes.".into())
+    connect_devices(state, ui)?;
+    Ok(shortcut())
 }
 
 /// Waits while the owner signs in to Tailscale, showing them the sign-in, until Hive has its tailnet address.
@@ -398,11 +388,11 @@ pub fn window(state: &Path, install: &'static (dyn Fn(&Path) -> Result<(), Strin
                 #[cfg(target_os = "macos")]
                 { let plist = std::env::var("HOME").unwrap_or_default() + "/Library/LaunchAgents/app.hive.server.plist";
                   Command::new("launchctl").args(["load", "-w", &plist]).output().ok(); }
-                Ok(dashboard(&state))
+                Ok(dashboard())
             } else { run(&state, &*ui, install) };
             ui.show(match done {
                 Ok(link) => json!({ "step": "done", "dashboard": link, "os": std::env::consts::OS,
-                    "devices": crate::tailnet::on(&state).then(|| crate::address(&state)).flatten() }),
+                    "devices": crate::tailnet::address(&state) }),
                 Err(e) => json!({ "step": "error", "message": e }),
             });
         }
@@ -453,21 +443,18 @@ pub fn window(state: &Path, install: &'static (dyn Fn(&Path) -> Result<(), Strin
 fn ready(state: &Path) -> bool {
     let e = engine(state);
     let signed = engine_bin(state, &e).exists() && if e == "claude" { claude_signed_in(state) } else { codex_signed_in(state) };
-    signed && state.join("engine").exists() && crate::address(state).is_some()
+    signed && state.join("engine").exists() && crate::tailnet::address(state).is_some()
 }
 
-/// The dashboard's link on the computer Hive runs on. A Hive on a tailnet is opened here at its own local address, since this
-/// computer's browser isn't on the tailnet (only Hive's apps are); anywhere else, at its public address.
-pub fn dashboard(state: &Path) -> String {
-    let at = if crate::tailnet::on(state) {
-        format!("http://{}", std::env::var("HIVE_ADDR").unwrap_or_else(|_| "127.0.0.1:8790".into()))
-    } else { crate::address(state).unwrap_or_default() };
-    format!("{at}/#key={}", crate::owner_key(state))
+/// The dashboard's link on the computer Hive runs on: its local address, since this computer's browser isn't on the tailnet
+/// (only Hive's apps are). It signs in by itself here (api.rs, `owners`).
+pub fn dashboard() -> String {
+    format!("http://{}/", std::env::var("HIVE_ADDR").unwrap_or_else(|_| "127.0.0.1:8790".into()))
 }
 
 /// The dashboard's link, which a PC also finds again under Hive in the Start menu.
-fn shortcut(state: &Path) -> String {
-    let link = dashboard(state);
+fn shortcut() -> String {
+    let link = dashboard();
     #[cfg(windows)]
     if let Ok(appdata) = std::env::var("APPDATA") {
         let programs = Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs");

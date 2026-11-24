@@ -4,7 +4,7 @@
 mod link;
 mod phone;
 
-pub use link::{accept, device, Conn};
+pub use link::{accept, device};
 pub mod bootstrap;
 
 use hive_protocol::{n, s, tool};
@@ -28,18 +28,9 @@ fn tools() -> Vec<Value> {
     t
 }
 
-/// Runs the phone's node, connected to this computer's Hive at `server` (paired with the owner key the first time).
-pub fn start(state: PathBuf, server: String, owner_key: String) {
+/// Runs the phone's node, connected to this computer's Hive with the token the server gave it (`conf`).
+pub fn start(state: PathBuf, conf: hive_protocol::Conf) {
     std::thread::spawn(move || {
-        let conf = loop {
-            match hive_protocol::load("phone").filter(|c| c.server == server) {
-                Some(c) => break c,
-                None => match hive_protocol::pair("phone", &server, &owner_key, "phone", "iPhone") {
-                    Ok(c) => break c,
-                    Err(_) => std::thread::sleep(std::time::Duration::from_secs(2)),
-                },
-            }
-        };
         let phone = phone::Phone::new(state);
         hive_protocol::run(conf, hive_protocol::Node { kind: "phone", name: "iPhone".into(), package: "hive-server", tools: tools(),
             notes: "The owner's iPhone: phone_* tools. One agent at a time touches it.".into() }, move |t, a| phone.call(t, a))

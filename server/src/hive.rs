@@ -19,7 +19,6 @@ pub struct Hive {
     /// On the VM, Hive's checkout, which Hive changes itself from; None on a home computer.
     pub repo: Option<PathBuf>,
     pub engine: Engine,
-    pub owner_key: String,
     pub version: String,
     /// Where this Hive's API answers on this computer.
     pub local: String,
@@ -78,9 +77,9 @@ pub fn list(v: &Value) -> Vec<String> {
 }
 
 impl Hive {
-    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, engine: Engine, owner_key: String, version: String, local: String) -> Arc<Hive> {
+    pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, engine: Engine, version: String, local: String) -> Arc<Hive> {
         Arc::new(Hive {
-            db, state, repo, engine, owner_key, version, local,
+            db, state, repo, engine, version, local,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), rechecked: Mutex::new(HashSet::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
@@ -91,7 +90,13 @@ impl Hive {
     /// Runs the iPhone's node here once the owner has connected one (phone/).
     pub fn start_phone(&self) {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| hive_phone::start(self.state.clone(), self.local.clone(), self.owner_key.clone()));
+        ONCE.call_once(|| {
+            // Its token is made here, a new one each start: the node runs in this process.
+            let token = crate::api::random(24);
+            self.db.run("delete from tokens where node='phone:iPhone'", &[]);
+            self.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(crate::api::hash(&token), "phone:iPhone", now()));
+            hive_phone::start(self.state.clone(), hive_protocol::Conf { server: self.local.clone(), token, id: "phone-iphone".into() })
+        });
     }
 
     // ---- change notification: one counter, everyone who waits re-checks when it moves ----

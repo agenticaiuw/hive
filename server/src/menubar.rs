@@ -5,10 +5,7 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSVariableStatusItemLength, NSWorkspace};
 use objc2_foundation::{NSData, NSSize, NSString, NSURL};
-use std::path::PathBuf;
-use std::sync::OnceLock;
 
-static STATE: OnceLock<PathBuf> = OnceLock::new();
 unsafe extern "C" { fn getuid() -> u32; }
 
 define_class!(
@@ -20,7 +17,7 @@ define_class!(
     impl Menu {
         #[unsafe(method(dashboard:))]
         fn dashboard(&self, _from: Option<&AnyObject>) {
-            let link = crate::setup::dashboard(STATE.get().expect("state"));
+            let link = crate::setup::dashboard();
             if let Some(url) = NSURL::URLWithString(&NSString::from_str(&link)) { NSWorkspace::sharedWorkspace().openURL(&url); }
         }
 
@@ -34,8 +31,7 @@ define_class!(
 );
 
 /// Runs the menu bar on this (the main) thread; never returns.
-pub fn run(state: PathBuf) -> ! {
-    STATE.set(state).ok();
+pub fn run() -> ! {
     let mtm = MainThreadMarker::new().expect("the menu bar runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);

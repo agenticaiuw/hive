@@ -44,15 +44,11 @@ img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
 <body>
 <div id="login" class="card" hidden>
   <b>Hive</b>
-  <p class="muted">Sign in with your Hive Server's key, or open a pairing link from a signed-in device (Pair a device).</p>
-  <input id="secret" type="password" placeholder="Key or pairing code">
-  <p class="row"><button onclick="login()">Sign in</button> <span id="loginerr" class="muted"></span></p>
+  <p id="loginerr" class="muted"></p>
 </div>
 <div id="app" hidden>
 <header>
   <b>Hive</b><span id="nodes" class="row muted"></span>
-  <span style="flex:1"></span>
-  <button class="plain" onclick="pairCode()">Pair a device</button><span id="code" class="muted"></span>
 </header>
 <nav id="tabs"></nav>
 <main>
@@ -72,29 +68,16 @@ async function api(path, opts = {}) {
   if (r.status === 401) { $('#app').hidden = true; $('#login').hidden = false; throw new Error('signed out'); }
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text();
 }
+// The server signs in the owner's own devices (through Tailscale) and its own computer by themselves.
 async function login() {
-  const r = await fetch('api/login', { method: 'POST', body: JSON.stringify({ secret: $('#secret').value }) });
-  if (r.ok) { $('#login').hidden = true; start(); } else $('#loginerr').textContent = (await r.json()).error;
+  const r = await fetch('api/login', { method: 'POST' });
+  if (!r.ok) $('#loginerr').textContent = (await r.json()).error;
+  return r.ok;
 }
 async function forget(id, name) {
-  if (!confirm(`Forget ${name}? It stops working with Hive until it's paired again.`)) return;
+  if (!confirm(`Forget ${name}? It stops working with Hive until it joins again.`)) return;
   await api(`api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
   await refresh();
-}
-// One link pairs anything: opened on a phone or computer it signs in here; pasted into the Hive app or extension it connects that.
-async function pairCode() {
-  const r = await api('api/pair/code', { method: 'POST' });
-  const link = `${r.address || location.origin}/#pair=${r.code}`;
-  navigator.clipboard?.writeText(link).catch(() => {});
-  $('#code').innerHTML = `<input readonly value="${esc(link)}" onclick="this.select()" style="width:auto"> copied · on this computer just open the Hive app; elsewhere open the link there or paste it into the extension (10 min)`;
-}
-// Hive Phone picks the pairing up from the iPhone's clipboard: copy it on the iPhone, or on a Mac with Universal Clipboard.
-async function pairPhone() {
-  const r = await api('api/phone/pair', { method: 'POST' });
-  if (r.pairing) navigator.clipboard?.writeText(r.pairing).catch(() => {});
-  phonePairing = r.pairing || '';
-  phoneNote = r.pairing ? 'Copied (or copy it from the box). Open Hive Phone on the iPhone: it connects from the clipboard; on a Mac, Universal Clipboard carries it over.' : r.error;
-  render();
 }
 async function savePin() {
   const r = await api('api/phone/passcode', { method: 'POST', body: { passcode: $('#pin').value } });
@@ -109,7 +92,7 @@ async function send() {
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 
 const TABS = ['Agents', 'Tasks', 'Past', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
-let tab = location.hash.slice(1) || 'Agents', phoneNote = '', phonePairing = '', state = null, chat = null, chatAfter = 0, timer = null;
+let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null;
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 addEventListener('hashchange', () => { tab = location.hash.slice(1); chat = null; tabs(); render(); });
 
@@ -170,8 +153,8 @@ async function render() {
   } else if (tab === 'Nodes') {
     v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
     const phone = await api('api/phone');
-    v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span><button class="plain" onclick="pairPhone()">Connect an iPhone</button></div>
-      ${phonePairing ? `<input readonly value="${esc(phonePairing)}" onclick="this.select()">` : ''}<p class="muted">${esc(phoneNote)}</p><div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div></div>`;
+    v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span></div>
+      <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div></div>`;
     v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
     v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="api/vm/screen?t=${Date.now()}">`;
@@ -200,17 +183,11 @@ async function refresh() {
   else loadChat();
 }
 async function start() {
-  const link = location.hash.match(/^#(?:key|pair)=(.+)$/);
-  if (link) {
-    history.replaceState(null, '', location.pathname); tab = 'Agents';
-    await fetch('api/login', { method: 'POST', body: JSON.stringify({ secret: decodeURIComponent(link[1]) }) });
-  }
-  try { await api('api/me'); } catch { return; }
+  try { await api('api/me'); } catch { if (!await login()) return; $('#login').hidden = true; }
   $('#app').hidden = false; tabs(); await refresh(); render();
   clearInterval(timer);
   timer = setInterval(() => { refresh().catch(() => {}); const s = $('#shot'); if (s) s.src = `api/vm/screen?t=${Date.now()}`; }, 2000);
 }
-$('#secret').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 start();
 </script>
 </body>

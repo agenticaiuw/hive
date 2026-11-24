@@ -2,13 +2,13 @@
 
 The one agreement between Hive's server and everything that connects to it. Every part of Hive meets the others only here, so a change to this file is a change for every team: add, never alter (new optional fields and new routes are fine; changing what an existing one means is not), and do it in a pull request of its own that the teams using it review. Nodes update themselves from the server, but an old node must keep working until it does.
 
-Every call is HTTPS to the server with `Authorization: Bearer <token>`. JSON in, JSON out; errors are `{error}` with a 4xx or 5xx status.
+Every call is HTTP to the server across the owner's tailnet (WireGuard encrypts it) with `Authorization: Bearer <token>`. JSON in, JSON out; errors are `{error}` with a 4xx or 5xx status.
 
 ## Nodes
 
 A node is anything agents can use: a Mac or Windows computer, the iPhone, a browser, a wearable. It needs four calls, and `src/lib.rs` makes them for nodes written in Rust.
 
-1. **Pair once.** `POST /api/pair {code, kind, name}` → `{token}`. The code comes from the dashboard's "Pair a device" and lasts 10 minutes. `kind` is the node's type (`mac`, `windows`, `phone`, `browser`, …) and prefixes its tool names.
+1. **Join once.** `POST /api/pair/tailnet {kind, name}` → `{token}`, from a device signed in to the same Tailscale account as the server (the iPhone: `POST /api/phone/tailnet` → `{url, token}`). `kind` is the node's type (`mac`, `windows`, `phone`, `browser`, …) and prefixes its tool names.
 2. **Say hello every minute.** `POST /api/node/hello {id, kind, name, version, notes, tools}` → `{version}`, the last change to the devices' code (a node updates itself to GitHub's build when theirs differs).
    - `notes`: a sentence or two agents should know about this node.
    - `tools`: `[{name, description, inputSchema, lock?, timeout?}]`, everything agents can do with it. Tools sharing a `lock` (say `"input"`) go to one agent at a time; the rest run in parallel. `timeout` is in seconds (default 120).
@@ -36,4 +36,3 @@ What the dashboard, the extension's pages and any node can call. Every request f
 | `GET /api/log`, `GET /api/db`, `GET /api/db/:table`, `GET /api/tools` | Everything Hive has recorded, and every tool agents can use. |
 | `GET /api/vm/screen` | A screenshot of the VM's screen. |
 | `GET` and `PUT /api/sites/:name/data`, `GET /sites/:name/…` | Pages Hive builds (dashboards, cross-site views) and their data. |
-| `POST /api/pair/code` | A new pairing code. |

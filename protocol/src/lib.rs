@@ -1,4 +1,4 @@
-//! The node side of the protocol (protocol/README.md), for nodes written in Rust: pair, say hello with your tools,
+//! The node side of the protocol (protocol/README.md), for nodes written in Rust: say hello with your tools,
 //! take calls, answer them, and update yourself to GitHub's build when the server's devices' code changes.
 pub mod b64;
 
@@ -46,28 +46,6 @@ pub fn load(name: &str) -> Option<Conf> {
         token: v["token"].as_str()?.into(),
         id: v["id"].as_str()?.into(),
     })
-}
-
-/// Trade a pairing code for this device's token and save it (readable only by this user).
-pub fn pair(name: &str, server: &str, code: &str, kind: &str, label: &str) -> Result<Conf, String> {
-    let server = server.trim().trim_end_matches('/');
-    let server = if server.contains("://") { server.to_string() } else { format!("https://{server}") };
-    let r = ureq::post(&format!("{server}/api/pair")).set("content-type", "application/json")
-        .send_string(&json!({ "code": code.trim(), "kind": kind, "name": label }).to_string());
-    let body = match r {
-        Ok(r) => r.into_string().unwrap_or_default(),
-        Err(ureq::Error::Status(_, r)) => r.into_string().unwrap_or_default(),
-        Err(e) => return Err(e.to_string()),
-    };
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    let token = v["token"].as_str().ok_or_else(|| v["error"].as_str().unwrap_or("pairing failed").to_string())?;
-    let id = format!("{kind}-{}", label.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>());
-    let path = conf_path(name);
-    std::fs::create_dir_all(path.parent().unwrap()).ok();
-    std::fs::write(&path, json!({ "server": server, "token": token, "id": id }).to_string()).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok(); }
-    Ok(Conf { server, token: token.into(), id })
 }
 
 pub fn call(c: &Conf, method: &str, path: &str, body: Option<&Value>, secs: u64) -> Result<(u16, Value), String> {

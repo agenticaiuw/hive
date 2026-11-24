@@ -1,18 +1,11 @@
-//! How a Hive on a laptop at home is reached: through its owner's own Tailscale network, built into Hive (tailnet/,
-//! `hive-tailnet`), not the public internet, which a home router or provider keeps out. Only the owner's devices can reach it,
-//! end-to-end encrypted, at https://hive.<tailnet>.ts.net with Tailscale's certificate. A cloud VM keeps its public address
-//! (tls.rs). Setup chooses (`<state>/reach` says "tailnet"); the helper's latest word is kept in `<state>/tailnet.json`.
+//! How every Hive Server is reached, a laptop at home or a cloud VM alike: through its owner's own Tailscale network, built
+//! into Hive (tailnet/, `hive-tailnet`), not the public internet. Only the owner's devices can reach it, end-to-end encrypted
+//! by WireGuard, at http://hive.<tailnet>.ts.net. The helper's latest word is kept in `<state>/tailnet.json`.
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-
-/// Whether this Hive is reached through Tailscale.
-pub fn on(state: &Path) -> bool { std::fs::read_to_string(state.join("reach")).is_ok_and(|r| r.trim() == "tailnet") }
-
-/// Every big cloud answers on this address inside its VMs; a home network doesn't.
-pub fn cloud() -> bool { std::net::TcpStream::connect_timeout(&"169.254.169.254:80".parse().unwrap(), Duration::from_secs(1)).is_ok() }
 
 /// The helper's latest word: {"login": url}, {"https": "off", "admin": url}, {"address": url} or {"error": text}.
 pub fn status(state: &Path) -> Value {
@@ -35,6 +28,7 @@ pub fn get(state: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf,
 }
 
 /// Keeps the helper serving this Hive (listening on `addr` on this computer) on the tailnet, starting it again if it stops.
+/// Until the owner signs in, its sign-in link is also logged, for a Hive started by its service without setup.
 pub fn start(state: PathBuf, addr: String) {
     std::thread::spawn(move || loop {
         let exe = crate::setup::exe(&state.join("bin"), "hive-tailnet");
@@ -56,7 +50,7 @@ pub fn start(state: PathBuf, addr: String) {
                 let _keep = child.stdin.take();
                 for line in BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok) {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if let Some(a) = v["address"].as_str() { std::fs::write(state.join("host"), a.trim_start_matches("https://")).ok(); }
+                        if let Some(u) = v["login"].as_str() { eprintln!("Sign in to Tailscale to reach this Hive Server: {u}"); }
                         note(&state, &v);
                     }
                 }
@@ -77,11 +71,9 @@ mod tests {
     fn reads_the_helpers_word() {
         let d = std::env::temp_dir().join(format!("hive-tailnet-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
-        assert!(!on(&d) && address(&d).is_none());
-        std::fs::write(d.join("reach"), "tailnet\n").unwrap();
-        note(&d, &json!({ "address": "https://hive.tail1234.ts.net" }));
-        assert!(on(&d));
-        assert_eq!(address(&d).as_deref(), Some("https://hive.tail1234.ts.net"));
+        assert!(address(&d).is_none());
+        note(&d, &json!({ "address": "http://hive.tail1234.ts.net" }));
+        assert_eq!(address(&d).as_deref(), Some("http://hive.tail1234.ts.net"));
         note(&d, &json!({ "error": "no network" }));
         assert!(why(&d).unwrap().contains("no network"));
         std::fs::remove_dir_all(&d).ok();

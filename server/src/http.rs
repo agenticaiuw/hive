@@ -21,7 +21,7 @@ pub struct Res {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     /// For a 101: what takes the connection over once the answer is sent.
-    pub upgrade: Option<Box<dyn FnOnce(Box<dyn hive_phone::Conn>, TcpStream) + Send>>,
+    pub upgrade: Option<Box<dyn FnOnce(TcpStream) + Send>>,
 }
 
 impl Req {
@@ -76,7 +76,7 @@ pub fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
+fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
     let mut r = BufReader::new(stream);
     let mut line = String::new();
     r.read_line(&mut line).ok()?;
@@ -107,12 +107,12 @@ pub fn parse(stream: &mut impl Read, max_body: usize) -> Option<Req> {
 
 fn reason(status: u16) -> &'static str {
     match status {
-        200 => "OK", 202 => "Accepted", 204 => "No Content", 301 => "Moved Permanently", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
+        200 => "OK", 202 => "Accepted", 204 => "No Content", 302 => "Found", 400 => "Bad Request", 401 => "Unauthorized",
         404 => "Not Found", 405 => "Method Not Allowed", 409 => "Conflict", 413 => "Too Large", 500 => "Internal Server Error", _ => "Status",
     }
 }
 
-pub fn write(stream: &mut impl Write, res: &Res) -> std::io::Result<()> {
+fn write(stream: &mut impl Write, res: &Res) -> std::io::Result<()> {
     let mut head = if res.status == 101 { "HTTP/1.1 101 Switching Protocols\r\n".to_string() } else { format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
         res.status, reason(res.status), res.ctype, res.body.len()) };
     for (k, v) in &res.headers { head.push_str(&format!("{k}: {v}\r\n")); }
@@ -127,19 +127,17 @@ pub fn serve(addr: &str, handler: Arc<dyn Fn(Req) -> Res + Send + Sync>) -> std:
     for stream in listener.incoming().flatten() {
         let handler = handler.clone();
         stream.set_read_timeout(Some(Duration::from_secs(60))).ok();
-        let Ok(socket) = stream.try_clone() else { continue };
-        std::thread::spawn(move || handle(stream, socket, &*handler));
+        std::thread::spawn(move || handle(stream, &*handler));
     }
     Ok(())
 }
 
-/// `socket` is the connection's TCP socket (for its timeouts), under `stream` (which may be TLS).
-pub fn handle(mut stream: impl hive_phone::Conn + 'static, socket: TcpStream, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
+fn handle(mut stream: TcpStream, handler: &(dyn Fn(Req) -> Res + Send + Sync)) {
     let mut res = match parse(&mut stream, 512 << 20) {
-        Some(mut req) => { req.peer = socket.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default(); handler(req) }
+        Some(mut req) => { req.peer = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default(); handler(req) }
         None => Res::err(400, "bad request"),
     };
-    if write(&mut stream, &res).is_ok() { if let Some(up) = res.upgrade.take() { up(Box::new(stream), socket) } }
+    if write(&mut stream, &res).is_ok() { if let Some(up) = res.upgrade.take() { up(stream) } }
 }
 
 #[cfg(test)]

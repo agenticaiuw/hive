@@ -5,7 +5,7 @@ use crate::hive::Hive;
 use crate::http::{Req, Res};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const DASHBOARD: &str = include_str!("../../dashboard/index.html");
 const ICON: &[u8] = include_bytes!("../../dashboard/icon.png");
@@ -26,40 +26,34 @@ fn token(req: &Req) -> String {
 }
 
 fn valid(hive: &Hive, t: &str) -> bool {
-    !t.is_empty() && (t == hive.owner_key || hive.db.get("select 1 from tokens where hash=? and node!='code'", args!(hash(t))).is_some())
+    !t.is_empty() && hive.db.get("select 1 from tokens where hash=?", args!(hash(t))).is_some()
 }
 fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
 
-/// Wrong keys and codes in the last 10 minutes, with the address each came from.
-static MISSES: Mutex<Vec<(i64, String)>> = Mutex::new(Vec::new());
+/// Whether a request is the owner's own: from one of their devices on their Tailscale account (the tailnet helper, on this
+/// computer, says so and drops any such header a device sends), or from a browser on this computer itself.
+fn owners(req: &Req) -> bool {
+    let local = req.peer.starts_with("127.0.0.1");
+    let tailnet = req.headers.get("x-hive-tailnet-owner").is_some_and(|v| v == "1");
+    // Through the helper a request is forwarded; one made here names this computer (not a name that only points here).
+    let here = !req.headers.contains_key("x-forwarded-for")
+        && req.headers.get("host").is_some_and(|h| h.starts_with("127.0.0.1:") || h.starts_with("localhost:"));
+    local && (tailnet || here)
+}
 
-/// A new device token for a pairing code (or the whole pairing link) or the owner key. After 10 wrong tries from one
-/// address, or 100 from all, codes stop working for 10 minutes, so an 8-digit code can't be guessed; the owner key still works.
-fn pair(hive: &Hive, secret: &str, node: &str, peer: &str) -> Result<String, &'static str> {
-    let secret = secret.trim().rsplit("#pair=").next().unwrap_or_default();
-    if secret.is_empty() || secret != hive.owner_key {
-        let mut misses = MISSES.lock().unwrap();
-        misses.retain(|(at, _)| *at > now() - 600_000);
-        if misses.len() >= 100 || misses.iter().filter(|(_, p)| p == peer).count() >= 10 { return Err("Too many wrong codes. Try again in 10 minutes."); }
-        let code = hash(&format!("code:{secret}"));
-        if secret.len() < 6 || hive.db.get("select 1 from tokens where hash=? and node='code' and at > ?", args!(code.clone(), now() - 600_000)).is_none() {
-            misses.push((now(), peer.to_string()));
-            return Err("That key or code isn't right, or it expired (codes last 10 minutes).");
-        }
-        hive.db.run("delete from tokens where hash=?", args!(code));
-    }
+fn new_token(hive: &Hive, node: &str) -> String {
     let t = random(24);
     hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), node, now()));
-    Ok(t)
+    t
 }
 
 /// Hive Phone's link to this Hive Server: its WebSocket address and the phone's key (made once).
 fn phone_pairing(hive: &Arc<Hive>) -> Result<(String, String), Res> {
-    let address = crate::tls::address(&hive.state).ok_or_else(|| Res::err(409, "Hive Server has no address yet; try again in a minute."))?;
+    let address = crate::tailnet::address(&hive.state).ok_or_else(|| Res::err(409, "Hive Server has no address yet; try again in a minute."))?;
     let file = hive.state.join("phone-token");
     let key = std::fs::read_to_string(&file).ok().filter(|k| k.len() >= 40).unwrap_or_else(|| { let k = random(32); crate::private(&file, &k); k });
     hive.start_phone();
-    Ok((format!("{}/phone/device", address.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1)), key))
+    Ok((format!("{}/phone/device", address.replacen("http://", "ws://", 1)), key))
 }
 
 fn developer_identity(hive: &Hive, device: &str) -> Res {
@@ -70,13 +64,6 @@ fn developer_identity(hive: &Hive, device: &str) -> Res {
     }
 }
 
-pub fn new_code(db: &crate::db::Db) -> String {
-    let n = u32::from_str_radix(&random(4)[..7], 16).unwrap_or(0) % 100_000_000;
-    let code = format!("{n:08}");
-    db.run("insert into tokens(hash, node, at) values(?, 'code', ?)", args!(hash(&format!("code:{code}")), now()));
-    code
-}
-
 pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
     let parts: Vec<&str> = req.path.trim_matches('/').split('/').collect();
     let m = req.method.as_str();
@@ -85,39 +72,23 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET", ["icon.png"]) => return Res::new(200, "image/png", ICON),
         ("GET", ["manifest.json"]) => return Res::new(200, "application/manifest+json", MANIFEST),
         ("GET", ["health"]) => return Res::json(&json!({ "ok": true, "version": hive.version })),
+        // The dashboard signs in the owner's own devices and this computer by itself. Hive is plain HTTP (WireGuard encrypts
+        // it inside the tailnet), so the cookie isn't Secure.
         ("POST", ["api", "login"]) => {
-            // A device's own token (the desktop app opening the dashboard), the owner key, or a pairing code.
-            let secret = s(&req.json()["secret"]);
-            let phone = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
-            let t = if secret != hive.owner_key && valid(hive, &secret) { Ok(secret) }
-                // Hive Phone's own key signs in its dashboard window, with a dashboard token of its own.
-                else if !phone.trim().is_empty() && secret == phone.trim() {
-                    let t = random(24);
-                    hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), "dashboard:phone", now()));
-                    Ok(t)
-                }
-                else { pair(hive, &secret, "dashboard", &req.peer) };
-            return match t {
-                // Inside the owner's tailnet Hive is plain HTTP (WireGuard encrypts it), where a Secure cookie wouldn't be kept.
-                Ok(t) => {
-                    // So is the dashboard opened on the Hive computer itself, at its local address.
-                    let local = req.headers.get("host").is_some_and(|h| h.starts_with("127.0.0.1") || h.starts_with("localhost"));
-                    let secure = if local || req.headers.get("x-forwarded-proto").is_some_and(|p| p == "http") { "" } else { " Secure;" };
-                    Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly;{secure} SameSite=Lax; Max-Age=31536000"))
-                }
-                Err(e) => Res::err(401, e),
-            };
+            if !owners(&req) { return Res::err(401, "Open your dashboard on a device signed in to your Tailscale account, or on your Hive Server itself."); }
+            let t = new_token(hive, "dashboard");
+            return Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"));
         }
         // A phone can restore its Apple pairing identity using its own Hive key.
         ("GET", ["phone", "bootstrap", device]) => {
             let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
-            if key.is_empty() || token(&req) != key { return Res::err(401, "Connect the iPhone again from the dashboard."); }
+            if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
             return developer_identity(hive, device);
         }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
         ("GET", ["phone", "device"]) => {
             let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
-            if key.is_empty() || token(&req) != key { return Res::err(401, "Connect the iPhone again from the dashboard."); }
+            if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
             let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
             let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
             res.upgrade = Some(Box::new(hive_phone::device));
@@ -131,23 +102,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         },
         // Hive opens no event streams, which MCP asks a server to say this way.
         ("GET" | "DELETE", ["mcp", _]) => return Res::new(405, "application/json", "").header("Allow", "POST"),
-        // The owner's own devices join through Tailscale with no pairing link: the tailnet helper (tailnet/) says a request comes
-        // from a device signed in to the same Tailscale account as this Hive Server, and only it can (it's on this computer).
+        // The owner's own devices join through Tailscale: signed in to the same Tailscale account as this Hive Server.
         ("POST", ["api", "pair", "tailnet"] | ["api", "phone", "tailnet"]) => {
-            let owners = req.peer.starts_with("127.0.0.1") && req.headers.get("x-hive-tailnet-owner").is_some_and(|v| v == "1");
-            if !owners { return Res::err(403, "Only your own devices, signed in to the same Tailscale account as your Hive Server, join without a pairing link."); }
-            let b = req.json();
+            if !owners(&req) { return Res::err(403, "Only your own devices, signed in to the same Tailscale account as your Hive Server, can join it."); }
             if parts[1] == "phone" { return phone_pairing(hive).map(|(url, token)| Res::json(&json!({ "url": url, "token": token }))).unwrap_or_else(|e| e) }
-            let t = random(24);
-            hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), format!("{}:{}", s(&b["kind"]), s(&b["name"])), now()));
-            return Res::json(&json!({ "token": t }));
-        }
-        ("POST", ["api", "pair"]) => {
             let b = req.json();
-            return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"])), &req.peer) {
-                Ok(t) => Res::json(&json!({ "token": t })),
-                Err(e) => Res::err(401, e),
-            };
+            return Res::json(&json!({ "token": new_token(hive, &format!("{}:{}", s(&b["kind"]), s(&b["name"]))) }));
         }
         _ => {}
     }
@@ -156,8 +116,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
     let id = |i: usize| parts.get(i).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0);
     match (m, parts.as_slice()) {
         ("GET", ["api", "me"]) => Res::json(&json!({ "ok": true, "version": hive.version })),
-        // With the Hive's own address: the dashboard may be open at this computer's local one, which other devices can't use.
-        ("POST", ["api", "pair", "code"]) => Res::json(&json!({ "code": new_code(&hive.db), "address": crate::address(&hive.state) })),
         ("POST", ["api", "requests"]) => {
             let text = s(&b["text"]);
             if text.trim().is_empty() { return Res::err(400, "Say what you want."); }
@@ -223,15 +181,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             }
         }
         ("GET", ["api", "phone"]) => Res::json(&hive_phone::status(&hive.state)),
-        // "Connect an iPhone": what Hive Phone takes from the clipboard ("hive-phone:" + base64url of {url, token}).
-        ("POST", ["api", "phone", "pair"]) => match phone_pairing(hive) {
-            Ok((url, token)) => {
-                let json = json!({ "url": url, "token": token }).to_string();
-                let b64 = hive_protocol::b64::encode(json.as_bytes()).replace('+', "-").replace('/', "_").replace('=', "");
-                Res::json(&json!({ "pairing": format!("hive-phone:{b64}") }))
-            }
-            Err(e) => e,
-        },
         ("POST", ["api", "phone", "passcode"]) => match hive_phone::save_passcode(&hive.state, &s(&b["passcode"])) {
             Ok(()) => Res::json(&hive_phone::status(&hive.state)),
             Err(e) => Res::err(409, &e),
@@ -382,30 +331,40 @@ fn mime(name: &str) -> &'static str {
 mod tests {
     use super::*;
     #[test]
-    fn developer_identity_requires_a_device_or_owner_key() {
+    fn developer_identity_requires_the_phones_or_a_devices_key() {
         let state = std::env::temp_dir().join(format!("hive-bootstrap-api-test-{}", std::process::id()));
         std::fs::create_dir_all(&state).unwrap();
         crate::private(&state.join("phone-token"), "phone-test-key");
-        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, "owner".into(), String::new(), String::new());
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
         let request = |path: &str, key: &str| Req { method: "GET".into(), path: path.into(), query: Default::default(),
             headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
+        let device = new_token(&hive, "mac:Mac");
         let path = "/phone/bootstrap/00008110-001A2B3C00000000";
         assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
         assert_eq!(handle(&hive, request(path, "phone-test-key")).status, 404);
         assert_eq!(handle(&hive, request("/phone/bootstrap/..", "phone-test-key")).status, 400);
         let path = "/api/phone/bootstrap/00008110-001A2B3C00000000";
         assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
-        assert_eq!(handle(&hive, request(path, "owner")).status, 404);
+        assert_eq!(handle(&hive, request(path, &device)).status, 404);
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
-    fn codes_pair_once_and_guessing_stops() {
-        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, "owner".into(), String::new(), String::new());
-        let code = new_code(&hive.db);
-        assert!(pair(&hive, &code, "x", "192.0.2.1").is_ok() && pair(&hive, &code, "x", "192.0.2.1").is_err());
-        for _ in 0..10 { assert!(pair(&hive, "12345678", "x", "192.0.2.2").is_err()); }
-        let code = new_code(&hive.db);
-        assert_eq!(pair(&hive, &code, "x", "192.0.2.2"), Err("Too many wrong codes. Try again in 10 minutes."));
-        assert!(pair(&hive, &code, "x", "192.0.2.1").is_ok() && pair(&hive, "owner", "x", "192.0.2.2").is_ok());
+    fn only_the_owners_own_devices_and_this_computer_sign_in() {
+        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let request = |path: &str, peer: &str, headers: &[(&str, &str)]| Req { method: "POST".into(), path: path.into(), query: Default::default(),
+            headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), body: br#"{"kind":"mac","name":"Mac"}"#.to_vec(), peer: peer.into() };
+        let owner = [("host", "hive.tail1234.ts.net"), ("x-forwarded-for", "100.64.0.2"), ("x-hive-tailnet-owner", "1")];
+        let shared = [("host", "hive.tail1234.ts.net"), ("x-forwarded-for", "100.64.0.3")];
+        for path in ["/api/login", "/api/pair/tailnet"] {
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &owner)).status, 200, "{path}");
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &[("host", "127.0.0.1:8790")])).status, 200, "{path}");
+            assert_ne!(handle(&hive, request(path, "127.0.0.1", &shared)).status, 200, "a tailnet device that isn't the owner's");
+            assert_ne!(handle(&hive, request(path, "127.0.0.1", &[("host", "elsewhere.example:8790")])).status, 200, "a name pointed at this computer");
+            assert_ne!(handle(&hive, request(path, "192.0.2.1", &owner[2..])).status, 200, "the header from anywhere but the helper");
+        }
+        let login = handle(&hive, request("/api/login", "127.0.0.1", &owner));
+        let cookie = &login.headers.iter().find(|(k, _)| k == "Set-Cookie").unwrap().1;
+        let t = cookie.trim_start_matches("hive=").split(';').next().unwrap();
+        assert!(valid(&hive, t) && !valid(&hive, "nope") && !valid(&hive, ""));
     }
 }

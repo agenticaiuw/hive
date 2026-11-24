@@ -9,10 +9,6 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// A connection the server hands over (TLS or not).
-pub trait Conn: Read + Write + Send {}
-impl<T: Read + Write + Send> Conn for T {}
-
 struct Link { id: u64, out: Sender<String>, pending: HashMap<u64, Sender<(u16, String)>> }
 
 static LINK: Mutex<Option<Link>> = Mutex::new(None);
@@ -42,12 +38,12 @@ pub fn call(method: &str, path: &str, body: &str, secs: u64) -> Result<(u16, Str
     r.map_err(|e| if e == RecvTimeoutError::Timeout { "phone request timed out" } else { "phone disconnected" }.to_string())
 }
 
-/// Serves the phone's WebSocket until it closes or a newer one replaces it. `socket` is the TCP socket under `conn`.
-pub fn device(mut conn: Box<dyn Conn>, socket: TcpStream) {
+/// Serves the phone's WebSocket until it closes or a newer one replaces it.
+pub fn device(mut conn: TcpStream) {
     let me = NEXT.fetch_add(1, Ordering::Relaxed);
     let (out, rx) = channel::<String>();
     *LINK.lock().unwrap() = Some(Link { id: me, out, pending: HashMap::new() });
-    socket.set_read_timeout(Some(Duration::from_millis(25))).ok();
+    conn.set_read_timeout(Some(Duration::from_millis(25))).ok();
     let (mut buf, mut msg, mut heard, mut chunk) = (Vec::new(), Vec::new(), Instant::now(), vec![0u8; 64 << 10]);
     let ours = || LINK.lock().unwrap().as_ref().is_some_and(|l| l.id == me);
     let _ = (|| -> Result<(), String> {
@@ -122,7 +118,7 @@ mod tests {
     fn passes_calls_to_the_phone_and_back() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || { let (s, _) = l.accept().unwrap(); let c = s.try_clone().unwrap(); device(Box::new(s), c) });
+        std::thread::spawn(move || { device(l.accept().unwrap().0) });
         let mut phone = TcpStream::connect(addr).unwrap();
         while !connected() { std::thread::sleep(Duration::from_millis(10)); }
         let caller = std::thread::spawn(|| call("GET", "/status", "", 5));

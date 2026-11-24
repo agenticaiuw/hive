@@ -1,7 +1,7 @@
 //! hive-server: Hive's own download. Run it once on a computer that stays on, a VM or an old laptop: setup (setup.rs) asks
-//! which AI the agents use and signs in to it, makes Hive start with the computer (`hive-server run`), and gives the dashboard's
-//! address. On a PC it has no console window; run from a terminal, it uses that terminal.
-//! `hive-server code` prints a pairing code; `hive-server cred` manages this computer's saved logins (`hive-cred`).
+//! which AI the agents use and signs in to it, makes Hive start with the computer (`hive-server run`), signs it in to the
+//! owner's Tailscale account, and gives the dashboard's address. On a PC it has no console window; run from a terminal, it
+//! uses that terminal. `hive-server cred` manages this computer's saved logins (`hive-cred`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,7 +29,6 @@ fn main() {
     let say = |t: &str| eprintln!("{t}");
     match args.first().map(|s| s.as_str()) {
         Some("--version") => return println!("{}", hive_protocol::VERSION),
-        Some("code") => return println!("{}", hive_server::code(&state)),
         Some("cred") => if let Err(e) = hive_server::cred::main(&args[1..]) { eprintln!("hive-cred: {e}"); std::process::exit(1) } else { return },
         // Hive Server.app's window (server/mac/) asks for the setup page: its address goes out on stdout, then it's served.
         Some("ui") => {
@@ -49,10 +48,8 @@ fn main() {
             match hive_server::setup::run(&state, &hive_server::setup::Terminal::new(), &INSTALL) {
                 Ok(link) => {
                     say(&format!("\nYour Hive Server is running, and starts again whenever this computer does.\n\
-                        Its dashboard on this computer (keep this link private, it signs you in):\n{link}"));
-                    if let Some(a) = hive_server::tailnet::on(&state).then(|| hive_server::address(&state)).flatten() {
-                        say(&format!("Your phone and other computers reach it at {a}, through Hive's apps, signed in to the same Tailscale account."));
-                    }
+                        Its dashboard on this computer: {link}\nYour phone and other computers reach it at {}, through Hive's apps, \
+                        signed in to the same Tailscale account.", hive_server::tailnet::address(&state).unwrap_or_default()));
                 }
                 Err(e) => {
                     let e = if cfg!(target_os = "linux") && e.starts_with("Couldn't make") { format!("{e}. Run it as root: sudo ./hive-server") } else { e };
@@ -68,12 +65,12 @@ fn main() {
     match hive_server::start(hive_server::Config { state: state.clone(), addr: env("HIVE_ADDR", "127.0.0.1:8790"), repo }, &say) {
         Ok(hive) => {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            eprintln!("Hive is at {}", hive_server::address(&state).unwrap_or_default());
+            eprintln!("Hive is at {}", hive_server::tailnet::address(&state).unwrap_or_default());
             // A Mac shows it in the menu bar while it runs (launchd runs it in the owner's session).
             #[cfg(target_os = "macos")]
             if std::env::var_os("HIVE_REPO").is_none() {
                 std::thread::spawn(move || { hive.join().ok(); std::process::exit(1) });
-                hive_server::menubar::run(state);
+                hive_server::menubar::run();
             }
             hive.join().ok();
         }
@@ -109,25 +106,15 @@ fn install(state: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // Hive runs as its own user, never root: its agents can't change the rest of the computer or read anyone's home
-        // folder, only that user can open Hive's folder, and it may use the HTTPS ports and nothing else.
+        // folder, and only that user can open Hive's folder.
         let dir = state.to_string_lossy();
         if !ok("id", &["-u", "hive"]) && !ok("useradd", &["--system", "--home-dir", &dir, "--shell", "/usr/sbin/nologin", "hive"]) {
             return Err("Couldn't make the hive user. Run it as root: sudo ./hive-server".into());
         }
         if !(ok("chown", &["-R", "hive:hive", &dir]) && ok("chmod", &["700", &dir])) { return Err(format!("Couldn't give {dir} to the hive user")); }
-        // This computer's own firewall lets HTTPS in, as UPnP asks the router to: ufw, firewalld, or plain iptables (an Oracle
-        // Cloud image refuses everything else).
-        ok("ufw", &["allow", "80/tcp"]);
-        ok("ufw", &["allow", "443/tcp"]);
-        if ok("firewall-cmd", &["--permanent", "--add-service=http", "--add-service=https"]) { ok("firewall-cmd", &["--reload"]); }
-        let rules = Command::new("iptables").args(["-S", "INPUT"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        if rules.contains("REJECT") && !rules.contains("443 -j ACCEPT") {
-            ok("iptables", &["-I", "INPUT", "-p", "tcp", "-m", "multiport", "--dports", "80,443", "-j", "ACCEPT"]);
-            ok("netfilter-persistent", &["save"]);
-        }
         std::fs::write("/etc/systemd/system/hive-server.service", format!("[Unit]\nDescription=Hive's server\nAfter=network-online.target\n\n\
             [Service]\nUser=hive\nEnvironment=HIVE_STATE={dir} HOME={dir}\nExecStart={} run\nRestart=always\nRestartSec=3\n\
-            AmbientCapabilities=CAP_NET_BIND_SERVICE\nNoNewPrivileges=yes\nProtectHome=yes\nPrivateTmp=yes\n\n[Install]\nWantedBy=multi-user.target\n", exe.display()))
+            NoNewPrivileges=yes\nProtectHome=yes\nPrivateTmp=yes\n\n[Install]\nWantedBy=multi-user.target\n", exe.display()))
             .map_err(|e| format!("Run it as root (sudo ./hive-server): {e}"))?;
         if !(ok("systemctl", &["daemon-reload"]) && ok("systemctl", &["enable", "hive-server"]) && ok("systemctl", &["restart", "hive-server"])) {
             return Err("systemd couldn't start Hive".into());
