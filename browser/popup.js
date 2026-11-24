@@ -62,7 +62,7 @@ async function tailscale() {
   $('ts').hidden = !t?.url || t.state === 'Running';
   $('tsLogin').onclick = () => chrome.tabs.create({ url: t.url });
   if (pairNote) $('pairNote').textContent = pairNote;
-  else if (pairing) $('pairNote').textContent = $('ts').hidden ? 'Connecting through Tailscale…' : 'Sign in to Tailscale, and this browser connects to your Hive by itself.';
+  else if (pairing) $('pairNote').textContent = $('ts').hidden ? 'Connecting through Tailscale…' : 'Sign in to Tailscale, and this browser connects to your Hive Server by itself.';
 }
 chrome.storage.onChanged.addListener((ch) => { tailscale(); if (ch.hive?.newValue) show(); });
 tailscale();

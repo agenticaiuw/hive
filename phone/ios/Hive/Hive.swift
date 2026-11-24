@@ -102,11 +102,11 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
 
     private var summary: String {
         guard let p = pairing else {
-            return "Not paired yet. On your Hive's dashboard, Nodes → Connect an iPhone copies a pairing; Hive and Hive Phone each pick it up from the clipboard."
+            return "Not paired yet. On your Hive Server's dashboard, Nodes → Connect an iPhone copies a pairing; Hive and Hive Phone each pick it up from the clipboard."
         }
         let t = Tailnet.shared
         if p.tailnet && !t.running {
-            return t.loginURL != nil ? "Your Hive is on your tailnet: sign Hive in to Tailscale to reach it." :
+            return t.loginURL != nil ? "Your Hive Server is on your tailnet: sign Hive in to Tailscale to reach it." :
                 t.state.hasPrefix("Tailscale didn't") ? t.state : "Starting Tailscale…"
         }
         return failed ? "\(p.host) didn't answer. Reload, or copy a new pairing from the dashboard." : p.host

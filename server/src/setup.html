@@ -85,17 +85,17 @@ function render(s) {
       <div class="small" style="margin-top:18px">If the page shows a code instead, paste it here:</div>
       <div class="paste"><input id="code" placeholder="Code from the sign-in page" onfocus="typing=true" onblur="typing=false"><button class="plain" onclick="paste()">Continue</button></div>`
       : '<div class="bar busy"><i></i></div>'}`;
-  else if (s.step === 'starting') v.innerHTML = `${logo}<h1>Starting your Hive</h1>
+  else if (s.step === 'starting') v.innerHTML = `${logo}<h1>Starting your Hive Server</h1>
       <p>Signed in. Hive is starting and getting a secure web address for your dashboard. This takes up to 3 minutes.</p><div class="bar busy"><i></i></div>`;
   else if (s.step === 'tailscale') v.innerHTML = `${logo}<h1>Connect your devices</h1>
-      <p>Your phone and other computers reach this Hive through <b>Tailscale</b>, a free private network that only your own devices
+      <p>Your laptop, browser and phone reach this Hive Server through <b>Tailscale</b>, a free private network that only your own devices
       can use, encrypted from end to end. Sign in to Tailscale, or make a free account, and this window carries on by itself.
       The first time, Tailscale asks a few questions about how you'll use it: any answers work.</p>
       <div class="row"><a class="go" href="${esc(s.url)}" target="_blank">Sign in to Tailscale</a></div>`;
-  else if (s.step === 'done') v.innerHTML = `${logo}<h1>Your Hive is running</h1>
+  else if (s.step === 'done') v.innerHTML = `${logo}<h1>Your Hive Server is running</h1>
       <p>It starts by itself whenever this computer does, so you can close this window. Next, open your dashboard and click
       <b>Pair a device</b> to add your phone, browser and other computers.${s.devices
-        ? ` They reach your Hive at <b>${esc(s.devices.replace(/^https?:\/\//, ''))}</b> through Hive's apps, each signing in to the same Tailscale account once.` : ''}</p>
+        ? ` They reach your Hive Server at <b>${esc(s.devices.replace(/^https?:\/\//, ''))}</b> through Hive's apps, each signing in to the same Tailscale account once.` : ''}</p>
       <div class="row"><a class="go" href="${esc(s.dashboard)}" target="_blank">Open your dashboard</a></div>
       <p class="small" style="margin-top:16px">The dashboard's link signs you in, so keep it to yourself. ${s.os === 'macos'
         ? 'Open Hive Server from Applications any time to get back to it.' : s.os === 'windows' ? 'Hive in the Start menu gets you back to it.' : ''}</p>`;

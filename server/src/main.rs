@@ -45,10 +45,10 @@ fn main() {
             }
             // Clears the terminal's line about the command it ran, so the screen starts with what Hive is doing.
             eprint!("\x1b[2J\x1b[3J\x1b[H");
-            say("Hive Server is setting up this computer as your Hive. It takes a few minutes, and asks you to sign in once.\n");
+            say("Hive Server is setting up this computer, which stays on, as the server your devices connect to. It takes a few minutes, and asks you to sign in once.\n");
             match hive_server::setup::run(&state, &hive_server::setup::Terminal::new(), &INSTALL) {
                 Ok(link) => {
-                    say(&format!("\nYour Hive is running, and starts again whenever this computer does.\n\
+                    say(&format!("\nYour Hive Server is running, and starts again whenever this computer does.\n\
                         Its dashboard on this computer (keep this link private, it signs you in):\n{link}"));
                     if let Some(a) = hive_server::tailnet::on(&state).then(|| hive_server::address(&state)).flatten() {
                         say(&format!("Your phone and other computers reach it at {a}, through Hive's apps, signed in to the same Tailscale account."));

@@ -107,7 +107,7 @@ pub fn run(state: &Path, ui: &dyn Ui, install: &dyn Fn(&Path) -> Result<(), Stri
         if let Some(why) = crate::why(state) { return Err(why); }
         std::thread::sleep(Duration::from_millis(500));
     }
-    Err("Hive is running, but Let's Encrypt hasn't given it a secure address yet. Open Hive Server again in a few minutes.".into())
+    Err("Hive Server is running, but Let's Encrypt hasn't given it a secure address yet. Open Hive Server again in a few minutes.".into())
 }
 
 /// Waits while the owner signs in to Tailscale, showing them the sign-in, until Hive has its tailnet address.
@@ -333,8 +333,8 @@ impl Ui for Terminal {
                 format!("Sign in to ChatGPT: open {} on any device and enter the code {}", v["url"].as_str().unwrap_or(""), v["code"].as_str().unwrap_or("")),
             ("signin", Some("claude")) if v["url"].is_string() =>
                 format!("Sign in to Claude: open this link on any device:\n{}\nIf the page gives you a code, paste it here and press Enter:", v["url"].as_str().unwrap_or("")),
-            ("starting", _) => "Signed in. Starting your Hive…".into(),
-            ("tailscale", _) => format!("Your phone and other computers reach this Hive through Tailscale, a free private network only your \
+            ("starting", _) => "Signed in. Starting your Hive Server…".into(),
+            ("tailscale", _) => format!("Your laptop, browser and phone reach this Hive Server through Tailscale, a free private network only your \
                 devices can use. Sign in (or make a free account) here, on any device:\n{}", v["url"].as_str().unwrap_or("")),
             _ => return,
         };

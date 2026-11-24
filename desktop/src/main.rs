@@ -21,7 +21,7 @@ mod os;
 /// A Hive on a tailnet pairs through this computer's door to it (tailnet.rs), and keeps the tailnet address.
 fn connect(link: &str) -> Result<hive_protocol::Conf, String> {
     let (server, code) = link.trim().split_once("/#pair=")
-        .ok_or("That isn't a pairing link. On your Hive dashboard, choose Pair a device and paste the link it copies.")?;
+        .ok_or("That isn't a pairing link. On your Hive Server's dashboard, choose Pair a device and paste the link it copies.")?;
     if !tailnet::on(server) { return hive_protocol::pair("node", server, code, os::KIND, &os::host()) }
     let door = tailnet::open(server, &format!("{}-{}", os::KIND, os::host()), &sign_in)?;
     let c = hive_protocol::pair("node", &door, code, os::KIND, &os::host())?;
@@ -55,7 +55,7 @@ fn join() -> Result<hive_protocol::Conf, String> {
     Ok(c)
 }
 
-const PAIR: &str = "Paste this computer's pairing link: on your Hive dashboard, click Pair a device, and it copies the link.";
+const PAIR: &str = "Paste this computer's pairing link: on your Hive Server's dashboard, click Pair a device, and it copies the link.";
 
 /// A box to paste into, with OK and Cancel: what was entered, or None when cancelled.
 fn ask(prompt: &str, default: &str) -> Option<String> {
