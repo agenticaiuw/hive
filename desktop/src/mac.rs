@@ -250,7 +250,8 @@ fn window(app: &str) -> Result<(Target, String), String> {
             (text(get(&d, "kCGWindowOwnerName")), text(get(&d, "kCGWindowName")), t, get(&d, "kCGWindowIsOnscreen").is_none())
         })
     }).collect();
-    windows.sort_by_key(|w| w.3);
+    // An app's real windows have titles; its untitled ones are overlays (popovers, previews) that would hide the page behind them.
+    windows.sort_by_key(|w| (w.1.is_empty(), w.3));
     let found = windows.iter().find(|w| w.0.to_lowercase() == want).or_else(|| windows.iter().find(|w| w.0.to_lowercase().contains(&want)));
     let (owner, title, t, _) = found.ok_or_else(|| format!("{app} has no window (it isn't open, or its windows are minimized)"))?;
     Ok((*t, if title.is_empty() { owner.clone() } else { format!("{owner}'s window \"{title}\"") }))
