@@ -59,6 +59,10 @@ table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 .split { display: grid; grid-template-columns: minmax(180px, 300px) minmax(0, 1fr); gap: 12px; height: 100%; min-height: 0; }
 @media (max-width: 760px) { main { padding: 8px; } .split { grid-template-columns: minmax(110px, 32%) minmax(0, 1fr); gap: 8px; } .card { padding: 8px; } }
+.task-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.task-board h2 { font-size: 16px; margin: 0 0 10px; }
+.task-board .item { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .task-board { grid-template-columns: 1fr; gap: 12px; } }
 .item { cursor: pointer; }
 .item.sel { outline: 2px solid var(--accent); }
 img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
@@ -197,11 +201,13 @@ async function sendComposer(key, path) {
 async function send() { await sendComposer('main', 'api/requests?wait=1'); refresh(); }
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
-const TABS = ['Sessions', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
+const TABS = ['Sessions', 'Tasks', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
 let tab = location.hash.slice(1) || 'Sessions', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
-if (['Agents', 'Tasks', 'Past'].includes(tab)) tab = 'Sessions';
+if (['Agents', 'Past'].includes(tab)) tab = 'Sessions';
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
-addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Tasks', 'Past'].includes(tab)) tab = 'Sessions'; chat = null; chatAfter = 0; tabs(); render(); });
+let boardSelection = null;
+addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' ? boardSelection : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
+function openTask(id) { boardSelection = id; location.hash = 'Sessions'; }
 
 function logEntry(l) {
   const who = String(l.who || '');
@@ -281,9 +287,18 @@ function updateSessions() {
   }
   for (const el of existing.values()) el.remove();
 }
+function updateTasks() {
+  const board = $('#task-board'); if (!board) return;
+  const sections = [ ['Working', ['open', 'working']], ['Needs me', ['needs']], ['Done', ['done']] ];
+  const html = sections.map(([label, statuses]) => {
+    const tasks = state.tasks.filter(t => statuses.includes(t.status));
+    return `<section><h2>${label}</h2>${tasks.map(t => `<div role="button" tabindex="0" data-task="${t.id}" class="card item" onclick="openTask(${t.id})"><b>#${t.id} ${esc(t.title)}</b>${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
+  }).join('');
+  if (board.dataset.snapshot !== html) { board.innerHTML = html; board.dataset.snapshot = html; }
+}
 async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${id}/message`); loadChat(); }
 async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
-$('#view').addEventListener('keydown', e => { if (e.target.closest('[data-session]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openChat(Number(e.target.closest('[data-session]').dataset.session)); return; } if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
+$('#view').addEventListener('keydown', e => { if (e.target.closest('[data-task]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(Number(e.target.closest('[data-task]').dataset.task)); return; } if (e.target.closest('[data-session]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openChat(Number(e.target.closest('[data-session]').dataset.session)); return; } if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
 
 function table(rows) {
   if (!rows.length) return '<p class="muted">Nothing here.</p>';
@@ -311,6 +326,9 @@ async function render() {
     }
     else { $('.chat-panel').innerHTML = chatPane(); chatAfter = 0; loadChat(); }
     document.querySelectorAll('.composer').forEach(paintComposer);
+  } else if (tab === 'Tasks') {
+    v.innerHTML = '<div id="task-board" class="task-board"></div>';
+    updateTasks();
   } else if (tab === 'Rules') {
     const rules = await api('api/rules');
     v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
@@ -367,6 +385,7 @@ async function refresh() {
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
   $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
   if (tab === 'Sessions') updateSessions();
+  if (tab === 'Tasks') updateTasks();
   await Promise.all([loadChat(), loadOrchestrator()]);
 }
 async function start() {
