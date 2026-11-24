@@ -27,7 +27,7 @@ project="-project phone/ios/HivePhone.xcodeproj -scheme HivePhone -configuration
 id=app.hive.xctrunner
 # HiveVersion is the last change to the app (what the phone tells Hive Server); CFBundleVersion only ever goes up, so
 # iOS takes each build as an update of the one installed.
-version=$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)
+version=$(git log -1 --format=%h --abbrev=12 -- phone/ios browser tailnet 2> /dev/null || echo dev)
 build=$(git rev-list --count HEAD 2> /dev/null || echo 1)
 # The installed app and its test bundle share Hive’s identity, icon and version.
 dress() {
@@ -43,6 +43,7 @@ dress() {
   sips -z 120 120 dashboard/icon.png --out $1/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $1/AppIcon60x60@3x.png
   plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $1/Info.plist
   find $1 -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
+  if [ -d "$1/PlugIns/HiveSafari.appex" ]; then codesign -f -s - --timestamp=none "$1/PlugIns/HiveSafari.appex"; fi
   if [ -d "$1/PlugIns/HiveLoopback.appex" ]; then
     codesign -f -s - --timestamp=none --entitlements phone/ios/Loopback/Entitlements.plist $1/PlugIns/HiveLoopback.appex
     codesign -f -s - --timestamp=none --entitlements phone/ios/Loopback/Entitlements.plist $1
@@ -144,9 +145,11 @@ if [ ! -f "$archive" ]; then
 fi
 phone/ios/Launcher/build.sh
 phone/ios/Loopback/build.sh
+sh phone/ios/Safari/build.sh
 executable=$(plutil -extract CFBundleExecutable raw $app/Info.plist)
 cp target/HivePhone/HiveLauncher $app/$executable
 ditto target/HivePhone/HiveLoopback.appex $app/PlugIns/HiveLoopback.appex
+ditto target/HivePhone/HiveSafari.appex $app/PlugIns/HiveSafari.appex
 plutil -replace UIFileSharingEnabled -bool true $app/Info.plist
 plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control." $app/Info.plist
 plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plist
@@ -162,7 +165,7 @@ site=https://agenticaiuw.github.io/hive
 rm -rf target/pages
 if [ -n "$HIVE_IOS_IDENTITY" ]; then
   find $app -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s "$HIVE_IOS_IDENTITY" --timestamp=none {}
-  for b in $app/PlugIns/HiveLoopback.appex $app; do
+  for b in $app/PlugIns/*.appex $app; do
     bid=$(plutil -extract CFBundleIdentifier raw $b/Info.plist)
     cp $out/profiles/$bid.mobileprovision $b/embedded.mobileprovision
     codesign -f -s "$HIVE_IOS_IDENTITY" --timestamp=none --entitlements $out/profiles/$bid.entitlements $b

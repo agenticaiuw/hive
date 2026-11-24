@@ -17,7 +17,7 @@ async function show() {
     if (!text) return;
     $('reply').textContent = 'Sending…';
     try {
-      const context = site ? { site, url: tab.url, title: tab.title } : {};
+      const context = { browser: c.id, ...(site ? { site, url: tab.url, title: tab.title } : {}) };
       const r = await api(c, '/api/requests?wait=1', { text, node: `${c.name} (browser)`, context });
       $('reply').textContent = r.reply || 'Hive has it.';
       $('text').value = '';

@@ -10,9 +10,9 @@
 name: phone
 on:
   push:
-    paths: [phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
+    paths: [browser/**, tailnet/**, phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
   pull_request:
-    paths: [phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
+    paths: [browser/**, tailnet/**, phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
   workflow_run:
     workflows: [release]
     types: [completed]
@@ -64,7 +64,7 @@ jobs:
           [ -n "$identity" ] || { echo "::error::IOS_CERTIFICATE holds no Apple Development certificate and key"; exit 1; }
           echo "HIVE_IOS_IDENTITY=$identity" >> $GITHUB_ENV
           export HIVE_IOS_IDENTITY="$identity"
-          cargo run --locked --release -q -p hive-phone --bin hive-provision -- target/HivePhone/profiles app.hive.xctrunner app.hive.xctrunner.loopback
+          cargo run --locked --release -q -p hive-phone --bin hive-provision -- target/HivePhone/profiles app.hive.xctrunner app.hive.xctrunner.loopback app.hive.xctrunner.safari
       - name: Check the pre-XCTest mount backend
         env:
           CARGO_TARGET_DIR: target/phone-launcher

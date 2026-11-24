@@ -109,7 +109,7 @@ fn run() -> Result<(), String> {
         let bundle = json!({ "type": "bundleIds", "id": bundle["id"] });
         let b = bundle["id"].as_str().unwrap_or("");
         // The app and its loopback extension both carry the packet tunnel.
-        if !asc.list(&format!("bundleIds/{b}/bundleIdCapabilities"))?.iter().any(|c| c["attributes"]["capabilityType"] == "NETWORK_EXTENSIONS") {
+        if !id.ends_with(".safari") && !asc.list(&format!("bundleIds/{b}/bundleIdCapabilities"))?.iter().any(|c| c["attributes"]["capabilityType"] == "NETWORK_EXTENSIONS") {
             asc.must("POST", "bundleIdCapabilities", Some(json!({ "data": { "type": "bundleIdCapabilities",
                 "attributes": { "capabilityType": "NETWORK_EXTENSIONS" }, "relationships": { "bundleId": { "data": bundle } } } })))?;
         }

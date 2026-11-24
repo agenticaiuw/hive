@@ -5,13 +5,13 @@ const { test } = require('node:test');
 
 // hive.js as it is, with each way out of the extension recorded: the browser's fetch, and the tailnet's (offscreen.js).
 const source = readFileSync(`${__dirname}/../hive.js`, 'utf8').replace(/^export /gm, '');
-function hive({ peers = [], answers = {} } = {}) {
+function hive({ peers = [], answers = {}, mobile = false } = {}) {
   const seen = [];
   const stored = {};
   const answer = (url) => answers[url] || { status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' };
   const lib = vm.runInNewContext(`${source}\n({ api, tailnet, findServer, joinTailnet })`, {
     URL, Response, AbortSignal, JSON, crypto,
-    navigator: { userAgent: 'Chrome', userAgentData: { brands: [{ brand: 'Google Chrome' }] } },
+    navigator: mobile ? { userAgent: 'iPhone Safari' } : { userAgent: 'Chrome', userAgentData: { brands: [{ brand: 'Google Chrome' }] } },
     chrome: {
       storage: { local: { get: async () => stored, set: async (o) => Object.assign(stored, o) } },
       runtime: {
@@ -132,4 +132,13 @@ test('joining waits quietly for Tailscale sign-in, says when no Hive Server is o
   assert.deepEqual(await pending({ joining: true, tailnet: { state: 'Running' } }, fail(true)), { joining: true, tailnet: { state: 'Running' }, pairNote: 'why' });
   assert.deepEqual(await pending({ joining: true, tailnet: { state: 'Running' } }, fail(false)), { tailnet: { state: 'Running' }, pairNote: 'why' });
   assert.deepEqual(await pending({ joining: true, pairNote: 'why', tailnet: { state: 'Running' } }, async () => {}), { tailnet: { state: 'Running' } });
+});
+
+test('iPhone Safari registers its own identifiable browser node', async () => {
+  const server = 'http://hive.example.ts.net';
+  const {lib, stored} = hive({mobile:true, peers:[peer('hive','hive.example.ts.net')], answers:{
+    [server+'/api/pair/tailnet']:{status:200,headers:{},body:'{"token":"test"}'}
+  }});
+  await lib.joinTailnet();
+  assert.equal(stored.hive.name, 'Safari on iPhone');
 });

@@ -68,7 +68,7 @@ export async function joinTailnet(selected) {
   if (!server) throw Object.assign(new Error('Looking for your Hive Server… Make sure it is on and signed in to the same Tailscale account.'), { again: true });
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
   const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
-  const name = safari ? 'Safari' : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
+  const name = safari ? (/iPhone|iPad/.test(navigator.userAgent) ? 'Safari on iPhone' : 'Safari') : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
   const r = await request(`${server}/api/pair/tailnet`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

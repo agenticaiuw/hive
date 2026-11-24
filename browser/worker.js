@@ -165,7 +165,7 @@ async function loop() {
     let hello = 0;
     for (let c = await conf(); c; c = await conf()) {
       if (Date.now() - hello > 60_000) {
-        await api(c, '/api/node/hello', { id: c.id, kind: 'browser', name: c.name, version: chrome.runtime.getManifest().version, notes: NOTES, tools: TOOLS });
+        await api(c, '/api/node/hello', { id: c.id, kind: 'browser', name: c.name, version: chrome.runtime.getManifest().version, notes: c.name === "Safari on iPhone" ? NOTES + " This is iPhone Safari. Use phone_open_app to open Safari if iOS has suspended the extension. Coordinate with the phone agent before native touch; both share the phone." : NOTES, tools: TOOLS });
         hello = Date.now();
       }
       const call = await api(c, `/api/node/next?id=${encodeURIComponent(c.id)}`);
@@ -240,6 +240,7 @@ async function pageCode(url) {
 }
 chrome.webNavigation.onCommitted.addListener(async ({ tabId, frameId, url }) => {
   if (frameId) return;
+  loop(); // Safari resumes its nonpersistent background page on navigation.
   for (const { css, js } of await pageCode(url)) {
     const redirect = js?.match(/^\/\/ hive-redirect: (\/\S*|\/) (\/\S*)$/m);
     if (redirect && new URL(url).pathname === redirect[1]) {

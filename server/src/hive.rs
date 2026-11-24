@@ -715,7 +715,7 @@ impl Hive {
     /// with a checkout, Hive's own code: its way around a technical problem.
     fn task_kinds(&self, task: &Value) -> Vec<String> {
         let mut kinds = list(&task["nodes"]);
-        let extra = if self.repo.is_some() { &["mac", "phone", "hive"][..] } else { &["mac", "phone"][..] };
+        let extra = if self.repo.is_some() { &["mac", "phone", "browser", "hive"][..] } else { &["mac", "phone", "browser"][..] };
         for k in extra { if !kinds.iter().any(|n| n == k) { kinds.push(k.to_string()); } }
         kinds
     }
@@ -726,7 +726,10 @@ impl Hive {
         let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
         for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
             if !kinds.contains(&s(&n["kind"])) { continue; }
-            for t in list_values(&n["tools"]) {
+            for mut t in list_values(&n["tools"]) {
+                if n["kind"] == "browser" {
+                    t["inputSchema"]["properties"]["browser"] = json!({"type":"string", "description":"Browser device ID from browser_devices. Required when several browsers are registered; use the same ID for every call involving its tabs."});
+                }
                 if names.insert(s(&t["name"])) { out.push(t); }
             }
         }
@@ -894,6 +897,7 @@ impl Hive {
 
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
         match name {
+            "browser_devices" => return Ok(json!(serde_json::to_string(&self.db.all("select id, name, seen from nodes where kind='browser' order by seen desc", &[])).unwrap())),
             "claim_task" => {
                 self.claim_task(agent, a["task"].as_i64().ok_or("give the task id")?)?;
                 return Ok(json!("Claimed. It runs after your current task."));
@@ -946,7 +950,15 @@ impl Hive {
             }
             _ => {}
         }
-        let (node, decl) = self.device_for(name).ok_or(format!("Hive has no tool called {name}"))?;
+        let selected = a["browser"].as_str().filter(|id| !id.is_empty());
+        let (node, decl) = if name.starts_with("browser_") {
+            let devices = self.db.all("select id, kind, name, seen, tools from nodes where kind='browser' order by seen desc", &[]);
+            if selected.is_none() && devices.len() > 1 { return Err("Choose a browser device ID with browser_devices and pass browser on every call; tab IDs belong to that browser.".into()); }
+            devices.into_iter().filter(|n| selected.is_none_or(|id| n["id"] == id))
+                .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == name).map(|t| (n, t)))
+        } else { self.device_for(name) }.ok_or(format!("Hive has no tool called {name}"))?;
+        // Mobile Safari and native touch share the same phone, even with two agents.
+        if node["name"] == "Safari on iPhone" { self.take_lock("iPhone touch", agent)?; }
         if let Some(lock) = decl["lock"].as_str() { self.take_lock(&format!("{} {lock}", s(&node["name"])), agent)?; }
         // Files cross with the call: vm_path's bytes go to the device, and a file the device sends back lands in Hive's files.
         let mut args = if matches!(name, "browser_type_password" | "mac_type_password" | "windows_type_password") {
@@ -1058,6 +1070,26 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_selection_never_falls_back_to_another_device() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let decl = json!([{"name":"browser_tabs","inputSchema":{"type":"object","properties":{}},"timeout":0}]);
+        for (id, name) in [("mac-browser", "Safari"), ("phone-browser", "Safari on iPhone")] {
+            hive.db.run("insert into nodes(id,kind,name,tools,seen) values(?,'browser',?,?,?)", args!(id,name,decl.to_string(),now()));
+        }
+        assert!(hive.tool_inner("browser_tabs", &json!({}), 1, 0).unwrap_err().contains("Choose"));
+        assert!(hive.tool_inner("browser_tabs", &json!({"browser":"missing"}), 1, 0).is_err());
+        assert_eq!(hive.db.get("select count(*) as n from calls", &[]).unwrap()["n"], 0);
+        hive.tool_inner("browser_tabs", &json!({"browser":"phone-browser"}), 1, 0).unwrap_err();
+        assert_eq!(hive.db.get("select node from calls", &[]).unwrap()["node"], "phone-browser");
+        assert_eq!(hive.locks()[0]["lock"], "iPhone touch");
+        let kinds = hive.task_kinds(&json!({"nodes":["phone"]}));
+        let tools = hive.tools_for(&kinds);
+        assert!(tools.iter().any(|t| t["name"] == "browser_devices"));
+        assert!(tools.iter().any(|t| t["name"] == "browser_tabs" && t["inputSchema"]["properties"]["browser"]["type"] == "string"));
+    }
+
     #[test]
     fn history_preserves_corrections_and_completed_project_work() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
