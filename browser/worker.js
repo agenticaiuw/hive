@@ -62,6 +62,7 @@ const RUN = {
   },
   browser_read: ({ tab }) => inTab(tab, () => {
     const sel = 'a[href],button,input,textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=option],[role=treeitem],[contenteditable=""],[contenteditable=true]';
+    for (const el of document.querySelectorAll('[data-hive]')) delete el.dataset.hive;
     const els = [];
     for (const el of document.querySelectorAll(sel)) {
       const r = el.getBoundingClientRect();
