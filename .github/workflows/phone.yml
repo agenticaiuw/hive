@@ -109,7 +109,7 @@ jobs:
               if not os.path.exists(f):
                   continue
               lines = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()]
-              failures = [l for l in lines if "Terminating app" in l or "reason:" in l]
+              failures = [l for l in lines if "Terminating app" in l or "reason:" in l or "Hive XCTest settings" in l]
               tail = failures[-3:] + lines[-12:]
               notes += [f"{os.path.basename(f)}: {l}" for l in tail]
           say("notice", "probe host", notes or ["nothing from the host"])

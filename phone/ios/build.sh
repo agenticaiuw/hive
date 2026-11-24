@@ -93,12 +93,12 @@ if [ "$1" = test ]; then
   }
   launch 1
   reopened=0
-  for t in $(seq 1 120); do
+  for t in $(seq 1 180); do
     sleep 1
     case $t in 5|12|22|28|38) xcrun simctl io "$sim" screenshot $out/probe/host-$t.png > /dev/null 2>&1 || true ;; esac
     # Reopen after the app has demonstrated that it still handles calls in the
     # background, rather than interrupting an unfinished test action at t=30.
-    if [ "$reopened" = 0 ] && grep -q '"step":"home screen after seven seconds"' "$(docs)/probe-icon.log" 2> /dev/null; then
+    if [ "$reopened" = 0 ] && grep -q '"step":"home screen after forty-five seconds"' "$(docs)/probe-icon.log" 2> /dev/null; then
       sleep 2
       launch 2
       reopened=1
@@ -116,7 +116,7 @@ with open(sys.argv[1]) as file:
     states = [json.loads(line) for line in file if line.strip()]
 assert any(s.get("step") == "done" and s.get("taps", 0) >= 3 and not s.get("calls") for s in states), "icon probe did not finish with three successful taps and error-free control calls"
 assert any(s.get("step") == "Settings in front (an agent's action)" and s.get("app") == "background" for s in states), "icon probe could not activate Settings"
-assert any(s.get("step") == "home screen after seven seconds" and s.get("app") == "background" for s in states), "icon runner did not retain control in the background"
+assert any(s.get("step") == "home screen after forty-five seconds" and s.get("app") == "background" for s in states), "icon runner did not retain control in the background"
 PYPROBE
   exit ${failed:-0}
 fi

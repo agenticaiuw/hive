@@ -8,10 +8,17 @@
 #import "Mount.h"
 #endif
 
+// Resolve this API only after loading XCTest; Apple's runner obtains its
+// complete configuration from this factory rather than constructing one.
+@interface NSObject (HiveXCTestConfiguration)
++ (id)configurationFromCommandLineArguments:(NSArray *)arguments userDefaults:(NSUserDefaults *)defaults requiresTestBundleURL:(BOOL)required outError:(NSError **)error;
+@end
+
 @interface HiveBootstrap : UIResponder <UIApplicationDelegate, UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow *window;
 @property(nonatomic, strong) UILabel *status;
 @property(nonatomic) BOOL started;
+@property(nonatomic) UIBackgroundTaskIdentifier backgroundTask;
 @end
 
 @implementation HiveBootstrap
@@ -35,6 +42,7 @@
     [self.window makeKeyAndVisible];
 }
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
+    self.backgroundTask = UIBackgroundTaskInvalid;
     if (![NSBundle.mainBundle objectForInfoDictionaryKey:@"UIApplicationSceneManifest"]) [self showInScene:nil];
     return YES;
 }
@@ -46,8 +54,23 @@
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     if ([scene isKindOfClass:UIWindowScene.class]) [(HiveBootstrap *)UIApplication.sharedApplication.delegate showInScene:(UIWindowScene *)scene];
 }
-- (void)applicationDidBecomeActive:(UIApplication *)application { [self start]; }
-- (void)sceneDidBecomeActive:(UIScene *)scene { [(HiveBootstrap *)UIApplication.sharedApplication.delegate start]; }
+- (void)endBackgroundTask {
+    if (self.backgroundTask == UIBackgroundTaskInvalid) return;
+    [UIApplication.sharedApplication endBackgroundTask:self.backgroundTask];
+    self.backgroundTask = UIBackgroundTaskInvalid;
+}
+- (void)continueInBackground {
+    if (self.backgroundTask != UIBackgroundTaskInvalid) return;
+    self.backgroundTask = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"Hive Phone Control" expirationHandler:^{ [self endBackgroundTask]; }];
+}
+- (void)applicationWillResignActive:(UIApplication *)application { [self continueInBackground]; }
+- (void)sceneWillResignActive:(UIScene *)scene { [(HiveBootstrap *)UIApplication.sharedApplication.delegate continueInBackground]; }
+- (void)applicationDidBecomeActive:(UIApplication *)application { [self endBackgroundTask]; [self start]; }
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    HiveBootstrap *app = (HiveBootstrap *)UIApplication.sharedApplication.delegate;
+    [app endBackgroundTask];
+    [app start];
+}
 - (void)start {
     if (self.started) return;
     self.started = YES;
@@ -80,14 +103,29 @@
     }
     // Match the runner's configured test bundle while deferring every reference
     // to XCTest until after dlopen. _XCTestMain is entered exactly once.
-    id configuration = [configurationClass new];
     NSURL *bundle = [NSBundle.mainBundle.builtInPlugInsURL URLByAppendingPathComponent:@"HivePhone.xctest"];
     @try {
+        Class factory = NSClassFromString(@"XCTCommandLineToolHelper");
+        NSError *error = nil;
+        id configuration = nil;
+        if ([factory respondsToSelector:@selector(configurationFromCommandLineArguments:userDefaults:requiresTestBundleURL:outError:)]) {
+            configuration = [factory configurationFromCommandLineArguments:NSProcessInfo.processInfo.arguments
+                userDefaults:NSUserDefaults.standardUserDefaults requiresTestBundleURL:NO outError:&error];
+        }
+        if (error) { self.status.text = @"Hive couldn’t configure phone control."; return; }
+        if (!configuration) {
+            configuration = [configurationClass new];
+            [configuration setValue:@YES forKey:@"reportResultsToIDE"];
+            [configuration setValue:@NO forKey:@"testsDrivenByIDE"];
+        }
         [configuration setValue:bundle forKey:@"testBundleURL"];
-        [configuration setValue:NSUUID.UUID forKey:@"sessionIdentifier"];
+        if (![configuration valueForKey:@"sessionIdentifier"]) [configuration setValue:NSUUID.UUID forKey:@"sessionIdentifier"];
         [configuration setValue:@YES forKey:@"initializeForUITesting"];
         [configuration setValue:@YES forKey:@"testsMustRunOnMainThread"];
-        [configuration setValue:@NO forKey:@"reportResultsToIDE"];
+        if (NSProcessInfo.processInfo.environment[@"HIVE_PROBE"]) {
+            NSLog(@"Hive XCTest settings UI=%@ main=%@ report=%@ driven=%@", [configuration valueForKey:@"initializeForUITesting"],
+                [configuration valueForKey:@"testsMustRunOnMainThread"], [configuration valueForKey:@"reportResultsToIDE"], [configuration valueForKey:@"testsDrivenByIDE"]);
+        }
         run(configuration);
     } @catch (NSException *exception) {
         self.status.text = @"Hive couldn’t start phone control.";
