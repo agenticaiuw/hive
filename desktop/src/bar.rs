@@ -6,8 +6,9 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSFloatingWindowLevel, NSFont, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSTextField, NSVariableStatusItemLength, NSWindowStyleMask, NSWorkspace};
+use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType, NSEvent,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSFont, NSMenu, NSMenuItem, NSPanel, NSScreen, NSStandardKeyBindingResponding, NSStatusBar, NSTextField, NSTextView,
+    NSVariableStatusItemLength, NSWindowStyleMask, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
@@ -138,16 +139,17 @@ fn ask(text: &str, app: &str) -> String {
     }
 }
 
-/// Asks the owner, in a floating window, to hand over the Mac's own pointer and keyboard to a task's agent: why, and for about
+/// Asks the owner, in a floating window, to hand over the Mac's own pointer and keyboard to a task's agent: who, why, and for about
 /// how long. True once they press Hand over; false for Not now, or no answer in ten minutes (the window then closes).
-pub fn hand_over(why: &str, minutes: u64) -> bool {
+pub fn hand_over(who: &str, why: &str, minutes: u64) -> bool {
     let (tx, rx) = std::sync::mpsc::channel();
-    let text = format!("{why}\n\nIt needs your pointer and keyboard for about {minutes} minute{}. They're yours again once that's up.",
-        if minutes == 1 { "" } else { "s" });
+    let text = format!("{why}\n\nIt needs your pointer and keyboard for about {minutes} minute{}. A window shows what it does as it goes; \
+        close it to take your Mac back.", if minutes == 1 { "" } else { "s" });
+    let who = who.to_string();
     DispatchQueue::main().exec_async(move || {
         let mtm = MainThreadMarker::new().expect("main thread");
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str("A Hive agent is asking for your Mac"));
+        alert.setMessageText(&NSString::from_str(&format!("{who} is asking for your Mac")));
         alert.setInformativeText(&NSString::from_str(&text));
         alert.addButtonWithTitle(&NSString::from_str("Hand over"));
         alert.addButtonWithTitle(&NSString::from_str("Not now"));
@@ -159,4 +161,69 @@ pub fn hand_over(why: &str, minutes: u64) -> bool {
         DispatchQueue::main().exec_async(|| NSApplication::sharedApplication(MainThreadMarker::new().expect("main thread")).abortModal());
         false
     })
+}
+
+thread_local! { static FOLLOW: RefCell<Option<(Retained<NSPanel>, Retained<NSTextView>, String)>> = const { RefCell::new(None) }; }
+
+/// While a task's agent has the Mac: a floating window in the screen's corner with the task's log as it happens, until `until`.
+/// Closing it gives the Mac back.
+pub fn follow(task: i64, title: &str, until: Instant) {
+    let title = format!("#{task} {title} has your Mac: close this to take it back");
+    DispatchQueue::main().exec_async(move || {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable | NSWindowStyleMask::NonactivatingPanel;
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(NSPanel::alloc(mtm), rect(0.0, 0.0, 480.0, 340.0), style, NSBackingStoreType::Buffered, false);
+        panel.setTitle(&NSString::from_str(&title));
+        panel.setLevel(NSFloatingWindowLevel);
+        panel.setHidesOnDeactivate(false);
+        unsafe { panel.setReleasedWhenClosed(false) };
+        let scroll = NSTextView::scrollableTextView(mtm);
+        let view = panel.contentView().expect("a panel has a content view");
+        scroll.setFrame(view.bounds());
+        scroll.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        let text = scroll.documentView().and_then(|v| v.downcast::<NSTextView>().ok()).expect("a scrollable text view");
+        text.setEditable(false);
+        text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        view.addSubview(&scroll);
+        if let Some(screen) = NSScreen::mainScreen(mtm) {
+            let f = screen.visibleFrame();
+            panel.setFrameOrigin(NSPoint::new(f.origin.x + f.size.width - 496.0, f.origin.y + f.size.height - 356.0));
+        }
+        panel.orderFrontRegardless();
+        FOLLOW.with(|f| *f.borrow_mut() = Some((panel, text, String::new())));
+    });
+    std::thread::spawn(move || {
+        let c = crate::tailnet::load();
+        let mut after = 0;
+        loop {
+            let mut lines = String::new();
+            if let Some(Ok((200, r))) = c.as_ref().map(|c| hive_protocol::call(c, "GET", &format!("/api/tasks/{task}?after={after}"), None, 20)) {
+                let log = r["log"].as_array().cloned().unwrap_or_default();
+                // The first look starts with its last 40 entries.
+                for e in log.iter().skip(if after == 0 { log.len().saturating_sub(40) } else { 0 }) {
+                    let text: String = e["text"].as_str().unwrap_or("").chars().take(400).collect();
+                    lines += &format!("{}: {}\n", e["who"].as_str().unwrap_or(""), text.trim());
+                }
+                after = log.last().and_then(|e| e["id"].as_i64()).unwrap_or(after);
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            DispatchQueue::main().exec_async(move || FOLLOW.with(|f| {
+                let mut f = f.borrow_mut();
+                let on = f.as_mut().is_some_and(|(panel, text, all)| {
+                    if !panel.isVisible() || Instant::now() > until { panel.close(); return false; }
+                    if !lines.is_empty() {
+                        all.push_str(&lines);
+                        text.setString(&NSString::from_str(all));
+                        unsafe { text.scrollToEndOfDocument(None) };
+                    }
+                    true
+                });
+                if !on { *f = None; }
+                tx.send(on).ok();
+            }));
+            if !rx.recv().unwrap_or(false) { break; }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        crate::os::give_back();
+    });
 }

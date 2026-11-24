@@ -13,7 +13,7 @@ create table if not exists tasks(id integer primary key, request_id integer, pro
 create table if not exists rules(id integer primary key, text text, quote text, scope text default '', code text,
   at integer, active integer default 1);
 create table if not exists agents(id integer primary key, task_id integer, kind text default 'codex', name text, thread text,
-  status text default 'working', at integer, updated integer);
+  status text default 'working', at integer, updated integer, tools text default '');
 create table if not exists log(id integer primary key, at integer, agent_id integer, task_id integer, request_id integer,
   who text, text text);
 create table if not exists inbox(id integer primary key, agent_id integer, text text, at integer, seen integer default 0);
@@ -67,6 +67,7 @@ impl Db {
         c.execute_batch(SCHEMA).expect("schema");
         // Columns added since a database was made (fails harmlessly once it has them).
         c.execute_batch("alter table tasks add column every integer default 0").ok();
+        c.execute_batch("alter table agents add column tools text default ''").ok();
         Db(Mutex::new(c))
     }
 

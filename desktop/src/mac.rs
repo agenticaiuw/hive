@@ -82,16 +82,26 @@ fn target() -> Result<Target, String> {
 /// Until when the owner has handed the Mac's own pointer and keyboard over to the agents.
 static HANDED: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Asks the owner in a floating window for the Mac's own pointer and keyboard, for about `minutes`.
-pub fn take_over(why: &str, minutes: u64) -> Result<Value, String> {
-    let minutes = minutes.clamp(1, 120);
-    if !crate::bar::hand_over(why, minutes) {
+/// Asks the owner in a floating window for the Mac's own pointer and keyboard, for about `minutes`: once they hand it over, a
+/// floating window shows the asking task's log as it happens, and closing it takes the Mac back.
+pub fn take_over(a: &Value) -> Result<Value, String> {
+    let minutes = a["minutes"].as_u64().unwrap_or(10).clamp(1, 120);
+    let (task, title) = (a["task"]["id"].as_i64().unwrap_or(0), a["task"]["title"].as_str().unwrap_or("A task").to_string());
+    if !crate::bar::hand_over(&format!("#{task} {title}"), a["why"].as_str().unwrap_or(""), minutes) {
         return Err("The owner didn't hand the Mac over (they said not now, or didn't answer in ten minutes). Find another way, or end saying exactly what you need the Mac for.".into());
     }
-    *HANDED.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_secs(minutes * 60));
-    Ok(json!({ "text": format!("The owner handed the Mac over for {minutes} minutes. Take a mac_screenshot of the whole screen (app \"\"); \
-        clicks, keys and typing then use the Mac's own pointer and keyboard, which reach everything (menus, the Dock, system dialogs).") }))
+    let until = Instant::now() + std::time::Duration::from_secs(minutes * 60);
+    *HANDED.lock().unwrap() = Some(until);
+    crate::bar::follow(task, &title, until);
+    let mut shot = screenshot("")?;
+    shot["text"] = json!(format!("The owner handed the Mac over for {minutes} minutes, and sees your log as you go. This is the whole \
+        screen now: clicks, keys and typing use the Mac's own pointer and keyboard, which reach everything (menus, the Dock, system dialogs). \
+        {}", shot["text"].as_str().unwrap_or("")));
+    Ok(shot)
 }
+
+/// The owner took the Mac back (closed the window that follows the agent).
+pub fn give_back() { *HANDED.lock().unwrap() = None; }
 
 /// (x, y) in the last screenshot as a point on the screen.
 fn point(t: Target, x: f64, y: f64) -> Result<Point, String> {

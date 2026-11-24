@@ -38,7 +38,8 @@ pub fn tools() -> Vec<Value> {
     if cfg!(target_os = "macos") {
         let mut t = tool("mac_take_over", "When working in one app's window can't do it (a menu shortcut, a system dialog, a page that won't \
             respond): ask the owner, in a floating window on their Mac, to hand over its own pointer and keyboard, saying why and about how \
-            long. Waits for their answer; once they hand it over, the whole screen's input works for that long.",
+            long. Waits for their answer; once they hand it over, it returns a screenshot of the whole screen, and its input works for that long \
+            (or until the owner takes it back). Ask when your next steps are ready, and act at once: the owner is watching your log.",
             json!({ "why": s("What you're doing and why you need the whole Mac, in a sentence or two for the owner"), "minutes": n("About how many minutes you need") }),
             &["why", "minutes"]);
         t["timeout"] = json!(660);
@@ -71,7 +72,7 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         }
         "key" => { os::key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
         #[cfg(target_os = "macos")]
-        "take_over" => os::take_over(a["why"].as_str().unwrap_or(""), a["minutes"].as_u64().unwrap_or(10)),
+        "take_over" => os::take_over(a),
         "shell" => shell(os::shell(a["command"].as_str().unwrap_or("")), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
         "get_file" => {
             let path = a["path"].as_str().unwrap_or("");

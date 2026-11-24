@@ -61,6 +61,13 @@ const CLAUDE_AGENT: &str = "claude-agent";
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
 fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
+/// A tool list's names, which tell whether an agent's thread has today's tools.
+fn names(tools: &[Value]) -> String {
+    let mut n: Vec<String> = tools.iter().map(|t| s(&t["name"])).collect();
+    n.sort();
+    n.join(",")
+}
+
 fn list_values(v: &Value) -> Vec<Value> {
     let parsed: Value = match v { Value::String(t) => serde_json::from_str(t).unwrap_or(Value::Null), o => o.clone() };
     parsed.as_array().cloned().unwrap_or_default()
@@ -355,25 +362,13 @@ impl Hive {
     pub fn start_agent(self: &Arc<Self>, task_id: i64) {
         let Some(task) = self.db.get("select * from tasks where id=?", args!(task_id)) else { return };
         let level = s(&task["level"]);
-        let (_, model, effort) = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]);
-        let nodes = self.task_kinds(&task);
+        let effort = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]).2;
         let on_claude = matches!(self.engine, Engine::Claude { .. });
         let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
             args!(task_id, if on_claude { CLAUDE_AGENT } else { "codex" }, short(&s(&task["title"]), 60), now(), now()));
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
-        let cwd = self.cwd(&task);
-        let result = if on_claude { self.claude_turn(agent, "Start on your task now.") } else { (|| {
-            let codex = self.codex()?;
-            let r = codex.request("thread/start", json!({
-                "model": model, "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "danger-full-access",
-                "developerInstructions": self.instructions(&task), "dynamicTools": self.tools_for(&nodes).iter().map(tools::for_codex).collect::<Vec<_>>(),
-            }), 60)?;
-            let thread = s(&r["thread"]["id"]);
-            if thread.is_empty() { return Err("Codex gave no thread".to_string()); }
-            self.db.run("update agents set thread=? where id=?", args!(thread, agent));
-            self.loaded.lock().unwrap().insert(thread);
-            self.start_turn_with(agent, "Start on your task now.", effort)
-        })() };
+        let result = if on_claude { self.claude_turn(agent, "Start on your task now.") }
+            else { self.new_thread(agent, &task).and_then(|_| self.start_turn_with(agent, "Start on your task now.", effort)) };
         if let Err(e) = result {
             self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
                 args!(format!("Hive couldn't start an agent: {e}"), format!("Nothing from you if {} comes back by itself; send the task a message to retry.",
@@ -401,11 +396,36 @@ impl Hive {
         self.start_turn_with(agent, text, effort)
     }
 
+    /// A Codex thread for an agent, with the task's instructions and its devices' tools as they are now.
+    fn new_thread(self: &Arc<Self>, agent: i64, task: &Value) -> Result<String, String> {
+        let model = LEVELS.iter().find(|l| l.0 == s(&task["level"])).copied().unwrap_or(LEVELS[1]).1;
+        let tools = self.tools_for(&self.task_kinds(task));
+        let r = self.codex()?.request("thread/start", json!({
+            "model": model, "cwd": self.cwd(task).to_string_lossy(), "approvalPolicy": "never", "sandbox": "danger-full-access",
+            "developerInstructions": self.instructions(task), "dynamicTools": tools.iter().map(tools::for_codex).collect::<Vec<_>>(),
+        }), 60)?;
+        let thread = s(&r["thread"]["id"]);
+        if thread.is_empty() { return Err("Codex gave no thread".to_string()); }
+        self.db.run("update agents set thread=?, tools=? where id=?", args!(thread, names(&tools), agent));
+        self.loaded.lock().unwrap().insert(thread.clone());
+        Ok(thread)
+    }
+
     fn start_turn_with(self: &Arc<Self>, agent: i64, text: &str, effort: &str) -> Result<(), String> {
         let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
-        let thread = s(&a["thread"]);
+        let task = self.db.get("select * from tasks where id=?", args!(a["task_id"].clone())).ok_or("no such task")?;
+        let (mut thread, mut text) = (s(&a["thread"]), text.to_string());
         let codex = self.codex()?;
-        if !self.loaded.lock().unwrap().contains(&thread) {
+        // A Codex thread keeps the tools it started with, so once a device has changed its tools (an update), the agent goes
+        // on in a new thread that has them, with its task's story so far.
+        if s(&a["tools"]) != names(&self.tools_for(&self.task_kinds(&task))) {
+            let mut story: Vec<String> = self.db.all("select who, text from log where agent_id=? order by id desc limit 80", args!(agent))
+                .iter().map(|e| format!("{}: {}", s(&e["who"]), short(&s(&e["text"]), 400))).collect();
+            story.reverse();
+            thread = self.new_thread(agent, &task)?;
+            text = format!("Your devices' tools changed (an update), so you go on in a new session. Your task so far, oldest first:\n{}\n\n{text}",
+                story.join("\n"));
+        } else if !self.loaded.lock().unwrap().contains(&thread) {
             codex.request("thread/resume", json!({ "threadId": thread }), 60)?;
             self.loaded.lock().unwrap().insert(thread.clone());
         }

@@ -278,7 +278,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let nid = req.q("id").to_string();
             hive.db.run("update nodes set seen=? where id=?", args!(now(), nid));
             let call = hive.wait_until(25_000, || {
-                let c = hive.db.get("select id, tool, args from calls where node=? and status='queued' order by id limit 1", args!(nid))?;
+                let c = hive.db.get("select c.id, c.tool, c.args, t.id as task, t.title from calls c left join agents a on a.id=c.agent_id \
+                    left join tasks t on t.id=a.task_id where c.node=? and c.status='queued' order by c.id limit 1", args!(nid))?;
                 hive.db.run("update calls set status='sent' where id=?", args!(c["id"].clone()));
                 Some(c)
             });
@@ -287,6 +288,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 Some(c) => {
                     let mut a = serde_json::from_str::<Value>(&s(&c["args"])).unwrap_or(json!({}));
                     let tool = s(&c["tool"]);
+                    // The owner sees which task is asking for their Mac, and follows its log while it has it.
+                    if tool.ends_with("_take_over") { a["task"] = json!({ "id": c["task"], "title": c["title"] }); }
                     if matches!(tool.as_str(), "browser_type_password" | "mac_type_password" | "windows_type_password") {
                         // The database holds only the site and username. Resolve the secret at delivery,
                         // and only for the device token that registered this node.
