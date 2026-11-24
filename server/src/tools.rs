@@ -14,7 +14,7 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
                 "before": n("Only requests before this id; 0 for newest. Use the last returned id for the next page.") }),
             &["query", "project", "before"]),
         tool("info", "The owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, \
-            neither to list all.", json!({ "key": s("e.g. home_address"), "value": s("Value to save; empty to read.") }), &["key", "value"]),
+            neither to list all. Save confirmed personal details discovered or used during a task so future sessions can retrieve them. Read existing entries and reuse their keys; never save guesses, passwords, codes or tokens.", json!({ "key": s("e.g. home_address"), "value": s("Value to save; empty to read.") }), &["key", "value"]),
         tool("rule", "Save a standing instruction the owner just gave (always, never, from now on, a preference) as one of their rules.",
             json!({ "text": s("The rule, short."), "quote": s("The owner's exact words."), "scope": s("How far it reaches: \
             folder:<path>, site:<host>, app:<name> or node:<kind> when it's about that; empty only when they clearly mean everything they do.") }),

@@ -984,9 +984,8 @@ task = its id, text = the owner's words.
 - tasks: otherwise one new task (an existing agent for the same project can queue it): title = short imperative; quote = the owner's exact words; nodes = where the \
 work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level = \
 easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. None for a request from a \
-Claude Code session (claude:…): that session writes its own. A question is a task too (vm, easy) unless the answer is right \
-here; then just reply.
-- reply: one short sentence to the owner saying what happens next.";
+Claude Code session (claude:…): that session writes its own. Answer questions yourself using the supplied conversation, outcomes and rules; do not create a task merely to restate an answer already available. Create a research task only when answering requires new evidence or device actions. When a question accompanies requested work, answer it in reply immediately and route the work. A problem report such as why did this fail, this should work, or fix this requests a repair: assign implementation and verification, not just investigation. Preserve the full intended outcome in the task title and quote.
+- reply: answer the owner's question first when the evidence is available, then briefly say what work happens next. For an answer requiring no work, return empty tasks and messages.";
 
 /// What an agent that's about to stop for the owner hears first.
 const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
@@ -1008,7 +1007,11 @@ solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and
 Hive itself that falls short, improve Hive's own code. When one app's window can't do it (a menu shortcut, a system dialog, a page \
 that won't respond), don't end with a blocker: ask for the whole Mac with mac_take_over (why, and about how many minutes), and once \
 the owner hands it over, use its own pointer and keyboard. Never take over their screen any other way, like bringing an app to the \
-front. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+front. When you discover or use confirmed personal details belonging to the owner (for example their name, email or phone), \
+save them with info during the task so later sessions can retrieve them. Check existing entries first; reuse their keys and save \
+only new or corrected facts. Save facts from the owner or a verified personal source; never guesses, unrelated people, passwords, \
+verification codes or tokens. Personal facts belong in info; only explicit standing instructions belong in rules. A request to fix \
+a problem includes implementing and testing the repair; investigation alone does not complete it. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
 /// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
 const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \
@@ -1054,6 +1057,19 @@ mod tests {
         let result = hive.tool_inner("history", &json!({"query":"calibration", "project":"typing", "before":0}), 0, 0).unwrap();
         let evidence: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
         assert_eq!(evidence[0]["id"], 1);
+    }
+
+    #[test]
+    fn personal_facts_are_retrievable_by_later_agents() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.tool_inner("info", &json!({"key":"email", "value":"owner@example.test"}), 1, 1).unwrap();
+        let later = hive.tool_inner("info", &json!({"key":"email", "value":""}), 2, 2).unwrap();
+        assert!(later.as_str().unwrap().contains("owner@example.test"));
+        hive.tool_inner("info", &json!({"key":"email", "value":"updated@example.test"}), 2, 2).unwrap();
+        assert_eq!(hive.db.all("select * from info", &[]).len(), 1);
+        assert!(hive.tool_inner("info", &json!({"key":"", "value":""}), 3, 3).unwrap().as_str().unwrap().contains("updated@example.test"));
+        assert!(hive.db.all("select * from rules", &[]).is_empty());
     }
 
     #[test]
