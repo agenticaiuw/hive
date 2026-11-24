@@ -79,12 +79,14 @@ jobs:
                       continue
                   sc = "; ".join(f"{x['class']} {x['state']} w{x['windows']} key={x['keyWindow']}" for x in s.get("scenes", [])) or "no scenes"
                   w = s.get("window")
-                  w = f"window inScene={w['inScene']} {w['sceneState']} key={w['key']} hidden={w['hidden']} reload={w['reload']}" if isinstance(w, dict) else "no window"
+                  w = f"window inScene={w['inScene']} {w['sceneState']} key={w['key']} hidden={w['hidden']} reload={w['reload']} web={w.get('web')} page={w.get('page')}" if isinstance(w, dict) else "no window"
                   out.append(f"{s.get('n')}. {s.get('step')} | app={s.get('app')} delegate={s.get('delegate')} manifest={s.get('sceneManifest')} | {sc} | {w} | taps={s.get('taps')}")
               say("notice", f"probe {run}", out)
           notes = []
-          for f in sorted(glob.glob(f"{d}/host.txt") + glob.glob(f"{d}/std*.txt")):
-              tail = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()][-6:]
+          for f in ["target/HivePhone/disk-image.txt"] + sorted(glob.glob(f"{d}/host.txt") + glob.glob(f"{d}/std*.txt")):
+              if not os.path.exists(f):
+                  continue
+              tail = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()][-12:]
               notes += [f"{os.path.basename(f)}: {l}" for l in tail]
           say("notice", "probe host", notes or ["nothing from the host"])
           EOF

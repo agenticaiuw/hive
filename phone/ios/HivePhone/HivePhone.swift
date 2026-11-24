@@ -61,6 +61,7 @@ final class HivePhone: XCTestCase {
             add(a)
         }
         Dashboard.show()
+        Dashboard.preview()
         spin(2)
         note("started by xcodebuild")
 
@@ -126,8 +127,11 @@ final class HivePhone: XCTestCase {
         XCUIApplication(bundleIdentifier: Bundle.main.bundleIdentifier ?? "").activate()
         spin(3)
         note("back in front via XCUIApplication.activate()")
+        XCTAssertGreaterThan(Dashboard.reloadFrame.width, 20, "Reload isn't laid out: \(Dashboard.reloadFrame)")
+        XCTAssertGreaterThan(Dashboard.webFrame.height, 200, "the web view isn't laid out: \(Dashboard.webFrame)")
         Probe.tapReload()
         spin(1)
         note("after a tap on Reload")
+        XCTAssertEqual(Dashboard.taps, 1, "Hive's window didn't take the tap")
     }
 }

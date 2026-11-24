@@ -35,6 +35,12 @@ dress() {
   find $1 -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
   codesign -f -s - --timestamp=none $1
 }
+# The @rpath libraries the app's binaries load that the app doesn't carry (Frameworks/X.framework or Frameworks/X.dylib):
+# xcodebuild finds them in Xcode, a device in its developer disk image.
+missing() {
+  find $1 -type f | while read -r f; do otool -L "$f" 2> /dev/null | awk '/@rpath\// { sub("@rpath/", "", $1); split($1, p, "/"); print p[1] }'; done |
+    sort -u | while read -r l; do [ -e "$1/Frameworks/$l" ] || echo "$l"; done
+}
 if [ "$1" = test ]; then
   sim=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')
   xcrun simctl boot "$sim" 2> /dev/null || true
@@ -50,6 +56,16 @@ if [ "$1" = test ]; then
   app=$out/icon/Hive.app
   rm -rf $out/icon; mkdir -p $out/icon
   ditto $out/sim/Build/Products/Debug-iphonesimulator/HivePhone-Runner.app $app
+  # A simulator has no developer disk image: what xcodebuild would take from Xcode goes in the app (lib_TestingInterop.dylib,
+  # for one, which Testing.framework loads), until nothing is missing.
+  dev=$(xcrun --sdk iphonesimulator --show-sdk-platform-path)/Developer
+  for round in 1 2 3; do
+    for l in $(missing $app); do
+      src=$(find "$dev/Library" "$dev/usr/lib" -maxdepth 2 -name "$l" 2> /dev/null | head -1)
+      if [ -n "$src" ]; then ditto "$src" "$app/Frameworks/$l"; echo "added from Xcode: $l" >> $out/probe/host.txt
+      else echo "missing, not in Xcode either: $l" >> $out/probe/host.txt; fi
+    done
+  done
   dress $app
   xcrun simctl uninstall "$sim" $id 2> /dev/null || true
   xcrun simctl install "$sim" $app
@@ -77,4 +93,5 @@ ditto $out/derived/Build/Products/Debug-iphoneos/HivePhone-Runner.app $app
 # Everything Xcode embeds in Frameworks is XCTest's, which comes from the phone's developer disk image, matched to its iOS.
 rm -rf $app/Frameworks
 dress $app
+echo "From the developer disk image:" $(missing $app) | tee $out/disk-image.txt
 (cd $out && rm -f ../Hive.ipa && zip -qry ../Hive.ipa Payload) && echo target/Hive.ipa

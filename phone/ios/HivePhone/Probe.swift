@@ -21,7 +21,8 @@ enum Probe {
         if let w = Dashboard.window {
             let sceneState: String = w.windowScene.map { names[$0.activationState] ?? "?" } ?? "none"
             window = ["inScene": w.windowScene != nil, "sceneState": sceneState, "hidden": w.isHidden, "key": w.isKeyWindow,
-                      "frame": NSCoder.string(for: w.frame), "reload": NSCoder.string(for: Dashboard.reloadFrame)]
+                      "frame": NSCoder.string(for: w.frame), "reload": NSCoder.string(for: Dashboard.reloadFrame),
+                      "web": NSCoder.string(for: Dashboard.webFrame), "page": Dashboard.page]
         }
         let delegate: String = app.delegate.map { String(describing: type(of: $0)) } ?? "none"
         return ["app": appState, "delegate": delegate, "scenes": scenes, "window": window, "taps": Dashboard.taps,
@@ -73,6 +74,7 @@ enum Probe {
         }
         let own = Bundle.main.bundleIdentifier ?? ""
         let steps: [(TimeInterval, () -> Void)] = [
+            (1, { Dashboard.preview() }),
             (3, { log("launched from the icon", run) }),
             (4, { tapReload() }),
             (6, { log("after a tap on Reload", run) }),
