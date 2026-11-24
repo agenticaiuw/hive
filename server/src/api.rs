@@ -122,7 +122,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
     let id = |i: usize| parts.get(i).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0);
     match (m, parts.as_slice()) {
         ("GET", ["api", "me"]) => Res::json(&json!({ "ok": true, "version": hive.version })),
-        ("POST", ["api", "pair", "code"]) => Res::json(&json!({ "code": new_code(&hive.db) })),
+        // With the Hive's own address: the dashboard may be open at this computer's local one, which other devices can't use.
+        ("POST", ["api", "pair", "code"]) => Res::json(&json!({ "code": new_code(&hive.db), "address": crate::address(&hive.state) })),
         ("POST", ["api", "requests"]) => {
             let text = s(&b["text"]);
             if text.trim().is_empty() { return Res::err(400, "Say what you want."); }
