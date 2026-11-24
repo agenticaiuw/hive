@@ -1,6 +1,6 @@
 // Keeps the owner's personal details out of this public repository (hive T81). The repository was
-// scrubbed and its history rewritten twice (files, then commit messages); this stops the same kinds of values
-// creeping back into either.
+// scrubbed and its history rewritten three times (files, commit messages, then commit authors); this stops the same
+// kinds of values creeping back into any of them.
 // It checks shapes, never the values themselves, so the test holds no personal data either:
 //   - Workers are named with the placeholder subdomain (hiveCloud.mjs fills in the real one at build)
 //   - no personal mail addresses (gmail, iCloud, a university's) beyond the public ones listed here
@@ -98,13 +98,27 @@ test("the repository holds none of the owner's personal details", t => {
   assert.deepEqual(found, [], `Personal details in the repository:\n${found.join('\n')}`)
 })
 
-test("no commit message holds the owner's personal details", t => {
+// Each commit as [`commit <hash>`, the part of it the format picks], or null outside a git checkout.
+function commits(format) {
   let log
   try {
-    log = execFileSync('git', ['-C', ROOT, 'log', '--format=%h%x00%B%x01'], { encoding: 'utf8', maxBuffer: 256 << 20 })
+    log = execFileSync('git', ['-C', ROOT, 'log', `--format=%h%x00${format}%x01`], { encoding: 'utf8', maxBuffer: 256 << 20 })
   } catch {
-    return t.skip('not a git checkout')
+    return null
   }
-  const found = scan(log.split('\x01').filter(c => c.includes('\0')).map(c => c.trim().split('\0')).map(([h, m]) => [`commit ${h}`, m]))
+  return log.split('\x01').filter(c => c.includes('\0')).map(c => c.trim().split('\0')).map(([h, m]) => [`commit ${h}`, m])
+}
+
+test("no commit message holds the owner's personal details", t => {
+  const log = commits('%B')
+  if (!log) return t.skip('not a git checkout')
+  const found = scan(log)
   assert.deepEqual(found, [], `Personal details in commit messages:\n${found.join('\n')}`)
+})
+
+test("no commit's author or committer is a personal mail address", t => {
+  const log = commits('%ae %ce')
+  if (!log) return t.skip('not a git checkout')
+  const found = scan(log)
+  assert.deepEqual(found, [], `Personal addresses as commit authors (set git's user.email to your GitHub no-reply address):\n${found.join('\n')}`)
 })
