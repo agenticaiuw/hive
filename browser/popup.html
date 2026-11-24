@@ -9,9 +9,7 @@
   textarea { height: 64px; resize: vertical; }
   button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
   ul { margin: 4px 0 0; padding-left: 18px; }
-  .muted, footer { color: var(--muted); }
-  footer { margin-top: 10px; }
-  a { color: inherit; }
+  .muted { color: var(--muted); }
   [hidden] { display: none; }
 </style>
 <p id="ts" hidden><button id="tsLogin">Sign in to Tailscale</button> <span class="muted">This browser reaches your Hive Server through Tailscale.</span></p>
@@ -20,14 +18,6 @@
   <button id="join">Sign in with Tailscale</button>
   <p class="muted">Use the same Tailscale account as your Hive Server, and this browser finds it and connects by itself.</p>
   <p id="pairNote"></p>
-  <details>
-    <summary class="muted">Or paste a pairing link</summary>
-    <form id="linkForm">
-      <p class="muted">For a Hive Server on a cloud computer: on its dashboard, choose Pair a device, then paste the link here.</p>
-      <input id="link" placeholder="Pairing link" required>
-      <button>Connect</button>
-    </form>
-  </details>
 </div>
 <div id="main" hidden>
   <form id="ask">
@@ -36,6 +26,5 @@
   </form>
   <div id="workBox" hidden><ul id="work"></ul><p class="muted">Sending again about this goes to the same agent; anything else starts a new one.</p></div>
   <div id="rulesBox" hidden><p><b>Rules on <span id="site"></span></b></p><ul id="rules"></ul></div>
-  <footer><a id="dash" href="#" target="_blank">Dashboard</a></footer>
 </div>
 <script type="module" src="popup.js"></script>

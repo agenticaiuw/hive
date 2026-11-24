@@ -1,4 +1,4 @@
-// Tailscale built into the extension (tailnet/), for a Hive at home that only its owner's tailnet reaches. Chrome, Edge and
+// Tailscale built into the extension (tailnet/), which reaches the Hive Server on its owner's tailnet. Chrome, Edge and
 // Brave run it in offscreen.html; Safari, which has no offscreen documents, in its background page (worker.js).
 
 /** Starts this browser's node and returns it: {fetch, peers}. store keeps its state (so it stays signed in); status gets {state, url}. */

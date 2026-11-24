@@ -9,10 +9,9 @@ function hive({ peers = [], answers = {} } = {}) {
   const seen = [];
   const stored = {};
   const answer = (url) => answers[url] || { status: 200, headers: { 'content-type': 'application/json' }, body: '{"ok":true}' };
-  const lib = vm.runInNewContext(`${source}\n({ api, tailnet, findServer, joinTailnet, pair })`, {
+  const lib = vm.runInNewContext(`${source}\n({ api, tailnet, findServer, joinTailnet })`, {
     URL, Response, AbortSignal, JSON, crypto,
     navigator: { userAgent: 'Chrome', userAgentData: { brands: [{ brand: 'Google Chrome' }] } },
-    fetch: async (url) => { seen.push(['browser', url]); const a = answer(url); return new Response(a.body, a); },
     chrome: {
       storage: { local: { set: async (o) => Object.assign(stored, o) } },
       runtime: {
@@ -28,7 +27,7 @@ function hive({ peers = [], answers = {} } = {}) {
   return { lib, seen, stored };
 }
 
-test('a .ts.net or tailnet-address server goes through the tailnet, with its method, headers and body', async () => {
+test('calls go through the tailnet, with their method, headers and body', async () => {
   const { lib, seen } = hive();
   assert.deepEqual({ ...await lib.api({ server: 'http://hive.example.ts.net', token: 't' }, '/api/node/hello', {}) }, { ok: true });
   await lib.api({ server: 'http://100.101.102.103', token: 't' }, '/api/state');
@@ -36,13 +35,6 @@ test('a .ts.net or tailnet-address server goes through the tailnet, with its met
     ['call', 'fetch', 'http://hive.example.ts.net/api/node/hello', 'POST', 'Bearer t', '{}'],
     ['call', 'fetch', 'http://100.101.102.103/api/state', 'GET', 'Bearer t', undefined],
   ]);
-});
-
-test('any other server is fetched directly', async () => {
-  const { lib, seen } = hive();
-  await lib.api({ server: 'https://hive.example.com', token: 't' }, '/api/state');
-  await lib.api({ server: 'https://ts.net.example.com', token: 't' }, '/api/state');
-  assert.deepEqual(seen, [['browser', 'https://hive.example.com/api/state'], ['browser', 'https://ts.net.example.com/api/state']]);
 });
 
 test("the tailnet's errors and 204s come back as the browser's would", async () => {
@@ -70,7 +62,7 @@ test('with MagicDNS off the Hive Server is found by its tailnet address; with no
   assert.equal(await hive({ peers: [] }).lib.findServer(), null);
 });
 
-test('signing in with Tailscale joins the Hive Server it finds, with no pairing link, and keeps its key', async () => {
+test('signing in with Tailscale joins the Hive Server it finds and keeps its key', async () => {
   const { lib, seen, stored } = hive({
     peers: [peer('hive', 'hive.example.ts.net.')],
     answers: { 'http://hive.example.ts.net/api/pair/tailnet': { status: 200, headers: {}, body: '{"token":"k"}' } },
@@ -91,13 +83,6 @@ test("joining says why when there's no Hive Server yet (and tries again) or it r
   await assert.rejects(refused.lib.joinTailnet(), (e) => !e.again && /Only your own devices/.test(e.message));
 });
 
-test('a pairing link still pairs, now through the same code', async () => {
-  const { lib, seen, stored } = hive({ answers: { 'https://hive.example.com/api/pair': { status: 200, headers: {}, body: '{"token":"k"}' } } });
-  await lib.pair('https://hive.example.com/#pair=12345678');
-  assert.deepEqual(seen, [['browser', 'https://hive.example.com/api/pair']]);
-  assert.equal(stored.hive.token, 'k');
-});
-
 // The worker's side of "Sign in with Tailscale": it keeps trying until Tailscale is signed in and a Hive Server answers.
 const worker = readFileSync(`${__dirname}/../worker.js`, 'utf8');
 const pendingSource = worker.slice(worker.indexOf('let busy = false;'), worker.indexOf('\npending();'));
@@ -107,7 +92,7 @@ async function pending(db, joinTailnet) {
     set: async (o) => Object.assign(db, o),
     remove: async (keys) => [keys].flat().forEach((k) => delete db[k]),
   };
-  await vm.runInNewContext(`${pendingSource}\npending()`, { chrome: { storage: { local } }, joinTailnet, pair: joinTailnet });
+  await vm.runInNewContext(`${pendingSource}\npending()`, { chrome: { storage: { local } }, joinTailnet });
   return db;
 }
 

@@ -1,6 +1,6 @@
 // The toolbar popup: connect this browser to Hive, ask Hive from any page (the request goes to the orchestrator with the
 // page as context) and follow what it's doing, and see the owner's rules for this site.
-import { api, conf, onTailnet, pair } from './hive.js';
+import { api, conf } from './hive.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,8 +9,6 @@ async function show() {
   $('pair').hidden = !!c;
   $('main').hidden = !c;
   if (!c) return;
-  $('dash').href = `${c.server}/#key=${encodeURIComponent(c.token)}`; // signs that tab in by itself, as the Mac app's window does
-  $('dash').hidden = onTailnet(c.server); // the browser's own tabs aren't on the tailnet, only the extension is
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let site = '';
   try { site = /^https?:$/.test(new URL(tab.url).protocol) ? new URL(tab.url).hostname : ''; } catch {}
@@ -60,12 +58,12 @@ async function work(c) {
 // it's the button to sign in again when Tailscale asks.
 let signIn = false;
 async function tailscale() {
-  const { hive, tailnet: t, pairing, joining, pairNote } = await chrome.storage.local.get(['hive', 'tailnet', 'pairing', 'joining', 'pairNote']);
+  const { hive, tailnet: t, joining, pairNote } = await chrome.storage.local.get(['hive', 'tailnet', 'joining', 'pairNote']);
   const url = t?.state !== 'Running' && t?.url;
   $('ts').hidden = !hive || !url;
   $('tsLogin').onclick = () => chrome.tabs.create({ url });
   if (signIn && url) { signIn = false; chrome.tabs.create({ url }); }
-  if (pairNote || pairing || joining) $('pairNote').textContent = pairNote || (url ? 'Sign in to Tailscale in the tab that opened, then this browser connects by itself.' : 'Connecting through Tailscale…');
+  if (pairNote || joining) $('pairNote').textContent = pairNote || (url ? 'Sign in to Tailscale in the tab that opened, then this browser connects by itself.' : 'Connecting through Tailscale…');
 }
 chrome.storage.onChanged.addListener((ch) => { tailscale(); if (ch.hive?.newValue) show(); });
 tailscale();
@@ -74,17 +72,5 @@ $('join').onclick = async () => {
   signIn = true;
   await chrome.storage.local.set({ joining: true, pairNote: '' });
   tailscale();
-};
-$('linkForm').onsubmit = async (e) => {
-  e.preventDefault();
-  $('pairNote').textContent = 'Connecting…';
-  const link = $('link').value.trim();
-  if (onTailnet(link)) { signIn = true; return chrome.storage.local.set({ pairing: link, pairNote: '' }); }
-  try {
-    await pair(link);
-    show();
-  } catch (err) {
-    $('pairNote').textContent = err.message;
-  }
 };
 show();

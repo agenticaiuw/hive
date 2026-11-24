@@ -1,17 +1,6 @@
 // What the worker and the popup share: this browser's connection to Hive's server (protocol/README.md).
 
-export const conf = async () => (await chrome.storage.local.get('hive')).hive || (joining ||= fromApp().catch(() => null).finally(() => { joining = null; }));
-
-/** Hive for Safari comes inside the Mac app: it asks the app's extension handler for the Mac's pairing and connects as a
- * device of its own, with no link and even with the app closed, under one id per Mac however often it joins again (Safari
- * forgets the extension's storage when the app is replaced). Elsewhere there is no handler, so it waits for a link. */
-let joining;
-async function fromApp() {
-  const mac = await chrome.runtime.sendNativeMessage?.('app.hive.mac', {});
-  if (!mac?.server || !mac?.token) return null;
-  const { code } = await api(mac, '/api/pair/code', {});
-  return pair(`${mac.server}/#pair=${code}`, mac.id && `browser-${mac.id}`);
-}
+export const conf = async () => (await chrome.storage.local.get('hive')).hive;
 
 /** Call Hive's server. JSON in and out; null for 204. */
 export async function api(c, path, body, method) {
@@ -27,15 +16,8 @@ export async function api(c, path, body, method) {
   return j;
 }
 
-/** A Hive at home that only its owner's tailnet reaches is served at http://hive.<tailnet>.ts.net, and reached through
- * Tailscale built into the extension (tailnet.js); any other server, directly. */
-export const onTailnet = (url) => {
-  try {
-    const h = new URL(url).hostname, ip = h.match(/^100\.(\d+)\.\d+\.\d+$/);
-    // Its MagicDNS name, or its tailnet address (100.64.0.0/10) when the tailnet has MagicDNS off.
-    return h.endsWith('.ts.net') || (!!ip && +ip[1] >= 64 && +ip[1] < 128);
-  } catch { return false; }
-};
+/** The Hive Server is on its owner's tailnet, at http://hive.<tailnet>.ts.net, and reached through Tailscale built into the
+ * extension (tailnet.js). */
 export const tailnet = {
   // Chrome, Edge and Brave run the node in an offscreen document, opened here when it isn't already. Safari has none: its
   // background page runs the node and replaces this (worker.js). Calls at once share one opening, so none asks before it
@@ -50,7 +32,6 @@ export const tailnet = {
 };
 let opening;
 async function request(url, { signal, ...init }) {
-  if (!onTailnet(url)) return fetch(url, { ...init, signal });
   const r = await tailnet.fetch(url, init);
   if (r?.error) throw new Error(r.error);
   return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
@@ -73,32 +54,21 @@ export async function findServer() {
 }
 
 /** "Sign in with Tailscale": join the Hive Server on the owner's tailnet, which knows this browser is theirs by its
- * Tailscale account, so no pairing link. */
+ * Tailscale account. */
 export async function joinTailnet() {
   const server = await findServer();
   if (!server) throw Object.assign(new Error('Looking for your Hive Server… Make sure it is on and signed in to the same Tailscale account.'), { again: true });
-  return connect(server, '/api/pair/tailnet', {});
-}
-
-/** Connect this browser with the link the dashboard's "Pair a device" copies: https://<server>/#pair=<code>. */
-export async function pair(link, id) {
-  const [server, code] = link.trim().split('/#pair=');
-  if (!code) throw new Error("That isn't a pairing link. On your Hive Server's dashboard, choose Pair a device and paste the link it copies.");
-  return connect(server, '/api/pair', { code }, id);
-}
-
-async function connect(server, path, body, id) {
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
   const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
   const name = safari ? 'Safari' : brands.find((b) => !/Not.A.Brand|Chromium/i.test(b)) || 'Chrome';
-  const r = await request(server + path, {
+  const r = await request(`${server}/api/pair/tailnet`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...body, kind: 'browser', name }),
+    body: JSON.stringify({ kind: 'browser', name }),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `Hive answered ${r.status}`);
-  const c = { server, token: j.token, id: id || `browser-${crypto.randomUUID().slice(0, 8)}`, name };
+  const c = { server, token: j.token, id: `browser-${crypto.randomUUID().slice(0, 8)}`, name };
   await chrome.storage.local.set({ hive: c });
   return c;
 }
