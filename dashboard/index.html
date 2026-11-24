@@ -53,7 +53,15 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 .chat-log .activity { padding: 5px 0; color: var(--muted); overflow-wrap: anywhere; }
 .chat-log .activity summary { cursor: pointer; }
 .chat-log .activity-body { white-space: pre-wrap; }
-.chat-log .command-group .activity { padding-left: 12px; }
+.chat-log .tool-cell { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 8px 0; border: 0; }
+.tool-title { color: var(--fg); white-space: pre-wrap; }
+.tool-title > span { color: var(--muted); }
+.tool-detail, .tool-output { margin-left: 16px; padding-left: 12px; border-left: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-cell details { margin-left: 28px; }
+.tool-cell pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.tool-cell.failed .tool-title { color: var(--warn); }
+.tool-cell[aria-busy="true"] .tool-title > span { color: var(--accent); }
+.chat-log figure.screenshot { margin: 8px 0; }
 .log .who { color: var(--accent); font-weight: 600; margin-right: 6px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
@@ -227,8 +235,37 @@ let boardSelection = null;
 addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' && boardSelection !== null ? sessionId(boardSelection) : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
 function openTask(id) { boardSelection = id; location.hash = 'Sessions'; }
 
+// Adapted from OpenAI Codex's Apache-2.0 terminal history renderer; see codex-rendering.README.md.
+function toolEntry(item) {
+  const active = item.status === 'inProgress', failed = item.status === 'failed' || (item.exitCode != null && item.exitCode !== 0);
+  let title, detail = '', output = item.aggregatedOutput ?? item.output ?? '';
+  if (item.type === 'commandExecution') {
+    const actions = item.commandActions || [];
+    const explored = actions.length && actions.every(a => ['read', 'search', 'listFiles'].includes(a.type));
+    title = explored ? (active ? 'Exploring' : 'Explored') : `${active ? 'Running' : 'Ran'} ${item.command || ''}`;
+    if (explored) detail = actions.map(a => a.type === 'read' ? `Read ${a.name || a.path}` : a.type === 'listFiles' ? `List ${a.path || '.'}` : `Search ${a.query || a.command}${a.path ? ' in ' + a.path : ''}`).join('\n');
+  } else if (item.type === 'fileChange') {
+    title = active ? 'Editing' : 'Edited';
+    detail = (item.changes || []).map(c => c.path).join('\n');
+    output = (item.changes || []).map(c => c.diff || '').join('\n');
+  } else if (item.type === 'webSearch') {
+    title = `${active ? 'Searching' : 'Searched'} ${item.query || ''}`;
+  } else if (item.type === 'imageView') {
+    title = 'Viewed image'; detail = item.path || '';
+  } else {
+    title = active ? 'Calling' : 'Called';
+    detail = `${item.server ? item.server + '.' : ''}${item.tool || ''}(${JSON.stringify(item.arguments ?? {})})`;
+    if (!output && item.result) output = typeof item.result === 'string' ? item.result : JSON.stringify(item.result, null, 2);
+    if (item.error) output = typeof item.error === 'string' ? item.error : JSON.stringify(item.error);
+  }
+  if (failed) title += item.exitCode != null ? ` (exit ${item.exitCode})` : ' (failed)';
+  const lines = String(output).split('\n');
+  const preview = lines.slice(0, 5).join('\n');
+  return `<div class="activity tool-cell${failed ? ' failed' : ''}" data-tool-id="${esc(item.id || '')}" aria-busy="${!!active}"><div class="tool-title"><span aria-hidden="true">•</span> ${esc(title)}</div>${detail ? `<div class="tool-detail">${esc(detail)}</div>` : ''}${output ? `<div class="tool-output">${esc(preview)}</div>${lines.length > 5 ? `<details><summary>+${lines.length - 5} lines</summary><pre>${esc(lines.slice(5).join('\n'))}</pre></details>` : ''}` : ''}</div>`;
+}
 function logEntry(l) {
   const who = String(l.who || '');
+  if (who === 'tool-item') { try { return toolEntry(JSON.parse(l.text)); } catch {} }
   if (who === 'image') {
     try {
       const image = JSON.parse(l.text);
@@ -242,17 +279,16 @@ function logEntry(l) {
     return `<div class="message agent" aria-label="${esc(who === 'hive' ? 'Hive' : 'Agent')}"><div class="message-body">${esc(l.text)}</div></div>`;
   return `<details class="activity"><summary>${esc(who)}</summary><div class="activity-body">${esc(l.text)}</div></details>`;
 }
-// Keep consecutive commands together, including commands arriving in later polls.
+// Replace running items in place, including completions arriving in later polls.
 function appendLogEntry(box, l) {
-  if (l.who !== 'command') { box.insertAdjacentHTML('beforeend', logEntry(l)); return; }
-  let group = box.lastElementChild;
-  if (!group?.classList.contains('command-group')) {
-    box.insertAdjacentHTML('beforeend', '<details class="activity command-group"><summary></summary></details>');
-    group = box.lastElementChild;
+  if (l.who === 'tool-item') {
+    try {
+      const item = JSON.parse(l.text);
+      const old = [...box.querySelectorAll('[data-tool-id]')].find(el => el.dataset.toolId === item.id);
+      if (old) { const open = old.querySelector('details')?.open; old.outerHTML = logEntry(l); if (open) [...box.querySelectorAll('[data-tool-id]')].find(el => el.dataset.toolId === item.id)?.querySelector('details')?.setAttribute('open', ''); return; }
+    } catch {}
   }
-  group.insertAdjacentHTML('beforeend', logEntry(l));
-  const count = group.children.length - 1;
-  group.firstElementChild.textContent = `${count} ${count === 1 ? 'command' : 'commands'}`;
+  box.insertAdjacentHTML('beforeend', logEntry(l));
 }
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 // Session identity stays stable as the same agent takes on more tasks.

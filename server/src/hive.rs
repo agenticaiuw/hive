@@ -124,7 +124,7 @@ impl Hive {
 
     pub fn log(&self, agent: i64, task: i64, request: i64, who: &str, text: &str) {
         self.db.run("insert into log(at, agent_id, task_id, request_id, who, text) values(?,?,?,?,?,?)",
-            args!(now(), agent, task, request, who, short(text, 20000)));
+            args!(now(), agent, task, request, who, if who == "tool-item" { text.to_string() } else { short(text, 20000) }));
         self.bump();
     }
 
@@ -581,19 +581,28 @@ impl Hive {
         let (agent, task) = (a["id"].as_i64().unwrap_or(0), a["task_id"].as_i64().unwrap_or(0));
         match method {
             "turn/started" => { self.turns.lock().unwrap().insert(thread, s(&params["turn"]["id"])); }
-            "item/completed" => {
+            "item/started" | "item/completed" => {
                 let item = &params["item"];
                 let line = match s(&item["type"]).as_str() {
-                    "agentMessage" => {
+                    "agentMessage" if method == "item/completed" => {
                         let text = s(&item["text"]);
                         if ended(&text).is_some() { self.last.lock().unwrap().insert(agent, text); None } else { Some(("agent", text)) }
                     }
-                    "commandExecution" => Some(("command", format!("$ {}\n{}", s(&item["command"]), short(&s(&item["aggregatedOutput"]), 3000)))),
-                    "fileChange" => Some(("files", item["changes"].as_array().map(|c| c.iter().map(|x| s(&x["path"])).collect::<Vec<_>>().join(", ")).unwrap_or_default())),
-                    "webSearch" => Some(("search", s(&item["query"]))),
+                    "commandExecution" | "fileChange" | "webSearch" | "imageView" | "mcpToolCall" =>
+                        Some(("tool-item", item.to_string())),
                     _ => None,
                 };
                 if let Some((who, text)) = line { if !text.is_empty() { self.log(agent, task, 0, who, &text); } }
+                if method == "item/completed" && item["type"] == "imageView" {
+                    let path = s(&item["path"]);
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("image.png");
+                        let saved = self.save_file(name, &bytes, "agent");
+                        if let Some(id) = saved.file_name().and_then(|n| n.to_str()).and_then(|n| n.split('-').next()) {
+                            self.log(agent, task, 0, "image", &json!({"url": format!("api/files/{id}"), "tool": "view_image"}).to_string());
+                        }
+                    }
+                }
             }
             "turn/completed" => {
                 self.turns.lock().unwrap().remove(&thread);
@@ -767,7 +776,12 @@ impl Hive {
 
     /// A tool call, logged, as either engine answers it: whether it worked, its text, and its images (data URLs).
     fn run_tool(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> (bool, String, Vec<String>) {
-        self.log(agent, task, 0, "tool", &format!("{name} {}", short(&a.to_string(), 300)));
+        let id = crate::api::random(12);
+        let arguments = if name.contains("password") { json!({}) } else { a.clone() };
+        let record = |status: &str, output: &str| self.log(agent, task, 0, "tool-item",
+            &json!({"id": id, "type": "mcpToolCall", "tool": name, "arguments": arguments,
+                "status": status, "output": output}).to_string());
+        record("inProgress", "");
         match self.tool_inner(name, a, agent, task) {
             Ok(v) if v["error"].is_null() => {
                 let images: Vec<String> = v["images"].as_array().map(|i| i.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
@@ -787,10 +801,12 @@ impl Hive {
                         }
                     }
                 }
-                (true, if v.is_string() { s(&v) } else { s(&v["text"]) }, images)
+                let text = if v.is_string() { s(&v) } else { s(&v["text"]) };
+                record("completed", &text);
+                (true, text, images)
             }
-            Ok(v) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {}", s(&v["error"]))); (false, s(&v["error"]), vec![]) }
-            Err(e) => { self.log(agent, task, 0, "tool", &format!("{name} failed: {e}")); (false, e, vec![]) }
+            Ok(v) => { record("failed", &s(&v["error"])); (false, s(&v["error"]), vec![]) }
+            Err(e) => { record("failed", &e); (false, e, vec![]) }
         }
     }
 

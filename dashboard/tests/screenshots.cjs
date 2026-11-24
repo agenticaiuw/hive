@@ -2,7 +2,7 @@ const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const html = readFileSync('dashboard/index.html', 'utf8');
-const code = html.slice(html.indexOf('function logEntry('), html.indexOf('// Keep consecutive commands'));
+const code = html.slice(html.indexOf('function logEntry('), html.indexOf('// Replace running items'));
 const {logEntry} = vm.runInNewContext(code + ';({logEntry})', {esc: s => String(s).replaceAll('<','&lt;').replaceAll('"','&quot;')});
 const render = url => logEntry({who:'image', text:JSON.stringify({url,tool:'mac_screenshot'})});
 assert.match(render('api/files/42'), /<img src="api\/files\/42"/);
