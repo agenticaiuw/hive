@@ -83,6 +83,13 @@ async function savePin() {
   const r = await api('api/phone/passcode', { method: 'POST', body: { passcode: $('#pin').value } });
   $('#pin').value = ''; if (r.error) alert(r.error); else render();
 }
+// GitHub can't fill in a workflow's inputs from a link, so the UDID goes on the clipboard (this page is plain HTTP inside
+// the tailnet, where navigator.clipboard isn't offered).
+function addPhone(udid, github) {
+  const t = document.createElement('textarea'); t.value = udid; document.body.append(t); t.select();
+  document.execCommand('copy'); t.remove();
+  open(github, '_blank');
+}
 async function send() {
   const text = $('#ask').value.trim(); if (!text) return;
   $('#reply').textContent = 'Sending to the orchestrator…'; $('#ask').value = '';
@@ -154,7 +161,9 @@ async function render() {
     v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
     const phone = await api('api/phone');
     v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span></div>
-      <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div></div>`;
+      <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div>
+      ${phone.unregistered.map(u => `<p>An iPhone plugged into your Mac can't install Hive until it's added to your Apple developer account. <b>Add this iPhone</b> copies its UDID and opens GitHub: choose <i>Run workflow</i>, paste it, and run. In about 20 minutes, open ${phone.install ? `<a href="${esc(phone.install)}">this link</a>` : 'the Hive install link'} on that iPhone.</p>
+        <div class="row"><input readonly value="${esc(u)}" style="flex:1"><button data-udid="${esc(u)}" data-github="${esc(phone.register)}" onclick="addPhone(this.dataset.udid, this.dataset.github)">Add this iPhone</button></div>`).join('')}</div>`;
     v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
     v.innerHTML = `<p class="muted">The VM's screen, refreshed every 2 seconds.</p><img class="screen" id="shot" src="api/vm/screen?t=${Date.now()}">`;

@@ -3,8 +3,8 @@
 # mounts the personalized developer image, then loads its own XCTest bundle.
 # The test bundle keeps full screen control and connects directly to Hive Server;
 # the dashboard and Tailscale stay inside Hive. No WebDriverAgent is involved.
-# Makes target/Hive.ipa. CI signs it with the owner's IOS_* repository secrets;
-# IOS_PROFILE contains the app and Network Extension provisioning profiles.
+# Makes target/Hive.ipa. CI signs it with the owner's Apple Development certificate
+# and profiles App Store Connect makes for every registered iPhone (phone.yml).
 # `build.sh test` checks the tools through Xcode, then probes the packaged app
 # launched from its icon, including taps and control while it is in the background.
 # Needs Xcode, Go and Rust (CI installs the iOS Rust target).
@@ -24,14 +24,21 @@ if [ ! -d $lib ]; then
 fi
 project="-project phone/ios/HivePhone.xcodeproj -scheme HivePhone -configuration Debug"
 id=app.hive.xctrunner
+# HiveVersion is the last change to the app (what the phone tells Hive Server); CFBundleVersion only ever goes up, so
+# iOS takes each build as an update of the one installed.
+version=$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)
+build=$(git rev-list --count HEAD 2> /dev/null || echo 1)
 # The installed app and its test bundle share Hive’s identity, icon and version.
 dress() {
   for p in $1/Info.plist $1/PlugIns/*.xctest/Info.plist; do plutil -replace CFBundleIdentifier -string $id $p; done
+  for p in $1/Info.plist $1/PlugIns/*.appex/Info.plist; do
+    if [ -f "$p" ]; then plutil -replace CFBundleVersion -string $build $p; plutil -replace CFBundleShortVersionString -string 1.0 $p; fi
+  done
   plutil -replace CFBundleDisplayName -string Hive $1/Info.plist
   # A runner template has no launch screen and otherwise gets a 320x480
   # compatibility viewport, which makes its window and screen coordinates differ.
   plutil -replace UILaunchScreen -json '{}' $1/Info.plist
-  plutil -replace HiveVersion -string "$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)" $1/Info.plist
+  plutil -replace HiveVersion -string $version $1/Info.plist
   sips -z 120 120 dashboard/icon.png --out $1/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $1/AppIcon60x60@3x.png
   plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $1/Info.plist
   find $1 -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
@@ -142,19 +149,32 @@ plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plis
 # The XCTest frameworks come from the phone's developer disk image, matched to its iOS.
 rm -rf $app/Frameworks
 dress $app
-# Signed by the owner’s Apple Development identity and device-listed development profiles
-# (HIVE_IOS_PROFILE contains a ZIP of app and extension profiles with Network Extensions). Those iPhones then install
-# it from Safari with a link to target/manifest.plist: itms-services://?action=download-manifest&url=<manifest.plist's address>.
-if [ -n "$HIVE_IOS_PROFILE" ]; then
-  python3 phone/ios/sign.py "$app"
-  cat > target/manifest.plist <<EOF
+# Signed by the owner’s Apple Development certificate (HIVE_IOS_IDENTITY, its SHA-1) with the profiles hive-provision made
+# for this build in $out/profiles (phone/src/bin/hive-provision.rs), which list every registered iPhone. Those iPhones
+# install it by tapping its link, and Hive Server tells installed ones when a newer one is out (phone.json): all in
+# target/pages, which phone.yml publishes at $site.
+site=https://agenticaiuw.github.io/hive
+rm -rf target/pages
+if [ -n "$HIVE_IOS_IDENTITY" ]; then
+  find $app -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s "$HIVE_IOS_IDENTITY" --timestamp=none {}
+  for b in $app/PlugIns/HiveLoopback.appex $app; do
+    bid=$(plutil -extract CFBundleIdentifier raw $b/Info.plist)
+    cp $out/profiles/$bid.mobileprovision $b/embedded.mobileprovision
+    codesign -f -s "$HIVE_IOS_IDENTITY" --timestamp=none --entitlements $out/profiles/$bid.entitlements $b
+  done
+  codesign --verify --deep --strict $app
+  mkdir -p target/pages
+  cat > target/pages/manifest.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>items</key><array><dict>
-<key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>https://github.com/agenticaiuw/hive/releases/download/latest/Hive.ipa</string></dict></array>
-<key>metadata</key><dict><key>bundle-identifier</key><string>$id</string><key>bundle-version</key><string>$(plutil -extract CFBundleVersion raw $app/Info.plist)</string><key>kind</key><string>software</string><key>title</key><string>Hive</string></dict>
+<key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>$site/Hive.ipa</string></dict></array>
+<key>metadata</key><dict><key>bundle-identifier</key><string>$id</string><key>bundle-version</key><string>$build</string><key>kind</key><string>software</string><key>title</key><string>Hive</string></dict>
 </dict></array></dict></plist>
 EOF
+  printf '{"version":"%s","install":"itms-services://?action=download-manifest&url=%s/manifest.plist","devices":%s}\n' \
+    $version $site "$(cat $out/profiles/devices.json)" > target/pages/phone.json
 fi
 echo "From the developer disk image:" $(missing $app) | tee $out/disk-image.txt
 (cd $out && rm -f ../Hive.ipa && zip -qry ../Hive.ipa Payload) && echo target/Hive.ipa
+if [ -d target/pages ]; then cp target/Hive.ipa target/pages/; fi

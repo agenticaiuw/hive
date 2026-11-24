@@ -13,6 +13,8 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
     private(set) var pairing: Pairing?
     private(set) var connected = false
     private(set) var refused = false
+    /// Where to install a newer Hive, once Hive Server says this one is behind (phone/src/link.rs): Dashboard's "Update Hive".
+    private(set) var update: URL?
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
     private var failing = false, retry = 0
@@ -144,7 +146,15 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
                     case .data(let d): data = d
                     @unknown default: data = nil
                     }
-                    if let data, let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { self.forward(command, ws) }
+                    if let data, let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                        if let link = command["update"] as? String {
+                            // Only iOS's own installer link: it installs the new build over this one, keeping its data.
+                            self.update = URL(string: link).flatMap { $0.scheme == "itms-services" ? $0 : nil }
+                            self.changed()
+                        } else {
+                            self.forward(command, ws)
+                        }
+                    }
                     self.receive(ws)
                 }
             }

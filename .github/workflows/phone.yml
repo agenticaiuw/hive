@@ -1,15 +1,25 @@
 # Hive, the iPhone app (phone/ios/build.sh): every push and pull request that touches it builds Hive.ipa and
 # tries it on an iPhone simulator. On main it's added to the `latest` release (after each release, and on pushes that only
 # change it, which don't release): on its own here, so a phone build that fails never holds back the server and the other devices.
+#
+# On main it's also signed by the owner, for every iPhone registered to their Apple developer account, and published on
+# GitHub Pages: Hive.ipa, the manifest.plist an iPhone installs it from by tapping
+# itms-services://?action=download-manifest&url=https://agenticaiuw.github.io/hive/manifest.plist, and phone.json, from which
+# Hive Server tells installed iPhones about the newer build (phone/src/lib.rs). Run by hand with an iPhone's UDID (the
+# dashboard's "Add this iPhone"), it registers that iPhone first, so the build it makes installs there.
 name: phone
 on:
   push:
-    paths: [phone/ios/**, dashboard/icon.png, .github/workflows/phone.yml]
+    paths: [phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
   pull_request:
-    paths: [phone/ios/**, dashboard/icon.png, .github/workflows/phone.yml]
+    paths: [phone/ios/**, phone/src/bin/**, dashboard/icon.png, .github/workflows/phone.yml]
   workflow_run:
     workflows: [release]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      udid: { description: "The iPhone's UDID (the dashboard copies it); empty only rebuilds", required: false }
+      name: { description: "A name for it in your Apple developer account", required: false, default: iPhone }
 permissions:
   contents: write
 jobs:
@@ -17,40 +27,49 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: macos-latest
     env:
-      SIGNED: ${{ secrets.IOS_PROFILE != '' }}
+      # The owner's one secret for it (besides the App Store Connect key the Mac release uses): IOS_CERTIFICATE, their
+      # Apple Development certificate (a base64 .p12), and IOS_CERTIFICATE_PASSWORD.
+      SIGN: ${{ github.ref == 'refs/heads/main' && secrets.IOS_CERTIFICATE != '' }}
+    outputs:
+      signed: ${{ env.SIGN }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          fetch-depth: 0 # HiveVersion is the last commit to phone/ios
+          fetch-depth: 0 # HiveVersion is the last commit to phone/ios, and the build number counts commits
       - uses: actions/setup-go@v5
         with: { go-version: stable, cache: false }
-      # The owner's Apple team signs it once its certificate and profile are this repository's secrets: IOS_CERTIFICATE (the
-      # .p12, base64), IOS_CERTIFICATE_PASSWORD, and IOS_PROFILE (a base64 ZIP of profiles for the app and its loopback extension).
-      - if: env.SIGNED == 'true'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - if: env.SIGN != 'true' && inputs.udid != ''
+        run: echo "::error::Add the IOS_CERTIFICATE and IOS_CERTIFICATE_PASSWORD secrets, then run this on main again." && exit 1
+      # The certificate into a keychain of its own, then this build's profiles from App Store Connect (hive-provision).
+      - if: env.SIGN == 'true'
         env:
-          IOS_PROFILE: ${{ secrets.IOS_PROFILE }}
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           k=$RUNNER_TEMP/hive.keychain
           security create-keychain -p hive $k && security set-keychain-settings $k && security unlock-keychain -p hive $k
           echo "$IOS_CERTIFICATE" | base64 -d > $RUNNER_TEMP/hive.p12
-          security import $RUNNER_TEMP/hive.p12 -k $k -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import $RUNNER_TEMP/hive.p12 -k $k -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign > /dev/null
+          rm $RUNNER_TEMP/hive.p12
           security set-key-partition-list -S apple-tool:,apple: -s -k hive $k > /dev/null
           security list-keychains -d user -s $k $(security list-keychains -d user | tr -d '"')
-          echo "$IOS_PROFILE" | base64 -d > $RUNNER_TEMP/hive.mobileprovision
-          echo "HIVE_IOS_PROFILE=$RUNNER_TEMP/hive.mobileprovision" >> $GITHUB_ENV
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios
+          identity=$(security find-identity -v -p codesigning $k | awk '/Apple Development|iPhone Developer/ { print $2; exit }')
+          [ -n "$identity" ] || { echo "::error::IOS_CERTIFICATE holds no Apple Development certificate and key"; exit 1; }
+          echo "HIVE_IOS_IDENTITY=$identity" >> $GITHUB_ENV
+          cargo run --locked --release -q -p hive-phone --bin hive-provision -- target/HivePhone/profiles app.hive.xctrunner app.hive.xctrunner.loopback
       - name: Check the pre-XCTest mount backend
         env:
           CARGO_TARGET_DIR: target/phone-launcher
         run: |
           cargo test --locked --manifest-path phone/ios/Launcher/Cargo.toml
           cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/Launcher/Cargo.toml
-      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s phone/ios -p sign_test.py
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }
@@ -122,7 +141,20 @@ jobs:
             target/HivePhone/smoke.xcresult
             target/HivePhone/probe
           if-no-files-found: ignore
-      - if: github.event_name == 'workflow_run' || github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest target/Hive.ipa $(ls target/manifest.plist 2> /dev/null) --clobber
+        run: gh release upload latest target/Hive.ipa --clobber
+      - if: env.SIGN == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with: { path: target/pages }
+  # The signed build on GitHub Pages (Settings > Pages > Source: GitHub Actions), all three files at once.
+  pages:
+    needs: ipa
+    if: needs.ipa.outputs.signed == 'true'
+    runs-on: ubuntu-latest
+    permissions: { pages: write, id-token: write }
+    environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}manifest.plist" }
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

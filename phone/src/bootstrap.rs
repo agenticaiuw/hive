@@ -9,10 +9,13 @@ use std::{
 
 static STORE: Mutex<()> = Mutex::new(());
 
+/// An iPhone's UDID, as usbmuxd gives it: hex digits and dashes.
+pub fn valid(device: &str) -> bool {
+    (8..=80).contains(&device.len()) && device.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
+}
+
 fn path(state: &Path, device: &str) -> Result<PathBuf, &'static str> {
-    if !(8..=80).contains(&device.len())
-        || !device.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
-    {
+    if !valid(device) {
         return Err("Invalid iPhone identifier.");
     }
     Ok(state

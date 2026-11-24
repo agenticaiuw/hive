@@ -69,6 +69,7 @@ fn phone_pairing(hive: &Arc<Hive>) -> Result<(String, String), Res> {
 }
 
 fn developer_identity(hive: &Hive, device: &str) -> Res {
+    hive_phone::seen(&hive.state, device);
     match hive_phone::bootstrap::load(&hive.state, device) {
         Ok(Some(bytes)) => Res::new(200, "application/x-plist", bytes).header("Cache-Control", "no-store"),
         Ok(None) => Res::err(404, "No saved pairing identity for this iPhone."),
@@ -103,7 +104,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
             let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
             let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
-            res.upgrade = Some(Box::new(hive_phone::device));
+            let version = req.headers.get("x-hive-version").cloned().unwrap_or_default();
+            res.upgrade = Some(Box::new(move |conn| hive_phone::device(conn, version)));
             return res;
         }
         // A Claude Code agent's tools (claude.rs), over MCP: the secret in the path is the agent's own, so it signs it in.
@@ -358,6 +360,8 @@ mod tests {
         let path = "/api/phone/bootstrap/00008110-001A2B3C00000000";
         assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
         assert_eq!(handle(&hive, request(path, &device)).status, 404);
+        // The dashboard offers to add the iPhone the Mac asked about to Hive's iPhone build.
+        assert_eq!(std::fs::read_to_string(state.join("iphones")).unwrap(), "00008110-001A2B3C00000000\n");
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
