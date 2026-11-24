@@ -173,7 +173,7 @@ async function send() { await sendComposer('main', 'api/requests?wait=1'); refre
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
 const TABS = ['Agents', 'Tasks', 'Past', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
-let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null;
+let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 addEventListener('hashchange', () => { tab = location.hash.slice(1); chat = null; tabs(); render(); });
 
@@ -209,7 +209,8 @@ function table(rows) {
 }
 
 async function render() {
-  if (remoteScreen) { remoteScreen.disconnect(); remoteScreen = null; }
+  clearTimeout(screenRetry);
+  if (remoteScreen) { const old = remoteScreen; remoteScreen = null; old.disconnect(); }
   const v = $('#view');
   if (tab === 'Agents' || tab === 'Tasks') {
     const list = tab === 'Agents' ? state.agents.map(a => state.tasks.find(t => t.id === a.task_id)).filter(Boolean) : state.tasks;
@@ -242,17 +243,19 @@ async function render() {
     v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
   } else if (tab === 'Screen') {
     v.innerHTML = `<div class="row"><span id="screen-status" class="muted">Connecting…</span><button onclick="render()">Reconnect</button></div><div id="remote-screen" style="height:75vh;min-height:240px;overflow:hidden"></div>`;
+    const screen = $('#remote-screen');
+    const retry = () => { if (screen.isConnected && tab === 'Screen') { $('#screen-status').textContent = 'Disconnected · reconnecting…'; screenRetry = setTimeout(render, 2000); } };
     try {
       const [credentials, {default: HiveRFB}] = await Promise.all([api('api/vm/credentials'), import('./api/vm/client.js')]);
-      if (tab !== 'Screen') return;
+      if (!screen.isConnected || tab !== 'Screen') return;
       const url = new URL('api/vm/control', location.href);
       url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const rfb = remoteScreen = new HiveRFB(document.getElementById('remote-screen'), url.href, {credentials, shared:true});
+      const rfb = remoteScreen = new HiveRFB(screen, url.href, {credentials, shared:true});
       rfb.scaleViewport = true;
       rfb.addEventListener('connect', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Connected · click the screen to control it'; });
-      rfb.addEventListener('disconnect', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Disconnected'; });
+      rfb.addEventListener('disconnect', () => { if (remoteScreen === rfb) { remoteScreen = null; retry(); } });
       rfb.addEventListener('securityfailure', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Screen authentication failed'; });
-    } catch (e) { if ($('#screen-status')) $('#screen-status').textContent = e.message; }
+    } catch (e) { retry(); }
   } else if (tab === 'Database') {
     const tables = await api('api/db');
     v.innerHTML = `<div class="row">${tables.map(t => `<button class="plain" onclick="showTable('${t.table}')">${t.table} (${t.rows})</button>`).join('')}</div><div id="rows"></div>`;
