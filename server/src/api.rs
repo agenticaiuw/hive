@@ -170,7 +170,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "tasks", _]) => Res::json(&json!({
             "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
-            "log": hive.db.all("select * from log where (task_id=?1 or (task_id=0 and request_id=(select request_id from tasks where id=?1) and request_id>0)) and id > ?2 order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
+            "log": hive.db.all("select * from log where id>?2 and (task_id=?1
+                or (?3 and (agent_id=(select agent_id from tasks where id=?1)
+                    or task_id in (select id from tasks where agent_id=(select agent_id from tasks where id=?1))))
+                or (task_id=0 and request_id>0 and request_id in
+                    (select request_id from tasks where id=?1 or (?3 and agent_id=(select agent_id from tasks where id=?1)))))
+                order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0), req.q("session") == "1")),
         })),
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
         ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), 0, &s(&b["text"]), "owner") {
@@ -394,6 +399,36 @@ mod tests {
         assert_eq!(log[5]["text"], "Needs your decision");
         assert_eq!(get("/api/orchestrator", log[5]["id"].as_i64().unwrap()), json!([]));
         assert_eq!(get("/api/orchestrator", log[3]["id"].as_i64().unwrap()).as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+    #[test]
+    fn agent_session_combines_tasks_without_mixing_agents() {
+        let state = std::env::temp_dir().join(format!("hive-agent-chat-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let key = new_token(&hive, "test");
+        for (agent, request) in [(71, 1), (71, 2), (72, 3)] {
+            hive.db.run("insert into tasks(agent_id,request_id) values(?,?)", args!(agent, request));
+        }
+        hive.log(0, 0, 1, "owner", "First request");
+        hive.log(71, 1, 0, "agent", "First answer");
+        hive.log(0, 0, 2, "owner", "Second request");
+        hive.log(71, 2, 0, "agent", "Second answer");
+        hive.log(72, 3, 0, "agent", "Other agent");
+        let get = |task: i64, session: &str, after: i64| {
+            let req = Req { method: "GET".into(), path: format!("/api/tasks/{task}"),
+                query: [("session".into(), session.into()), ("after".into(), after.to_string())].into_iter().collect(),
+                headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
+            let res = handle(&hive, req);
+            assert_eq!(res.status, 200);
+            serde_json::from_slice::<Value>(&res.body).unwrap()["log"].clone()
+        };
+        let log = get(1, "1", 0);
+        assert_eq!(log.as_array().unwrap().len(), 4);
+        assert_eq!(log, get(2, "1", 0));
+        assert_eq!(get(1, "", 0).as_array().unwrap().len(), 2);
+        assert_eq!(get(1, "1", log[1]["id"].as_i64().unwrap()).as_array().unwrap().len(), 2);
+        assert_eq!(get(1, "1", log[3]["id"].as_i64().unwrap()), json!([]));
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]

@@ -206,7 +206,7 @@ let tab = location.hash.slice(1) || 'Sessions', state = null, chat = null, chatA
 if (['Agents', 'Past'].includes(tab)) tab = 'Sessions';
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 let boardSelection = null;
-addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' ? boardSelection : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
+addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' && boardSelection !== null ? sessionId(boardSelection) : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
 function openTask(id) { boardSelection = id; location.hash = 'Sessions'; }
 
 function logEntry(l) {
@@ -230,16 +230,37 @@ function appendLogEntry(box, l) {
   group.firstElementChild.textContent = `${count} ${count === 1 ? 'command' : 'commands'}`;
 }
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
+// Session identity stays stable as the same agent takes on more tasks.
+function agentSessions() {
+  const groups = new Map();
+  for (const t of state.tasks) {
+    const key = t.agent_id ? `agent-${t.agent_id}` : `task-${t.id}`;
+    const group = groups.get(key);
+    if (!group) groups.set(key, {...t});
+    else group.id = Math.min(group.id, t.id);
+  }
+  return [...groups.values()];
+}
+function sessionTask(id) {
+  const task = state.tasks.find(t => t.id === id);
+  if (!task?.agent_id) return task;
+  const agent = state.agents.find(a => a.id === task.agent_id);
+  return state.tasks.find(t => t.id === agent?.task_id) || state.tasks.find(t => t.agent_id === task.agent_id);
+}
+function sessionId(id) {
+  const task = state.tasks.find(t => t.id === id);
+  return agentSessions().find(t => task?.agent_id ? t.agent_id === task.agent_id : t.id === id)?.id ?? id;
+}
 function taskCard(t, click = true) {
   return `<div role="button" tabindex="0" data-session="${t.id}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
-    <div class="row">${badge(t.status)} <b>#${t.id}</b> ${esc(t.title)}${t.agent_id ? ` <span class="muted">Agent #${t.agent_id}</span>` : ''}</div>
+    <div class="row">${badge(t.status)} <b>${t.agent_id ? `Agent #${t.agent_id}` : `Task #${t.id}`}</b> ${esc(t.title)}</div>
     <div class="muted">${esc(JSON.parse(t.nodes || '[]').join(', ') || 'vm')} · ${esc(t.project || '')}${t.every ? ` · every ${t.every} h` : ''} · ${ago(t.updated)}</div>
     ${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}
     ${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`;
 }
-async function openChat(id) { if (chat === id) return; chat = id; chatAfter = 0; render(); }
+async function openChat(id) { if (id !== null) id = sessionId(id); if (chat === id) return; chat = id; chatAfter = 0; render(); }
 function chatPane() {
-  return `<div class="card"><div class="row"><b>Task #${chat}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
+  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log chat-log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
@@ -249,7 +270,7 @@ async function loadChat() {
   if (!selected || !box || chatLoading) return;
   chatLoading = true;
   try {
-    const r = await api(`api/tasks/${selected}?after=${chatAfter}`);
+    const r = await api(`api/tasks/${selected}?session=1&after=${chatAfter}`);
     if (chat !== selected || box !== $('#chatlog')) return;
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
     for (const l of r.log) { appendLogEntry(box, l); chatAfter = l.id; }
@@ -276,7 +297,7 @@ function updateSessions() {
   pinned.classList.toggle('sel', chat === null);
   const existing = new Map(Array.from(list.querySelectorAll('[data-session]')).map(el => [Number(el.dataset.session), el]));
   let previous = pinned;
-  for (const t of state.tasks) {
+  for (const t of agentSessions()) {
     let el = existing.get(t.id);
     const html = taskCard(t);
     if (!el) { const template = document.createElement('template'); template.innerHTML = html; el = template.content.firstElementChild; }
@@ -296,8 +317,8 @@ function updateTasks() {
   }).join('');
   if (board.dataset.snapshot !== html) { board.innerHTML = html; board.dataset.snapshot = html; }
 }
-async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${id}/message`); loadChat(); }
-async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
+async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${sessionTask(id)?.id ?? id}/message`); loadChat(); }
+async function dropTask(id) { await api(`api/tasks/${sessionTask(id)?.id ?? id}/drop`, { method: 'POST' }); refresh(); }
 $('#view').addEventListener('keydown', e => { if (e.target.closest('[data-task]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(Number(e.target.closest('[data-task]').dataset.task)); return; } if (e.target.closest('[data-session]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openChat(Number(e.target.closest('[data-session]').dataset.session)); return; } if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
 
 function table(rows) {
