@@ -6,10 +6,11 @@
 <title>Hive</title>
 <link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon.png"><meta name="apple-mobile-web-app-capable" content="yes">
 <style>
-:root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #b45309; --ok: #15803d; --warn: #b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f5f5f4; --muted: #a8a29e; --line: #2c2926; --card: #1f1c1a; --accent: #f59e0b; --ok: #4ade80; --warn: #f87171; } }
+@font-face { font-family: Figtree; src: url(figtree.woff2) format("woff2"); font-weight: 300 900; font-display: swap; }
+:root { --bg: #fafafa; --fg: #202020; --muted: #707070; --line: #e5e5e5; --card: #fff; --accent: #b45309; --ok: #15803d; --warn: #b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --bg: #181818; --fg: #eeeeee; --muted: #a3a3a3; --line: #303030; --card: #202020; --accent: #f59e0b; --ok: #4ade80; --warn: #f87171; } }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, system-ui, sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 Figtree, -apple-system, system-ui, sans-serif; }
 header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 header b { font-size: 18px; color: var(--accent); }
 nav { display: flex; gap: 4px; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--line); }
@@ -85,7 +86,7 @@ td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: lef
   button { min-height: 44px; }
   .composer > .muted { display: none; }
 }
-.task-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.task-board { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .task-board h2 { font-size: 16px; margin: 0 0 10px; }
 .task-board .item { overflow-wrap: anywhere; }
 @media (max-width: 760px) { .task-board { grid-template-columns: 1fr; gap: 12px; } }
@@ -98,6 +99,38 @@ img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
 .attachment img { width: 64px; height: 64px; object-fit: contain; border-radius: 6px; }
 button:disabled { opacity: .5; cursor: wait; }
 #login { max-width: 360px; margin: 18vh auto; }
+
+.session-list .item { display:flex; align-items:center; gap:9px; border:0; padding:9px 10px; margin:2px 0; border-radius:7px; min-height:38px; background:transparent; }
+.session-list .item:hover, .session-list .item.sel { background:var(--line); outline:none; }
+.session-list > .item:first-child { background:var(--bg); margin-bottom:12px; }
+.session-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+.session-state { flex-shrink:0; width:8px; height:8px; border-radius:50%; background:var(--muted); }
+.session-state.needs { background:var(--warn); }
+.session-state.working { border:2px solid var(--line); border-top-color:var(--accent); width:12px; height:12px; animation:running 1s linear infinite; }
+.session-state.done { background:transparent; border:1px solid var(--muted); }
+.unread { width:6px; height:6px; border-radius:50%; background:var(--accent); flex-shrink:0; }
+@keyframes running { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .session-state.working { animation:none; } }
+.chat-panel > .card { border:0; background:var(--bg); padding:8px 20px; }
+.chat-log { font-size:16px; }
+.chat-log > * { max-width:800px; margin-left:auto; margin-right:auto; }
+.chat-log .message { padding:14px 0; }
+.chat-log .message-time { display:block; color:var(--muted); font:12px/1.5 Figtree, sans-serif; margin-top:6px; }
+.chat-log .tool-title .message-time { float:right; margin:0 0 0 12px; }
+.chat-log figure.screenshot { display:block; margin:12px auto; }
+.screenshot img { display:block; max-width:100%; width:auto; height:auto; max-height:260px; object-fit:contain; border-radius:8px; }
+.composer { width:100%; max-width:800px; margin:0 auto; border:1px solid var(--line); border-radius:16px; padding:10px; background:var(--card); }
+.composer textarea { resize:none; max-height:160px; border:0; background:transparent; outline:none; }
+.composer:focus-within { border-color:var(--muted); }
+.composer .row { margin-top:8px; }
+.task-board { max-width:1000px; margin:0 auto; }
+.task-board section { min-width:0; }
+.task-row { display:flex; align-items:center; gap:16px; border-radius:0; border-width:0 0 1px; background:transparent; margin:0; }
+.task-open { flex:1; min-width:0; text-align:left; background:transparent; color:var(--fg); padding:0; }
+.task-open .muted { display:block; margin-top:4px; }
+.task-need { flex:1; font-size:14px; overflow-wrap:anywhere; }
+.attachment { padding:5px; border:1px solid var(--line); border-radius:8px; font-size:13px; overflow-wrap:anywhere; }
+@media(max-width:760px) { .chat-panel > .card { padding:4px; } .task-row { flex-wrap:wrap; gap:8px; } .task-open { flex-basis:100%; } .session-list .item { min-height:44px; } .usage { font-size:12px; } .screenshot img { max-height:200px; } }
 </style>
 </head>
 <body>
@@ -111,11 +144,11 @@ button:disabled { opacity: .5; cursor: wait; }
 </header>
 <nav id="tabs"></nav>
 <main>
-  <div id="orchestrator" class="card"><b>Orchestrator</b><div id="orchestrator-log" class="log chat-log"></div><div class="composer" data-composer="main">
+  <div id="orchestrator" class="card"><div class="row"><b>Orchestrator</b><span id="planner-usage" class="muted"></span></div><div id="orchestrator-log" class="log chat-log"></div><div class="composer" data-composer="main">
     <textarea id="ask" rows="2" placeholder="Tell Hive what to do"></textarea>
     <div class="attachments"></div>
-    <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
-    <span class="muted">Drop or paste pictures here, or choose from your photos.</span>
+    <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
+    <span class="muted"></span>
   </div>
   </div>
   <div id="view"></div>
@@ -167,7 +200,7 @@ function paintComposer(el) {
     remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${item.file.name}`);
     remove.disabled = d.busy;
     remove.onclick = () => { d.files.splice(d.files.indexOf(item), 1); URL.revokeObjectURL(item.url); paintComposer(el); };
-    box.append(img, remove); return box;
+    const label = document.createElement('span'); label.textContent = item.file.name; if (item.file.type.startsWith('image/')) box.append(img); box.append(label, remove); return box;
   }));
   el.querySelector('[data-send]').disabled = d.busy;
   el.querySelector('[role=status]').textContent = d.status;
@@ -176,12 +209,12 @@ function paintComposer(el) {
 }
 function addPictures(el, files) {
   const d = draft(el.dataset.composer); if (d.busy) return;
-  const images = Array.from(files).filter(f => f.type.startsWith('image/'));
+  const images = Array.from(files);
   for (const file of images) {
-    if (file.size > 25 * 1024 * 1024) { d.status = 'Pictures must be 25 MB or smaller.'; continue; }
+    if (file.size > 25 * 1024 * 1024) { d.status = 'Files must be 25 MB or smaller.'; continue; }
     d.files.push({ file, url: URL.createObjectURL(file), path: null });
   }
-  if (!images.length) d.status = 'Choose an image file.';
+  if (!images.length) d.status = 'Choose a file.';
   paintComposer(el);
 }
 document.addEventListener('change', e => {
@@ -211,16 +244,16 @@ async function sendComposer(key, path) {
     for (const item of d.files) {
       if (!item.path) {
         const r = await api(`api/files?name=${encodeURIComponent(item.file.name)}`, { method: 'POST', body: item.file });
-        if (!r.path) throw new Error(r.error || 'Picture upload failed');
+        if (!r.path) throw new Error(r.error || 'File upload failed');
         item.path = r.path;
       }
     }
-    const pictures = d.files.length ? '\n\nAttached pictures saved on Hive (inspect these images; include their paths when passing this request to an agent):\n' + d.files.map(i => i.path).join('\n') : '';
+    const pictures = d.files.length ? '\n\nAttached files saved on Hive (read these files; include their paths when passing this request to an agent):\n' + d.files.map(i => i.path).join('\n') : '';
     const r = await api(path, { method: 'POST', body: { text: d.text.trim() + pictures, node: 'dashboard' } });
     if (r.error || r.status === 'failed') throw new Error(r.error || r.reply || 'Sending failed');
     d.files.forEach(i => URL.revokeObjectURL(i.url)); d.files = []; d.text = '';
     el.querySelector('textarea, input:not([type=file])').value = '';
-    d.status = r.reply || r.status || 'Sent';
+    d.status = 'Sent';
   } catch (e) { d.status = `Could not send: ${e.message}. Your draft is kept; try again.`; }
   finally { d.busy = false; if (el.isConnected) paintComposer(el); }
 }
@@ -264,20 +297,22 @@ function toolEntry(item) {
   return `<div class="activity tool-cell${failed ? ' failed' : ''}" data-tool-id="${esc(item.id || '')}" aria-busy="${!!active}"><div class="tool-title"><span aria-hidden="true">•</span> ${esc(title)}</div>${detail ? `<div class="tool-detail">${esc(detail)}</div>` : ''}${output ? `<div class="tool-output">${esc(preview)}</div>${lines.length > 5 ? `<details><summary>+${lines.length - 5} lines</summary><pre>${esc(lines.slice(5).join('\n'))}</pre></details>` : ''}` : ''}</div>`;
 }
 function logEntry(l) {
+  const time = l.at ? `<time class="message-time" datetime="${new Date(l.at).toISOString()}" title="${esc(new Date(l.at).toLocaleString())}">${esc(new Date(l.at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}))}</time>` : '';
+
   const who = String(l.who || '');
-  if (who === 'tool-item') { try { return toolEntry(JSON.parse(l.text)); } catch {} }
+  if (who === 'tool-item') { try { return toolEntry(JSON.parse(l.text)).replace('<div class="tool-title">', '<div class="tool-title">' + time); } catch {} }
   if (who === 'image') {
     try {
       const image = JSON.parse(l.text);
       if (/^api\/files\/\d+$/.test(image.url))
-        return `<figure class="message screenshot"><a href="${image.url}" target="_blank" rel="noopener"><img src="${image.url}" alt="${esc(image.tool)}" style="display:block;max-width:100%;height:auto"></a></figure>`;
+        return `<figure class="message screenshot"><a href="${image.url}" target="_blank" rel="noopener"><img src="${image.url}" alt="${esc(image.tool)}" ></a><figcaption>${time}</figcaption></figure>`;
     } catch {}
   }
   if (who === 'owner' || who.startsWith('owner via '))
-    return `<div class="message owner" aria-label="Your message"><div class="message-body">${esc(l.text)}</div></div>`;
+    return `<div class="message owner" aria-label="Your message"><div class="message-body">${esc(l.text)}${time}</div></div>`;
   if (['agent', 'hive', 'done', 'needs you'].includes(who))
-    return `<div class="message agent" aria-label="${esc(who === 'hive' ? 'Hive' : 'Agent')}"><div class="message-body">${esc(l.text)}</div></div>`;
-  return `<details class="activity"><summary>${esc(who)}</summary><div class="activity-body">${esc(l.text)}</div></details>`;
+    return `<div class="message agent" aria-label="${esc(who === 'hive' ? 'Hive' : 'Agent')}"><div class="message-body">${esc(l.text)}${time}</div></div>`;
+  return `<details class="activity"><summary>${esc(who)} ${time}</summary><div class="activity-body">${esc(l.text)}</div></details>`;
 }
 // Replace running items in place, including completions arriving in later polls.
 function appendLogEntry(box, l) {
@@ -317,17 +352,22 @@ function sessionId(id) {
   return agentSessions().find(t => task?.agent_id ? t.agent_id === task.agent_id : t.id === id)?.id ?? id;
 }
 function taskCard(t, click = true) {
-  return `<div role="button" tabindex="0" data-session="${t.id}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
-    <div class="row">${badge(t.status)} <b>${t.agent_id ? `Agent #${t.agent_id}` : `Task #${t.id}`}</b> ${esc(t.title)}</div>
-    <div class="muted">${esc(JSON.parse(t.nodes || '[]').join(', ') || 'vm')} · ${esc(t.project || '')}${t.every ? ` · every ${t.every} h` : ''} · ${ago(t.updated)}</div>
-    ${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}
-    ${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`;
+  const unread = t.latest_message > (seen[t.agent_id || `task-${t.id}`] || 0) && chat !== t.id;
+  return `<div role="button" tabindex="0" data-session="${t.id}" title="${esc(t.title)}" aria-label="${esc(t.title)} · ${esc(t.status)}${unread ? ' · unread' : ''}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
+    <span class="session-state ${esc(t.status)}" aria-label="${esc(t.status)}"></span><span class="session-title">${esc(t.title)}</span>${unread ? '<span class="unread" aria-label="Unread"></span>' : ''}<span class="muted">${t.agent_id ? '#' + t.agent_id : ''}</span></div>`;
 }
-async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; chatAfter = 0; render(); }
+let seen = {};
+try { seen = JSON.parse(localStorage.getItem('hive-seen') || '{}'); } catch {}
+function markSeen() {
+  const t = sessionTask(chat); if (!t) return;
+  seen[t.agent_id || `task-${t.id}`] = t.latest_message || 0;
+  try { localStorage.setItem('hive-seen', JSON.stringify(seen)); } catch {}
+}
+async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; markSeen(); chatAfter = 0; render(); }
 function chatPane() {
-  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
+  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log chat-log"></div>
-    <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
+    <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
 let chatLoading = false, orchestratorLoading = false, orchestratorAfter = 0;
 async function loadChat() {
@@ -337,6 +377,8 @@ async function loadChat() {
   try {
     const r = await api(`api/tasks/${selected}?session=1&after=${chatAfter}`);
     if (chat !== selected || box !== $('#chatlog')) return;
+    const usage = $('.usage'); if (usage) usage.textContent = usageLabel(r.usage);
+    markSeen();
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
     for (const l of r.log) { appendLogEntry(box, l); chatAfter = l.id; }
     if (atEnd) box.scrollTop = box.scrollHeight;
@@ -373,14 +415,24 @@ function updateSessions() {
   }
   for (const el of existing.values()) el.remove();
 }
+let taskFilter = 'Active';
+function usageLabel(u) {
+  if (!u) return 'Tokens unavailable';
+  return `${Number(u.total).toLocaleString()} tokens · ${Number(u.input).toLocaleString()} in · ${Number(u.output).toLocaleString()} out · ${Number(u.cached).toLocaleString()} cached`;
+}
 function updateTasks() {
   const board = $('#task-board'); if (!board) return;
-  const sections = [ ['Needs me', ['needs']], ['Working', ['open', 'working']], ['Done', ['done']] ];
-  const html = sections.map(([label, statuses]) => {
+  const sections = taskFilter === 'Done' ? [['Done', ['done','dropped']]] : [['Needs me', ['needs']], ['Working', ['working']], ['Queued', ['open','queued']]];
+  const html = `<div class="row task-filters">${['Active','Done'].map(f => `<button class="${f === taskFilter ? '' : 'plain'}" onclick="taskFilter='${f}';updateTasks()">${f}</button>`).join('')}</div>` + sections.map(([label, statuses]) => {
     const tasks = state.tasks.filter(t => statuses.includes(t.status));
-    return `<section><h2>${label}</h2>${tasks.map(t => `<div role="button" tabindex="0" data-task="${t.id}" class="card item" onclick="openTask(${t.id})"><b>#${t.id} ${esc(t.title)}</b>${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
+    return `<section><h2>${label} <span class="muted">${tasks.length}</span></h2>${tasks.map(t => `<div class="card task-row"><button class="task-open" onclick="openTask(${t.id})">${esc(t.title)}<span class="muted">#${t.id}${t.agent_id ? ' · Agent #' + t.agent_id : ''}</span></button>${t.status === 'needs' ? `<div class="task-need">${esc(t.why)}<br><b>${esc(t.need)}</b></div><button class="plain" onclick="resumeTask(${t.id},this)">Resume</button>` : ''}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
   }).join('');
   if (board.dataset.snapshot !== html) { board.innerHTML = html; board.dataset.snapshot = html; }
+}
+async function resumeTask(id, button) {
+  button.disabled = true;
+  try { const r = await api(`api/tasks/${id}/message`, {method:'POST', body:{text:'Resume this task and try again.'}}); if (r.error) throw Error(r.error); await refresh(); openTask(id); }
+  catch(e) { button.disabled = false; button.textContent = 'Retry resume'; alert(e.message); }
 }
 async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${sessionTask(id)?.id ?? id}/message`); loadChat(); }
 async function dropTask(id) { await api(`api/tasks/${sessionTask(id)?.id ?? id}/drop`, { method: 'POST' }); refresh(); }
@@ -471,6 +523,7 @@ async function refresh() {
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
   $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
   if (tab === 'Sessions') updateSessions();
+  $('#planner-usage').textContent = usageLabel(state.planner_usage);
   if (tab === 'Tasks') updateTasks();
   await Promise.all([loadChat(), loadOrchestrator()]);
 }

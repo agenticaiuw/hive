@@ -304,6 +304,7 @@ impl Hive {
             let mut last = String::new();
             loop {
                 let (method, params) = rx.recv_timeout(Duration::from_secs(240)).map_err(|_| "the planner took too long".to_string())?;
+                if method == "thread/tokenUsage/updated" { self.save_usage(&thread, 0, &params["tokenUsage"]["total"]); }
                 if method == "item/completed" && params["item"]["type"] == "agentMessage" { last = s(&params["item"]["text"]); }
                 if method == "turn/completed" {
                     if let Some(e) = params["turn"]["error"].as_object() { return Err(format!("planner error: {}", s(&e["message"].clone()))); }
@@ -581,12 +582,20 @@ impl Hive {
         self.bump();
     }
 
+    fn save_usage(&self, thread: &str, agent: i64, usage: &Value) {
+        if usage["totalTokens"].is_number() {
+            self.db.run("insert into usage(thread,agent_id,total,input,output,cached) values(?,?,?,?,?,?) on conflict(thread) do update set total=excluded.total,input=excluded.input,output=excluded.output,cached=excluded.cached",
+                args!(thread, agent, usage["totalTokens"], usage["inputTokens"], usage["outputTokens"], usage["cachedInputTokens"]));
+        }
+    }
+
     fn note(self: &Arc<Self>, method: &str, params: Value) {
         let thread = s(&params["threadId"]);
         if let Some(tx) = self.watchers.lock().unwrap().get(&thread) { tx.send((method.to_string(), params)).ok(); return; }
         let Some(a) = self.db.get("select * from agents where thread=?", args!(thread)) else { return };
         let (agent, task) = (a["id"].as_i64().unwrap_or(0), a["task_id"].as_i64().unwrap_or(0));
         match method {
+            "thread/tokenUsage/updated" => self.save_usage(&thread, agent, &params["tokenUsage"]["total"]),
             "turn/started" => { self.turns.lock().unwrap().insert(thread, s(&params["turn"]["id"])); }
             "item/started" | "item/completed" => {
                 let item = &params["item"];
@@ -1077,6 +1086,20 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_usage_replaces_cumulative_totals_without_double_counting() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        for total in [100, 120, 120] {
+            hive.save_usage("session", 7, &json!({"totalTokens":total,"inputTokens":90,"outputTokens":30,"cachedInputTokens":50}));
+        }
+        hive.save_usage("session", 7, &Value::Null);
+        let usage = hive.db.get("select * from usage where agent_id=7", &[]).unwrap();
+        assert_eq!(usage["total"], 120);
+        assert_eq!(usage["cached"], 50);
+        assert_eq!(hive.db.all("select * from usage", &[]).len(), 1);
+    }
+
     #[test]
     fn browser_selection_never_falls_back_to_another_device() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,

@@ -82,6 +82,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
     let m = req.method.as_str();
     match (m, parts.as_slice()) {
         ("GET", [""]) => return Res::new(200, "text/html; charset=utf-8", DASHBOARD),
+        ("GET", ["figtree.woff2"]) => return Res::new(200, "font/woff2", include_bytes!("../../dashboard/figtree.woff2").as_slice()),
         ("GET", ["icon.png"]) => return Res::new(200, "image/png", ICON),
         ("GET", ["manifest.json"]) => return Res::new(200, "application/manifest+json", MANIFEST),
         ("GET", ["api", "vm", "client.js"]) => return Res::new(200, "text/javascript", include_bytes!("../../dashboard/remote-screen.js").as_slice()),
@@ -157,7 +158,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
-            "tasks": hive.db.all("select * from tasks order by id desc", &[]),
+            "tasks": hive.db.all("select t.*, (select max(id) from log where agent_id=t.agent_id and who in ('agent','done','needs you')) as latest_message from tasks t order by id desc", &[]),
+            "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued') order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),
             "requests": hive.db.all("select * from requests order by id desc limit 30", &[]),
@@ -170,6 +172,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "tasks", _]) => Res::json(&json!({
             "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
+            "usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=(select agent_id from tasks where id=?) having count(*)>0", args!(id(2))),
             "log": hive.db.all("select * from log where id>?2 and (task_id=?1
                 or (?3 and (agent_id=(select agent_id from tasks where id=?1)
                     or task_id in (select id from tasks where agent_id=(select agent_id from tasks where id=?1))))
