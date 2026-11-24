@@ -244,3 +244,102 @@ mod tests {
         );
     }
 }
+
+/// Reflect only IPv4 packets belonging to Hive's /32 loopback route. Swapping
+/// the two addresses preserves the IP and transport checksum sums, including
+/// packets with IP options or fragmented transport payloads.
+fn reflect_ipv4(packet: &mut [u8]) -> bool {
+    if packet.len() < 20 || packet[0] >> 4 != 4 {
+        return false;
+    }
+    let header = usize::from(packet[0] & 15) * 4;
+    let length = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    if header < 20
+        || length < header
+        || length != packet.len()
+        || packet[12..16] != [10, 7, 1, 1]
+        || packet[16..20] != [10, 7, 0, 1]
+    {
+        return false;
+    }
+    for offset in 0..4 {
+        packet.swap(12 + offset, 16 + offset);
+    }
+    true
+}
+
+/// # Safety
+/// `bytes` must point to `count` writable bytes held exclusively for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hive_reflect_ipv4(bytes: *mut u8, count: usize) -> bool {
+    if bytes.is_null() || count > 65535 {
+        return false;
+    }
+    reflect_ipv4(unsafe { std::slice::from_raw_parts_mut(bytes, count) })
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::*;
+    fn packet() -> Vec<u8> {
+        let mut p = vec![0; 40];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&40u16.to_be_bytes());
+        p[12..16].copy_from_slice(&[10, 7, 1, 1]);
+        p[16..20].copy_from_slice(&[10, 7, 0, 1]);
+        p[20..24].copy_from_slice(&[0xab, 0xcd, 0xc0, 0x00]);
+        p
+    }
+    #[test]
+    fn reflection_keeps_ports_payload_and_checksum_sum() {
+        let mut p = packet();
+        let original = p.clone();
+        let sum = |p: &[u8]| {
+            p.chunks_exact(2)
+                .map(|x| u16::from_be_bytes([x[0], x[1]]) as u32)
+                .sum::<u32>()
+        };
+        assert!(reflect_ipv4(&mut p));
+        assert_eq!(&p[12..16], &original[16..20]);
+        assert_eq!(&p[16..20], &original[12..16]);
+        assert_eq!(&p[20..], &original[20..]);
+        assert_eq!(sum(&p), sum(&original));
+    }
+    #[test]
+    fn invalid_or_unrelated_packets_are_unchanged() {
+        let good = packet();
+        for mut p in [
+            vec![],
+            vec![0; 19],
+            {
+                let mut p = good.clone();
+                p[0] = 0x65;
+                p
+            },
+            {
+                let mut p = good.clone();
+                p[0] = 0x44;
+                p
+            },
+            {
+                let mut p = good.clone();
+                p[2] = 1;
+                p
+            },
+            {
+                let mut p = good.clone();
+                p[16] = 8;
+                p
+            },
+            {
+                let mut p = good;
+                p[12] = 127;
+                p
+            },
+        ] {
+            let before = p.clone();
+            assert!(!reflect_ipv4(&mut p));
+            assert_eq!(p, before);
+        }
+    }
+}

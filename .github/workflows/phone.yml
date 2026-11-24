@@ -50,6 +50,7 @@ jobs:
         run: |
           cargo test --locked --manifest-path phone/ios/bootstrap/Cargo.toml
           cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
+      - run: phone/ios/Loopback/build.sh
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }
