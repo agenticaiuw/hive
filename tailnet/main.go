@@ -166,7 +166,7 @@ func ownerOf(s *tsnet.Server) tailcfg.UserID {
 }
 
 // find looks on the owner's tailnet for their Hive Server: a machine named hive (hive-1, … when there's more than one) that
-// answers as Hive, online, the most recently seen first.
+// answers as Hive and is online: the first one in Tailscale's list.
 func find(s *tsnet.Server) string {
 	lc, err := s.LocalClient()
 	if err != nil {
