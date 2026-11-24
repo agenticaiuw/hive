@@ -1,4 +1,4 @@
-# Hive, the iPhone app (phone/ios/build.sh): every push and pull request that touches it builds the unsigned Hive.ipa and
+# Hive, the iPhone app (phone/ios/build.sh): every push and pull request that touches it builds Hive.ipa and
 # tries it on an iPhone simulator. On main it's added to the `latest` release (after each release, and on pushes that only
 # change it, which don't release): on its own here, so a phone build that fails never holds back the server and the other devices.
 name: phone
@@ -51,22 +51,14 @@ jobs:
           cargo test --locked --features usb-setup --manifest-path phone/ios/bootstrap/Cargo.toml
           cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s phone/ios -p sign_test.py
-      - run: phone/ios/Bootstrap/build.sh
-      - run: phone/ios/Loopback/build.sh
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }
-      - if: github.event_name == 'workflow_run' || github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest target/Hive.ipa $(ls target/manifest.plist 2> /dev/null) --clobber
-      # Only to learn from: what a simulator says about the runner and its window, kept in the xcresult and the probe.
-      - if: github.event_name != 'workflow_run'
-        continue-on-error: true
-        timeout-minutes: 20
+      # Full tool and icon-launch checks; their xcresult and probes are kept below.
+      - timeout-minutes: 20
         run: phone/ios/build.sh test
       # What failed, as annotations: anyone can read those on a public repo, signed in or not, unlike the log.
-      - if: always() && github.event_name != 'workflow_run'
+      - if: always()
         run: |
           r=target/HivePhone/smoke.xcresult
           [ -d "$r" ] || { echo "::error title=smoke::no xcresult (the test didn't start)"; exit 0; }
@@ -88,7 +80,7 @@ jobs:
           EOF
       # What iOS said about Hive's window at each step (Probe.swift), one annotation per run: under xcodebuild (smoke) and
       # launched from its icon (icon).
-      - if: always() && github.event_name != 'workflow_run'
+      - if: always()
         run: |
           python3 - <<'EOF'
           import glob, json, os
@@ -122,7 +114,7 @@ jobs:
               notes += [f"{os.path.basename(f)}: {l}" for l in tail]
           say("notice", "probe host", notes or ["nothing from the host"])
           EOF
-      - if: always() && github.event_name != 'workflow_run'
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke
@@ -130,3 +122,7 @@ jobs:
             target/HivePhone/smoke.xcresult
             target/HivePhone/probe
           if-no-files-found: ignore
+      - if: github.event_name == 'workflow_run' || github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload latest target/Hive.ipa $(ls target/manifest.plist 2> /dev/null) --clobber

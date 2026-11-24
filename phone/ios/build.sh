@@ -1,14 +1,13 @@
 #!/bin/sh
-# Hive, the iPhone app: the phone as Hive's node, and the dashboard. iOS lets an app see and touch the whole screen only
-# as a UI test, so Hive is one, our own (HivePhone/, no WebDriverAgent): it dials out to the Hive Server and answers the
-# server's WebDriverAgent-style calls in-process (nothing can reach in), and shows the dashboard in its own window
-# whenever it's in front. A Hive Server on a tailnet is reached through Tailscale inside the app: tailscale/libtailscale
-# (BSD-3-Clause), built here from a pinned commit.
-# Makes target/Hive.ipa: signed by the owner's Apple team when its profile is here (below), else unsigned. Packaging follows
-# OpenMinis/iCTRL (Apache-2.0) so it starts from its icon while the phone's developer disk image is mounted.
-# `build.sh test` instead tries it on an iPhone simulator: the smoke test under xcodebuild (target/HivePhone/smoke.xcresult),
-# then the packaged app launched from its icon, as a person would, with its window probed (target/HivePhone/probe).
-# Needs Xcode and Go.
+# Hive starts as a normal UIKit app, brings up its device-local packet tunnel,
+# mounts the personalized developer image, then loads its own XCTest bundle.
+# The test bundle keeps full screen control and connects directly to Hive Server;
+# the dashboard and Tailscale stay inside Hive. No WebDriverAgent is involved.
+# Makes target/Hive.ipa. CI signs it with the owner's IOS_* repository secrets;
+# IOS_PROFILE contains the app and Network Extension provisioning profiles.
+# `build.sh test` checks the tools through Xcode, then probes the packaged app
+# launched from its icon, including taps and control while it is in the background.
+# Needs Xcode, Go and Rust (CI installs the iOS Rust target).
 set -e
 cd "$(dirname "$0")/../.."
 ts=target/libtailscale; lib=target/libtailscale.xcframework; out=target/HivePhone
@@ -25,7 +24,7 @@ if [ ! -d $lib ]; then
 fi
 project="-project phone/ios/HivePhone.xcodeproj -scheme HivePhone -configuration Debug"
 id=app.hive.xctrunner
-# Xcode's test runner app with our test inside, as the app a person installs: its name, id, icon and version, ad-hoc signed.
+# The installed app and its test bundle share Hive’s identity, icon and version.
 dress() {
   for p in $1/Info.plist $1/PlugIns/*.xctest/Info.plist; do plutil -replace CFBundleIdentifier -string $id $p; done
   plutil -replace CFBundleDisplayName -string Hive $1/Info.plist
@@ -36,7 +35,12 @@ dress() {
   sips -z 120 120 dashboard/icon.png --out $1/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $1/AppIcon60x60@3x.png
   plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $1/Info.plist
   find $1 -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
-  codesign -f -s - --timestamp=none $1
+  if [ -d "$1/PlugIns/HiveLoopback.appex" ]; then
+    codesign -f -s - --timestamp=none --entitlements phone/ios/Loopback/Entitlements.plist $1/PlugIns/HiveLoopback.appex
+    codesign -f -s - --timestamp=none --entitlements phone/ios/Loopback/Entitlements.plist $1
+  else
+    codesign -f -s - --timestamp=none $1
+  fi
 }
 # The @rpath libraries the app's binaries load that the app doesn't carry (Frameworks/X.framework or Frameworks/X.dylib):
 # xcodebuild finds them in Xcode, a device in its developer disk image.
@@ -97,6 +101,16 @@ if [ "$1" = test ]; then
   echo "waited $t s" >> $out/probe/host.txt
   cp "$(docs)"/probe-icon* $out/probe/ 2> /dev/null || true
   xcrun simctl spawn "$sim" log show --last 3m --style compact --predicate 'process == "HivePhone-Runner"' > $out/probe/log.txt 2>&1 || true
+  # Starting testRun alone is insufficient: the icon launch must retain full
+  # screen control and complete its foreground/background/tap probe.
+  python3 - "$out/probe/probe-icon.log" <<'PYPROBE' || failed=1
+import json, sys
+with open(sys.argv[1]) as file:
+    states = [json.loads(line) for line in file if line.strip()]
+assert any(s.get("step") == "done" and s.get("taps", 0) >= 3 for s in states), "icon probe did not finish with three successful taps"
+assert any(s.get("step") == "Settings in front (an agent's action)" and s.get("app") == "background" for s in states), "icon probe could not activate Settings"
+assert any(s.get("step") == "home screen after seven seconds" and s.get("app") == "background" for s in states), "icon runner did not retain control in the background"
+PYPROBE
   exit ${failed:-0}
 fi
 xcodebuild build-for-testing $project -quiet -destination generic/platform=iOS -derivedDataPath $out/derived \
@@ -104,22 +118,28 @@ xcodebuild build-for-testing $project -quiet -destination generic/platform=iOS -
 rm -rf $out/Payload; mkdir -p $out/Payload
 app=$out/Payload/Hive.app
 ditto $out/derived/Build/Products/Debug-iphoneos/HivePhone-Runner.app $app
-# Everything Xcode embeds in Frameworks is XCTest's, which comes from the phone's developer disk image, matched to its iOS.
+# The normal UIKit executable runs before the DDI exists; the .xctest bundle
+# stays inside the app and loads only after the image is mounted.
+archive=${CARGO_TARGET_DIR:-target/phone-bootstrap}/aarch64-apple-ios/release/libhive_phone_bootstrap.a
+if [ ! -f "$archive" ]; then
+  CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/phone-bootstrap} cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
+fi
+phone/ios/Bootstrap/build.sh
+phone/ios/Loopback/build.sh
+executable=$(plutil -extract CFBundleExecutable raw $app/Info.plist)
+cp target/HivePhone/HiveBootstrap $app/$executable
+ditto target/HivePhone/HiveLoopback.appex $app/PlugIns/HiveLoopback.appex
+plutil -replace UIFileSharingEnabled -bool true $app/Info.plist
+plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control." $app/Info.plist
+plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plist
+# The XCTest frameworks come from the phone's developer disk image, matched to its iOS.
 rm -rf $app/Frameworks
 dress $app
 # Signed by the owner's Apple team when its provisioning profile for app.hive.xctrunner is here (HIVE_IOS_PROFILE, ad hoc or
-# development, listing the iPhones that may install it) and its certificate is in the keychain. Those iPhones then install
+# development, listing the iPhones that may install it; for the extension, a zip of both profiles) and its certificate is in the keychain. Those iPhones then install
 # it from Safari with a link to target/manifest.plist: itms-services://?action=download-manifest&url=<manifest.plist's address>.
 if [ -n "$HIVE_IOS_PROFILE" ]; then
-  security cms -D -i "$HIVE_IOS_PROFILE" > $out/profile.plist
-  plutil -extract Entitlements xml1 -o $out/entitlements.plist $out/profile.plist
-  # The keychain's certificate that the profile lists.
-  for c in 0 1 2 3 4 5 6 7 8 9; do plutil -extract DeveloperCertificates.$c raw $out/profile.plist 2> /dev/null | base64 -d | shasum | awk '{ print toupper($1) }'; done > $out/certificates.txt
-  signer=$(security find-identity -v -p codesigning | awk '{ print $2 }' | grep -xF -f $out/certificates.txt | head -1)
-  [ -n "$signer" ] || { echo "No certificate in the keychain matches HIVE_IOS_PROFILE" >&2; exit 1; }
-  cp "$HIVE_IOS_PROFILE" $app/embedded.mobileprovision
-  find $app -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s $signer {}
-  codesign -f -s $signer --entitlements $out/entitlements.plist $app
+  python3 phone/ios/sign.py "$app"
   cat > target/manifest.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

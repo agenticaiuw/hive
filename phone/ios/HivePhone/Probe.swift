@@ -86,6 +86,7 @@ enum Probe {
             (19, { log("after a tap on Reload", run) }),
             (21, { call("POST", "/wda/homescreen", [:]) }),
             (24, { log("home screen (an agent's action)", run) }),
+            (28, { log("home screen after seven seconds", run) }),
             (36, { log("after the host launched it from its icon again", run) }),
             (37, { tapReload() }),
             (39, { log("after a tap on Reload", run) }),
