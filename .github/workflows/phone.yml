@@ -63,6 +63,7 @@ jobs:
           identity=$(security find-identity -v -p codesigning $k | awk '/Apple Development|iPhone Developer/ { print $2; exit }')
           [ -n "$identity" ] || { echo "::error::IOS_CERTIFICATE holds no Apple Development certificate and key"; exit 1; }
           echo "HIVE_IOS_IDENTITY=$identity" >> $GITHUB_ENV
+          export HIVE_IOS_IDENTITY="$identity"
           cargo run --locked --release -q -p hive-phone --bin hive-provision -- target/HivePhone/profiles app.hive.xctrunner app.hive.xctrunner.loopback
       - name: Check the pre-XCTest mount backend
         env:
