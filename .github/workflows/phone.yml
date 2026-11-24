@@ -41,6 +41,15 @@ jobs:
           security list-keychains -d user -s $k $(security list-keychains -d user | tr -d '"')
           echo "$IOS_PROFILE" | base64 -d > $RUNNER_TEMP/hive.mobileprovision
           echo "HIVE_IOS_PROFILE=$RUNNER_TEMP/hive.mobileprovision" >> $GITHUB_ENV
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - name: Check the pre-XCTest mount backend
+        env:
+          CARGO_TARGET_DIR: target/phone-bootstrap
+        run: |
+          cargo test --locked --manifest-path phone/ios/bootstrap/Cargo.toml
+          cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }

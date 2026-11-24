@@ -1,0 +1,20 @@
+[package]
+name = "hive-phone-bootstrap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "c8fff6d7fb2690eaeb591ce510754effa7b1e19b", default-features = false, features = ["remote_pairing", "tcp", "tunnel_tcp_stack", "rsd", "mobile_image_mounter", "cryptexd", "tss", "ring"] }
+tokio = { version = "1", features = ["rt", "net", "time", "fs"] }
+plist = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
