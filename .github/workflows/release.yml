@@ -1,10 +1,12 @@
 # Every push to main: GitHub builds what people download from Releases, all under the release tagged `latest`: the server
 # (hive-server, its own download) and the devices (the desktop app and the browser extension). `version` goes up last:
-# downloaded servers update themselves to it, and their devices follow them.
+# downloaded servers update themselves to it, and their devices follow them. Pushes that only change the iPhone app go
+# to phone.yml alone, so they don't cancel a release on its way.
 name: release
 on:
   push:
     branches: [main]
+    paths-ignore: [phone/**, .github/workflows/phone.yml]
 permissions:
   contents: write
 concurrency:

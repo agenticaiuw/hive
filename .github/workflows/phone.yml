@@ -1,6 +1,6 @@
 # Hive, the iPhone app (phone/ios/build.sh): every push and pull request that touches it builds the unsigned Hive.ipa and
-# tries it on an iPhone simulator. After each release of main it's built again and added to the `latest` release: on its
-# own here, so a phone build that fails never holds back the server and the other devices.
+# tries it on an iPhone simulator. On main it's added to the `latest` release (after each release, and on pushes that only
+# change it, which don't release): on its own here, so a phone build that fails never holds back the server and the other devices.
 name: phone
 on:
   push:
@@ -54,7 +54,7 @@ jobs:
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }
-      - if: github.event_name == 'workflow_run'
+      - if: github.event_name == 'workflow_run' || github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload latest target/Hive.ipa $(ls target/manifest.plist 2> /dev/null) --clobber
