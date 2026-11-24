@@ -29,6 +29,8 @@ pub struct Hive {
     turns: Mutex<HashMap<String, String>>,
     watchers: Mutex<HashMap<String, mpsc::Sender<(String, Value)>>>,
     nudges: Mutex<HashMap<i64, u32>>,
+    /// Agents sent back once to check that what they'd stop for is truly the owner's.
+    rechecked: Mutex<HashSet<i64>>,
     last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
     changed: (Mutex<u64>, Condvar),
@@ -73,7 +75,7 @@ impl Hive {
         Arc::new(Hive {
             db, state, repo, engine, owner_key, version, local,
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
-            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), rechecked: Mutex::new(HashSet::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
             claudes: Mutex::new(HashMap::new()), mcp: Mutex::new(HashMap::new()),
         })
@@ -338,8 +340,8 @@ impl Hive {
             Some(repo) => {
                 t += VM_NOTES;
                 t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. Commit with a clear \
-                    message, then call reinstall. Your commits stay on this Hive, the owner's own: push one to GitHub (git push origin \
-                    HEAD:main) only when the owner's own words say it should be a feature for everyone.", repo.display());
+                    message, then call reinstall. When a change makes sense for everyone who uses Hive, also push it to GitHub (git push \
+                    origin HEAD:main), which is how it reaches the owner's devices; one that's only for the owner or a small group stays here.", repo.display());
             }
             None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
                 with the dashboard and nodes) are in {}.", self.state.join("files").display()),
@@ -504,6 +506,11 @@ impl Hive {
             return;
         }
         match end {
+            // Before a stop reaches the owner, the agent checks once that it's truly theirs and not a tool falling short.
+            Some(e) if e["done"] != true && self.rechecked.lock().unwrap().insert(agent) => {
+                let me = self.clone();
+                std::thread::spawn(move || { me.start_turn(agent, RECHECK).ok(); });
+            }
             Some(e) if self.finish(agent, task, &e) => {}
             _ => {
                 let n = { let mut m = self.nudges.lock().unwrap(); let e = m.entry(agent).or_insert(0); *e += 1; *e };
@@ -538,6 +545,7 @@ impl Hive {
             return false;
         }
         self.nudges.lock().unwrap().remove(&agent);
+        self.rechecked.lock().unwrap().remove(&agent);
         self.bump();
         true
     }
@@ -860,6 +868,12 @@ easy|normal|hard|hardest; project = a short project name, the same as an open ta
 Claude Code session (claude:…): that session writes its own. A question is a task too (vm, easy) unless the answer is right \
 here; then just reply.
 - reply: one short sentence to the owner saying what happens next.";
+
+/// What an agent that's about to stop for the owner hears first.
+const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
+sending as them, deleting or paying, or their finger or face)? A tool falling short isn't. Use the other device: Safari's page tools \
+and the Mac's window tools see the same page differently. Ask for the whole Mac with mac_take_over, approve a sign-in's verification \
+on their iPhone, or fix Hive's own code. Then keep going. If it truly is theirs, end the same way again.";
 
 const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
 server runs on the computer you run on and reaches the owner's devices. Your first message tells the owner what you'll do and \
