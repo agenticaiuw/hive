@@ -14,10 +14,14 @@ import tempfile
 import zipfile
 
 
+class SigningError(RuntimeError):
+    pass
+
+
 def run(*args):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
-        raise RuntimeError(f"{args[0]} failed during iOS signing")
+        raise SigningError(f"{args[0]} failed during iOS signing")
     return result.stdout
 
 
@@ -35,7 +39,7 @@ def select(profiles, bundle_id, network):
         entitlements = dict(entitlements)
         entitlements["application-identifier"] = f"{prefix}.{bundle_id}"
         return raw, profile, entitlements
-    raise RuntimeError(f"IOS_PROFILE needs a current profile for {bundle_id}" + (" with Network Extensions enabled" if network else ""))
+    raise SigningError(f"IOS_PROFILE needs a current profile for {bundle_id}" + (" with Network Extensions enabled" if network else ""))
 
 
 def sign(app, source):
@@ -70,7 +74,7 @@ def sign(app, source):
         available = set(re.findall(r"\b[0-9A-F]{40}\b", identities))
         common = certificates & available
         if not common:
-            raise RuntimeError("No installed signing identity matches every iOS profile")
+            raise SigningError("No installed signing identity matches every iOS profile")
         signer = sorted(common)[0]
         for item in sorted(app.rglob("*"), key=lambda p: len(p.parts), reverse=True):
             if item.suffix in (".framework", ".xctest", ".dylib"):
@@ -86,7 +90,11 @@ def sign(app, source):
 if __name__ == "__main__":
     try:
         sign(Path(sys.argv[1]), Path(os.environ["HIVE_IOS_PROFILE"]))
-    except Exception as error:
-        # Do not include subprocess output, profile contents or secret paths.
+    except SigningError as error:
         print(f"iOS signing failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        # Third-party parsers and filesystem exceptions may embed profile
+        # contents, archive entry names or secret paths in their messages.
+        print("iOS signing failed: invalid signing input or unavailable signing tools", file=sys.stderr)
         sys.exit(1)

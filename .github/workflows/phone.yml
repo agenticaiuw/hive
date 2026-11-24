@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: stable, cache: false }
       # The owner's Apple team signs it once its certificate and profile are this repository's secrets: IOS_CERTIFICATE (the
-      # .p12, base64), IOS_CERTIFICATE_PASSWORD, and IOS_PROFILE (the .mobileprovision for app.hive.xctrunner, base64).
+      # .p12, base64), IOS_CERTIFICATE_PASSWORD, and IOS_PROFILE (a base64 ZIP of profiles for the app and its loopback extension).
       - if: env.SIGNED == 'true'
         env:
           IOS_PROFILE: ${{ secrets.IOS_PROFILE }}

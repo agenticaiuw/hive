@@ -1,5 +1,10 @@
 import datetime
 import unittest
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 from sign import select
 
 class ProvisioningTests(unittest.TestCase):
@@ -19,6 +24,16 @@ class ProvisioningTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 select(profiles, "app.hive.xctrunner.loopback", True)
         self.assertEqual(select([app, extension], "app.hive.xctrunner.loopback", True)[2]["application-identifier"], "TESTTEAM.app.hive.xctrunner.loopback")
+
+    def test_external_exception_does_not_print_private_profile_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = "private-profile-label-for-test"
+            source = str(Path(directory) / marker)
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("sign.py")), "Hive.app"],
+                env={**os.environ, "HIVE_IOS_PROFILE": source}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn(marker, result.stderr)
+            self.assertEqual(result.stdout, "")
 
     def test_wildcard_does_not_authorize_the_extension(self):
         with self.assertRaises(RuntimeError):
