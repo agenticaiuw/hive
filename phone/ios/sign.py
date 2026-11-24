@@ -25,7 +25,7 @@ def run(*args):
     return result.stdout
 
 
-def select(profiles, bundle_id, network):
+def select(profiles, bundle_id, network, development=False):
     for raw, profile in profiles:
         entitlements = profile.get("Entitlements", {})
         app_id = entitlements.get("application-identifier", "")
@@ -34,12 +34,14 @@ def select(profiles, bundle_id, network):
             continue
         if profile.get("ExpirationDate", datetime.datetime.min) <= datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None):
             continue
+        if development and entitlements.get("get-task-allow") is not True:
+            continue
         if network and "packet-tunnel-provider" not in entitlements.get("com.apple.developer.networking.networkextension", []):
             continue
         entitlements = dict(entitlements)
         entitlements["application-identifier"] = f"{prefix}.{bundle_id}"
         return raw, profile, entitlements
-    raise SigningError(f"IOS_PROFILE needs a current profile for {bundle_id}" + (" with Network Extensions enabled" if network else ""))
+    raise SigningError(f"IOS_PROFILE needs a current profile for {bundle_id}" + (" with Network Extensions enabled" if network else "") + (" for development signing" if development else ""))
 
 
 def sign(app, source):
@@ -63,7 +65,7 @@ def sign(app, source):
         for bundle in bundles:
             with (bundle / "Info.plist").open("rb") as file:
                 info = plistlib.load(file)
-            raw, profile, entitlements = select(profiles, info["CFBundleIdentifier"], bool(extensions))
+            raw, profile, entitlements = select(profiles, info["CFBundleIdentifier"], bool(extensions), development=bundle == app)
             chosen.append((bundle, raw, profile, entitlements))
         # One identity must be authorized by every component's profile.
         certificates = set.intersection(*[

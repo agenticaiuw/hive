@@ -13,6 +13,7 @@ class ProvisioningTests(unittest.TestCase):
             "ExpirationDate": datetime.datetime(2000 if expired else 2100, 1, 1),
             "Entitlements": {
                 "application-identifier": "TESTTEAM." + bundle,
+                "get-task-allow": True,
                 "com.apple.developer.networking.networkextension": ["packet-tunnel-provider"] if network else [],
             },
         })
@@ -34,6 +35,12 @@ class ProvisioningTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertNotIn(marker, result.stderr)
             self.assertEqual(result.stdout, "")
+
+    def test_runner_rejects_distribution_profiles(self):
+        profile = self.profile()
+        profile[1]["Entitlements"]["get-task-allow"] = False
+        with self.assertRaises(RuntimeError):
+            select([profile], "app.hive.xctrunner", True, development=True)
 
     def test_wildcard_does_not_authorize_the_extension(self):
         with self.assertRaises(RuntimeError):

@@ -142,8 +142,8 @@ plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plis
 # The XCTest frameworks come from the phone's developer disk image, matched to its iOS.
 rm -rf $app/Frameworks
 dress $app
-# Signed by the owner's Apple team when its provisioning profile for app.hive.xctrunner is here (HIVE_IOS_PROFILE, ad hoc or
-# development, listing the iPhones that may install it; for the extension, a zip of both profiles) and its certificate is in the keychain. Those iPhones then install
+# Signed by the owner’s Apple Development identity and device-listed development profiles
+# (HIVE_IOS_PROFILE contains a ZIP of app and extension profiles with Network Extensions). Those iPhones then install
 # it from Safari with a link to target/manifest.plist: itms-services://?action=download-manifest&url=<manifest.plist's address>.
 if [ -n "$HIVE_IOS_PROFILE" ]; then
   python3 phone/ios/sign.py "$app"
