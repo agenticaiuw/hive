@@ -15,7 +15,21 @@ header b { font-size: 18px; color: var(--accent); }
 nav { display: flex; gap: 4px; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 nav a { padding: 4px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; }
 nav a.on { background: var(--card); color: var(--fg); border: 1px solid var(--line); }
-main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+#app { height: 100dvh; display: flex; flex-direction: column; }
+#app[hidden] { display: none; }
+main { padding: 16px; width: 100%; margin: 0 auto; flex: 1; min-height: 0; overflow: auto; }
+main.sessions { display: flex; flex-direction: column; overflow: hidden; }
+.sessions #view { flex: 1; min-height: 0; }
+.session-list { overflow: auto; min-height: 0; overscroll-behavior: contain; padding: 2px; }
+.chat-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.chat-panel > .card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; }
+.chat-panel .log { flex: 1; min-height: 0; max-height: none; overflow: auto; overscroll-behavior: contain; }
+.chat-panel .composer { flex-shrink: 0; padding-top: 8px; }
+#orchestrator { display: none; }
+#orchestrator.active { display: flex; }
+.session-list > .item:first-child { position: sticky; top: 0; z-index: 1; }
+.session-list .item { overflow-wrap: anywhere; }
+.session-list .item:focus-visible { outline: 2px solid var(--accent); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .muted { color: var(--muted); font-size: 13px; }
@@ -33,8 +47,8 @@ button.plain { background: transparent; color: var(--muted); border: 1px solid v
 .log .who { color: var(--accent); font-weight: 600; margin-right: 6px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 td, th { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
-.split { display: grid; grid-template-columns: 300px 1fr; gap: 12px; }
-@media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
+.split { display: grid; grid-template-columns: minmax(180px, 300px) minmax(0, 1fr); gap: 12px; height: 100%; min-height: 0; }
+@media (max-width: 760px) { main { padding: 8px; } .split { grid-template-columns: minmax(110px, 32%) minmax(0, 1fr); gap: 8px; } .card { padding: 8px; } }
 .item { cursor: pointer; }
 .item.sel { outline: 2px solid var(--accent); }
 img.screen { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
@@ -57,11 +71,12 @@ button:disabled { opacity: .5; cursor: wait; }
 </header>
 <nav id="tabs"></nav>
 <main>
-  <div class="card composer" data-composer="main">
+  <div id="orchestrator" class="card"><b>Orchestrator</b><div id="orchestrator-log" class="log"></div><div class="composer" data-composer="main">
     <textarea id="ask" rows="2" placeholder="Tell Hive what to do"></textarea>
     <div class="attachments"></div>
     <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
     <span class="muted">Drop or paste pictures here, or choose from your photos.</span>
+  </div>
   </div>
   <div id="view"></div>
 </main>
@@ -172,35 +187,77 @@ async function sendComposer(key, path) {
 async function send() { await sendComposer('main', 'api/requests?wait=1'); refresh(); }
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
-const TABS = ['Agents', 'Tasks', 'Past', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
-let tab = location.hash.slice(1) || 'Agents', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
+const TABS = ['Sessions', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
+let tab = location.hash.slice(1) || 'Sessions', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
+if (['Agents', 'Tasks', 'Past'].includes(tab)) tab = 'Sessions';
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
-addEventListener('hashchange', () => { tab = location.hash.slice(1); chat = null; tabs(); render(); });
+addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Tasks', 'Past'].includes(tab)) tab = 'Sessions'; chat = null; chatAfter = 0; tabs(); render(); });
 
+function logEntry(l) {
+  if (l.who.endsWith(' input')) return `<details><summary>${esc(l.who)}</summary><div>${esc(l.text)}</div></details>`;
+  return `<div><span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`;
+}
 const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 function taskCard(t, click = true) {
-  return `<div class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
+  return `<div role="button" tabindex="0" data-session="${t.id}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
     <div class="row">${badge(t.status)} <b>#${t.id}</b> ${esc(t.title)}</div>
     <div class="muted">${esc(JSON.parse(t.nodes || '[]').join(', ') || 'vm')} · ${esc(t.project || '')}${t.every ? ` · every ${t.every} h` : ''} · ${ago(t.updated)}</div>
     ${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}
     ${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`;
 }
-async function openChat(id) { chat = id; chatAfter = 0; render(); }
+async function openChat(id) { if (chat === id) return; chat = id; chatAfter = 0; render(); }
 function chatPane() {
   return `<div class="card"><div class="row"><b>Task #${chat}</b><span style="flex:1"></span><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
     <div id="chatlog" class="log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Add pictures</button><input type="file" accept="image/*" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
+let chatLoading = false, orchestratorLoading = false, orchestratorAfter = 0;
 async function loadChat() {
-  if (!chat || !$('#chatlog')) return;
-  const r = await api(`api/tasks/${chat}?after=${chatAfter}`);
-  const box = $('#chatlog'), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-  for (const l of r.log) { box.insertAdjacentHTML('beforeend', `<div><span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`); chatAfter = l.id; }
-  if (atEnd) box.scrollTop = box.scrollHeight;
+  const selected = chat, box = $('#chatlog');
+  if (!selected || !box || chatLoading) return;
+  chatLoading = true;
+  try {
+    const r = await api(`api/tasks/${selected}?after=${chatAfter}`);
+    if (chat !== selected || box !== $('#chatlog')) return;
+    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    for (const l of r.log) { box.insertAdjacentHTML('beforeend', logEntry(l)); chatAfter = l.id; }
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  } finally { chatLoading = false; }
+}
+async function loadOrchestrator() {
+  const box = $('#orchestrator-log');
+  if (!box || orchestratorLoading) return;
+  orchestratorLoading = true;
+  try {
+    const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
+    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    for (const l of rows) {
+      box.insertAdjacentHTML('beforeend', logEntry(l));
+      orchestratorAfter = l.id;
+    }
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  } finally { orchestratorLoading = false; }
+}
+function updateSessions() {
+  const list = $('#session-list'); if (!list) return;
+  const pinned = list.firstElementChild;
+  pinned.classList.toggle('sel', chat === null);
+  const existing = new Map(Array.from(list.querySelectorAll('[data-session]')).map(el => [Number(el.dataset.session), el]));
+  let previous = pinned;
+  for (const t of state.tasks) {
+    let el = existing.get(t.id);
+    const html = taskCard(t);
+    if (!el) { const template = document.createElement('template'); template.innerHTML = html; el = template.content.firstElementChild; }
+    else if (el.dataset.snapshot !== html) { const template = document.createElement('template'); template.innerHTML = html; el.replaceChildren(...template.content.firstElementChild.childNodes); el.classList.toggle('sel', chat === t.id); }
+    el.dataset.snapshot = html;
+    if (previous.nextElementSibling !== el) previous.after(el);
+    previous = el; existing.delete(t.id);
+  }
+  for (const el of existing.values()) el.remove();
 }
 async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${id}/message`); loadChat(); }
 async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
-$('#view').addEventListener('keydown', e => { if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
+$('#view').addEventListener('keydown', e => { if (e.target.closest('[data-session]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openChat(Number(e.target.closest('[data-session]').dataset.session)); return; } if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
 
 function table(rows) {
   if (!rows.length) return '<p class="muted">Nothing here.</p>';
@@ -212,16 +269,18 @@ async function render() {
   clearTimeout(screenRetry);
   if (remoteScreen) { const old = remoteScreen; remoteScreen = null; old.disconnect(); }
   const v = $('#view');
-  if (tab === 'Agents' || tab === 'Tasks') {
-    const list = tab === 'Agents' ? state.agents.map(a => state.tasks.find(t => t.id === a.task_id)).filter(Boolean) : state.tasks;
-    const groups = {};
-    for (const t of list) (groups[tab === 'Tasks' ? (t.project || 'Other') : 'Active agents'] ??= []).push(t);
-    v.innerHTML = `<div class="split"><div>${Object.entries(groups).map(([g, ts]) => `<p class="muted">${esc(g)}</p>${ts.map(t => taskCard(t)).join('')}`).join('') || '<p class="muted">No agents are working.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    chatAfter = 0; document.querySelectorAll('.composer').forEach(paintComposer); loadChat();
-  } else if (tab === 'Past') {
-    const done = await api('api/tasks?status=done'), dropped = await api('api/tasks?status=dropped');
-    v.innerHTML = `<div class="split"><div>${[...done, ...dropped].map(t => taskCard(t)).join('') || '<p class="muted">None yet.</p>'}</div><div>${chat ? chatPane() : ''}</div></div>`;
-    chatAfter = 0; document.querySelectorAll('.composer').forEach(paintComposer); loadChat();
+  const sessions = tab === 'Sessions';
+  $('main').classList.toggle('sessions', sessions);
+  const orchestrator = $('#orchestrator');
+  // Keep the pinned chat and its composer alive while switching sessions or tabs.
+  $('main').insertBefore(orchestrator, v);
+  orchestrator.classList.remove('active');
+  if (sessions) {
+    v.innerHTML = `<div class="split"><aside id="session-list" class="session-list" aria-label="Sessions"><div role="button" tabindex="0" class="card item" onclick="openChat(null)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openChat(null)}">Orchestrator · pinned</div></aside><section class="chat-panel"></section></div>`;
+    updateSessions();
+    if (chat === null) { $('.chat-panel').append(orchestrator); orchestrator.classList.add('active'); loadOrchestrator(); }
+    else { $('.chat-panel').innerHTML = chatPane(); chatAfter = 0; loadChat(); }
+    document.querySelectorAll('.composer').forEach(paintComposer);
   } else if (tab === 'Rules') {
     const rules = await api('api/rules');
     v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
@@ -277,12 +336,12 @@ async function refresh() {
   state = await api('api/state');
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
   $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
-  if (['Agents', 'Tasks', 'Nodes'].includes(tab) && !document.activeElement?.matches('input,textarea') && !Array.from(drafts.values()).some(d => d.busy)) render();
-  else loadChat();
+  if (tab === 'Sessions') updateSessions();
+  await Promise.all([loadChat(), loadOrchestrator()]);
 }
 async function start() {
   try { await api('api/me'); } catch { if (!await login()) return; $('#login').hidden = true; }
-  $('#app').hidden = false; tabs(); await refresh(); render();
+  $('#app').hidden = false; tabs(); await refresh(); await render();
   clearInterval(timer);
   timer = setInterval(() => { refresh().catch(() => {}); }, 2000);
 }

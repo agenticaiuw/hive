@@ -148,9 +148,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let rules = rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]));
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
         }
+        ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
+            "select * from log where task_id=0 and request_id>0 and id>? order by id limit 2000",
+            args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
-            "tasks": hive.db.all("select * from tasks where status in ('open','working','needs') order by id desc", &[]),
+            "tasks": hive.db.all("select * from tasks order by id desc", &[]),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') and t.status in ('working','needs') order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),
             "requests": hive.db.all("select * from requests order by id desc limit 30", &[]),
@@ -350,6 +353,32 @@ fn mime(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dashboard_sessions_include_history_and_orchestrator_log_has_a_cursor() {
+        let state = std::env::temp_dir().join(format!("hive-session-api-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let key = new_token(&hive, "test");
+        for status in ["working", "needs", "done", "dropped"] {
+            hive.db.run("insert into tasks(title,status) values('Session',?)", args!(status));
+        }
+        hive.log(0, 0, 1, "owner", "Request");
+        hive.log(0, 1, 1, "agent", "Session message");
+        hive.log(0, 0, 1, "hive", "Routed");
+        let get = |path: &str, after: i64| {
+            let req = Req { method: "GET".into(), path: path.into(), query: [("after".into(), after.to_string())].into_iter().collect(),
+                headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
+            let res = handle(&hive, req);
+            assert_eq!(res.status, 200);
+            serde_json::from_slice::<Value>(&res.body).unwrap()
+        };
+        assert_eq!(get("/api/state", 0)["tasks"].as_array().unwrap().len(), 4);
+        let log = get("/api/orchestrator", 0);
+        assert_eq!(log.as_array().unwrap().len(), 2);
+        assert_eq!(log[1]["text"], "Routed");
+        assert_eq!(get("/api/orchestrator", log[1]["id"].as_i64().unwrap()), json!([]));
+        std::fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn developer_identity_requires_the_phones_or_a_devices_key() {
         let state = std::env::temp_dir().join(format!("hive-bootstrap-api-test-{}", std::process::id()));

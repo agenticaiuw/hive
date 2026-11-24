@@ -207,6 +207,7 @@ impl Hive {
 
     pub fn plan(self: &Arc<Self>, id: i64) {
         let Some(req) = self.db.get("select * from requests where id=?", args!(id)) else { return };
+        self.log(0, 0, id, "orchestrator input", &self.planner_input(&req));
         let outcome = self.plan_inner(&req);
         match outcome {
             Ok(reply) => {
@@ -373,6 +374,7 @@ impl Hive {
         let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
             args!(task_id, if on_claude { CLAUDE_AGENT } else { "codex" }, short(&s(&task["title"]), 60), now(), now()));
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
+        self.log(agent, task_id, 0, "session input", &self.instructions(&task));
         let result = if on_claude { self.claude_turn(agent, "Start on your task now.") }
             else { self.new_thread(agent, &task).and_then(|_| self.start_turn_with(agent, "Start on your task now.", effort)) };
         if let Err(e) = result {
