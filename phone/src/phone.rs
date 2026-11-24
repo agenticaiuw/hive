@@ -33,7 +33,8 @@ pub fn wda(path: &str, method: &str, body: Option<Value>, secs: u64) -> Result<V
     };
     fail.map_err(|f| {
         let l = f.to_lowercase();
-        if ["offline", "disconnected", "not connected", "unavailable", "timed out"].iter().any(|w| l.contains(w)) { return DOWN.into(); }
+        if ["offline", "disconnected", "not connected", "unavailable"].iter().any(|w| l.contains(w)) { return DOWN.into(); }
+        if l.contains("timed out") { return format!("The iPhone did not finish {method} {path} within {secs}s. It may still complete; inspect the screen before retrying."); }
         f.lines().next().unwrap_or("").chars().take(300).collect()
     })
 }
@@ -95,9 +96,11 @@ impl Phone {
         self.wda("/wda/locked", "GET", None, 30)?["value"].as_bool().ok_or("the iPhone didn't say whether it's locked".into())
     }
 
+    // XCTest can wait for an app to become idle after applying an action. Its
+    // completion must fit inside the phone tool's 180-second deadline.
     fn touch(&self, moves: Vec<Value>) -> Result<(), String> {
         self.in_session("/actions", "POST", Some(json!({ "actions": [{ "type": "pointer", "id": "finger",
-            "parameters": { "pointerType": "touch" }, "actions": moves }] })), 30).map(|_| ())
+            "parameters": { "pointerType": "touch" }, "actions": moves }] })), 120).map(|_| ())
     }
 
     /// The passcode the owner saved on the dashboard, if it's for this iPhone and the last try didn't go unconfirmed.
@@ -189,17 +192,17 @@ impl Phone {
             }
             "phone_type" => {
                 let chars: Vec<String> = a["text"].as_str().unwrap_or("").chars().map(String::from).collect();
-                self.in_session("/wda/keys", "POST", Some(json!({ "value": chars })), 60)?;
+                self.in_session("/wda/keys", "POST", Some(json!({ "value": chars })), 120)?;
                 shot("Typed.")
             }
             "phone_home" => {
                 if self.locked()? { return Err("The iPhone is locked; call phone_unlock first.".into()); }
-                self.wda("/wda/homescreen", "POST", Some(json!({})), 30)?;
+                self.wda("/wda/homescreen", "POST", Some(json!({})), 120)?;
                 shot("Home screen.")
             }
             "phone_open_app" => {
                 if self.locked()? { return Err("The iPhone is locked; call phone_unlock first.".into()); }
-                self.in_session("/wda/apps/activate", "POST", Some(json!({ "bundleId": a["bundle_id"] })), 30)?;
+                self.in_session("/wda/apps/activate", "POST", Some(json!({ "bundleId": a["bundle_id"] })), 120)?;
                 shot("Opened.")
             }
             _ => Err(format!("no phone tool {tool}")),
