@@ -589,6 +589,7 @@ dependencies = [
  "plist",
  "ring",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

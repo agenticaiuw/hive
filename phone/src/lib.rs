@@ -11,6 +11,11 @@ use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+/// Where phone.yml publishes each signed Hive for iPhone: Hive.ipa, the manifest.plist iOS installs it from, and phone.json,
+/// read here. GitHub Pages, since a release download redirects to a short-lived signed address, which iOS's installer isn't
+/// known to follow.
+pub const SITE: &str = "https://agenticaiuw.github.io/hive";
+
 fn tools() -> Vec<Value> {
     let xy = || json!({ "x": n("x in the latest screenshot"), "y": n("y in the latest screenshot") });
     let mut t = vec![
@@ -37,6 +42,12 @@ pub fn start(state: PathBuf, conf: hive_protocol::Conf) {
     });
 }
 
+/// How phone.json lists an iPhone: the SHA-256 of its UDID (upper case, without dashes), so the public file names no device.
+pub fn listing(udid: &str) -> String {
+    let u = udid.trim().replace('-', "").to_ascii_uppercase();
+    ring::digest::digest(&ring::digest::SHA256, u.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// For the dashboard: whether Hive Phone is connected and a passcode is saved.
 pub fn status(state: &Path) -> Value {
     json!({ "connected": link::connected(), "passcode": state.join(phone::PASSCODE).exists(), "paused": state.join(phone::PAUSED).exists() })
@@ -54,4 +65,13 @@ pub fn save_passcode(state: &Path, passcode: &str) -> Result<(), String> {
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).ok(); }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn lists_an_iphone_the_same_however_its_udid_is_written() {
+        assert_eq!(super::listing("00008110-001a2b3c00000000"), super::listing("00008110001A2B3C00000000 "));
+        assert_eq!(super::listing("x").len(), 64);
+    }
 }
