@@ -11,6 +11,7 @@ hive-protocol = { path = "../protocol" }
 hive-phone = { path = "../phone" }
 ureq = "2"
 ring = "0.17"
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -41,3 +41,85 @@ pub fn reinstall(repo: &Path) -> Result<Value, String> {
     });
     Ok(json!("Built. Hive's server restarts in a moment; your turn continues after it's back."))
 }
+
+/// Bridge the dashboard's authenticated WebSocket to the loopback-only VNC service.
+/// Both directions are bounded by socket timeouts; closing the tab releases the VNC session.
+pub fn control(req: &crate::http::Req) -> crate::http::Res {
+    use crate::http::Res;
+    // Cookies authenticate the upgrade, so reject cross-origin WebSocket requests.
+    let origin = req.headers.get("origin").map(String::as_str).unwrap_or("");
+    let host = req.headers.get("host").map(String::as_str).unwrap_or("");
+    if host.is_empty() || ![format!("http://{host}"), format!("https://{host}")].contains(&origin.to_string()) {
+        return Res::err(403, "Open screen control from your Hive dashboard.");
+    }
+    let key = match req.headers.get("sec-websocket-key") {
+        Some(k) if req.headers.get("upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket")) => k,
+        _ => return Res::err(400, "A WebSocket upgrade is required."),
+    };
+    let vnc = match std::net::TcpStream::connect("127.0.0.1:5901") {
+        Ok(s) => s,
+        Err(_) => return Res::err(503, "The VM's VNC service isn't running."),
+    };
+    let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Accept", &tungstenite::handshake::derive_accept_key(key.as_bytes()));
+    res.upgrade = Some(Box::new(move |conn| { bridge(conn, vnc); }));
+    res
+}
+
+fn bridge(conn: std::net::TcpStream, mut vnc: std::net::TcpStream) {
+    use std::io::Read;
+    use std::time::Duration;
+    use tungstenite::{Message, Error, protocol::{Role, WebSocketConfig}};
+    conn.set_read_timeout(Some(Duration::from_millis(8))).ok();
+    conn.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    vnc.set_read_timeout(Some(Duration::from_millis(8))).ok();
+    vnc.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let config = WebSocketConfig::default().max_message_size(Some(4 << 20)).max_frame_size(Some(4 << 20));
+    let mut ws = tungstenite::WebSocket::from_raw_socket(conn, Role::Server, Some(config));
+    let mut buf = [0; 65536];
+    loop {
+        match ws.read() {
+            Ok(Message::Binary(bytes)) => if vnc.write_all(&bytes).is_err() { break; },
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {},
+            Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+            Err(_) => break,
+        }
+        match vnc.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => if ws.send(Message::Binary(buf[..n].to_vec().into())).is_err() { break; },
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None);
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    #[test]
+    fn vnc_bridge_transports_binary_and_releases_connection() {
+        let browser_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let vnc_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let browser = TcpStream::connect(browser_listener.local_addr().unwrap()).unwrap();
+        browser.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let vnc = TcpStream::connect(vnc_listener.local_addr().unwrap()).unwrap();
+        let (server, _) = browser_listener.accept().unwrap();
+        let (mut desktop, _) = vnc_listener.accept().unwrap();
+        desktop.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let worker = std::thread::spawn(move || bridge(server, vnc));
+        let mut client = tungstenite::WebSocket::from_raw_socket(browser, tungstenite::protocol::Role::Client, None);
+        desktop.write_all(b"RFB 003.008\n").unwrap();
+        assert_eq!(client.read().unwrap().into_data(), b"RFB 003.008\n"[..]);
+        client.send(tungstenite::Message::Binary(vec![0, 255, 1, 2].into())).unwrap();
+        let mut bytes = [0; 4];
+        desktop.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, [0, 255, 1, 2]);
+        client.close(None).unwrap();
+        worker.join().unwrap();
+        assert_eq!(desktop.read(&mut bytes).unwrap(), 0);
+    }
+}

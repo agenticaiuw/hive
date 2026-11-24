@@ -84,6 +84,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET", [""]) => return Res::new(200, "text/html; charset=utf-8", DASHBOARD),
         ("GET", ["icon.png"]) => return Res::new(200, "image/png", ICON),
         ("GET", ["manifest.json"]) => return Res::new(200, "application/manifest+json", MANIFEST),
+        ("GET", ["api", "vm", "client.js"]) => return Res::new(200, "text/javascript", include_bytes!("../../dashboard/remote-screen.js").as_slice()),
         ("GET", ["health"]) => return Res::json(&json!({ "ok": true, "version": hive.version })),
         // The dashboard signs in the owner's own devices and this computer by itself. Hive is plain HTTP (WireGuard encrypts
         // it inside the tailnet), so the cookie isn't Secure.
@@ -241,6 +242,11 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
+        ("GET", ["api", "vm", "control"]) => crate::vm::control(&req),
+        ("GET", ["api", "vm", "credentials"]) => match std::fs::read_to_string("/home/ubuntu/.vnc/vm-screen.passwd") {
+            Ok(password) => Res::json(&json!({ "password": password.trim() })),
+            Err(_) => Res::err(503, "The VM's VNC service isn't configured."),
+        },
         ("GET", ["api", "vm", "screen"]) => match crate::vm::screen() {
             Some(png) => Res::new(200, "image/png", png),
             None => Res::err(404, "The VM's screen isn't running."),
