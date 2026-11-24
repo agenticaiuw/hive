@@ -1,19 +1,21 @@
 import Foundation
 
-/// Hive Phone's link to its Hive (the server's side is phone/src/link.rs). It dials out to the server over one WebSocket,
-/// takes its phone calls ({id, method, path, body}) and answers each ({id, status, body}) through `calls`, in this process;
-/// nothing can reach in. The Hive Server, on the owner's tailnet, is
+/// Hive Phone's link to its Hive (the server's side is phone/src/link.rs), from the moment the app opens (Launcher/Main.m).
+/// It dials out to the server over one WebSocket, takes its phone calls ({id, method, path, body}) and answers each ({id,
+/// status, body}) through `calls`, in this process; nothing can reach in. The Hive Server, on the owner's tailnet, is
 /// dialled through Tailscale inside the app (Tailnet.swift).
 ///
 /// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it looks for a pairing from the Hive
 /// Server on the owner's tailnet (Pairing.swift).
-final class Link: NSObject, URLSessionWebSocketDelegate {
-    static let shared = Link()
+@objc(HiveLink) public final class Link: NSObject, URLSessionWebSocketDelegate {
+    @objc public static let shared = Link()
     static let protocolVersion = 1
 
     /// Answers the server's phone calls once phone control runs: Runner's, set by the test that is phone control
-    /// (HivePhone.testRun). Until then each call is turned down.
-    var calls: ((String, String, String, @escaping (Int, String) -> Void) -> Void)?
+    /// (HivePhone.testRun) after the developer image is mounted. Until then each call gets `control` as its error.
+    var calls: ((String, String, String, @escaping (Int, String) -> Void) -> Void)? { didSet { changed() } }
+    /// How setting phone control up stands while it's off (Launcher/Main.m), for the dashboard's card.
+    @objc public var control = "" { didSet { changed() } }
 
     private(set) var pairing: Pairing?
     private(set) var connected = false
@@ -29,7 +31,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         (Bundle.main.object(forInfoDictionaryKey: "HiveVersion") as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "dev"
     }
 
-    func start() {
+    @objc public func start() {
         pairing = Pairing.load()
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { [weak self] _ in
             // Once Tailscale is up, the first dial; after a failure the backoff in reconnect dials again.
@@ -49,8 +51,8 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
-    /// Unpaired: Tailscale first (its sign-in opens in Safari, HivePhone.testRun), then the Hive Server on it. Failing: it
-    /// may bring a new pairing.
+    /// Unpaired: Tailscale first (signed in from the dashboard), then the Hive Server on it. Failing: it may bring a new
+    /// pairing.
     private func lookForPairing() {
         guard pairing == nil || failing else { return }
         if pairing == nil { Tailnet.shared.start() }
@@ -95,7 +97,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         receive(ws)
     }
 
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+    public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         guard webSocketTask == socket else { return }
         connected = true
         refused = false
@@ -173,7 +175,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
               Link.routes.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)) != nil,
               !path.contains(".."), !path.contains("%"), !path.contains("\\"), ["GET", "POST", "DELETE"].contains(method) else { return }
         guard let calls else {
-            let off = ["value": ["error": "phone control is off", "message": "Phone control is starting."]]
+            let off = ["value": ["error": "phone control is off", "message": control.isEmpty ? "Phone control is starting." : control]]
             let text = (try? JSONSerialization.data(withJSONObject: off)).map { String(decoding: $0, as: UTF8.self) } ?? ""
             return reply(id, 503, text, ws)
         }
