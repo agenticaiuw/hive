@@ -128,14 +128,15 @@ final class Runner {
 
     // MARK: Apps
 
-    private var candidates: [String] { recent + ["app.hive"] + Runner.system }
+    private var own: String { Bundle.main.bundleIdentifier ?? "" }
+    private var candidates: [String] { [own] + recent + Runner.system }
     private var recent: [String] { UserDefaults.standard.stringArray(forKey: "recentApps") ?? [] }
 
     private func remember(_ id: String) {
         UserDefaults.standard.set(Array(([id] + recent.filter { $0 != id }).prefix(20)), forKey: "recentApps")
     }
 
-    /// The app in front: SpringBoard when its home screen shows; else an app Hive opened, Hive, or one of Apple's;
+    /// The app in front: SpringBoard when its home screen shows; else Hive itself, an app Hive opened, or one of Apple's;
     /// otherwise, and whenever the iPhone is locked, SpringBoard (lock screen, system prompts). Another app opened from
     /// its icon reads as SpringBoard: XCUITest's public calls can't name it.
     private func front() -> String {
@@ -149,9 +150,11 @@ final class Runner {
         return Runner.springboard
     }
 
-    /// The app whose tree Hive reads and types into.
+    /// The app whose tree Hive reads and types into. Hive's own window reads as SpringBoard: XCUITest asking this process
+    /// about itself would wait on the main thread it's running on.
     private func target() -> (String, XCUIApplication) {
-        let id = front()
+        var id = front()
+        if id == own { id = Runner.springboard }
         return (id, XCUIApplication(bundleIdentifier: id))
     }
 

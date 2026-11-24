@@ -1,14 +1,13 @@
 #!/bin/sh
-# The iPhone's two apps. Hive Phone (HivePhone/) is the phone as Hive's node: iOS lets an app see and touch the whole
-# screen only as a UI test, so it is one, our own (no WebDriverAgent): it dials out to Hive's server and answers the
-# server's WebDriverAgent-style calls in-process; nothing can reach in. iOS keeps a running UI test's own app in the
-# background, so the dashboard is a second, ordinary app, Hive (Hive/). They share Shared/. A Hive on a tailnet
-# (*.ts.net) is reached through Tailscale inside each app: tailscale/libtailscale (BSD-3-Clause), built here from a
-# pinned commit.
-# Makes target/HivePhone.ipa and target/Hive.ipa, unsigned (SideStore or the owner's Apple developer team signs them).
-# Hive Phone's packaging follows OpenMinis/iCTRL (Apache-2.0) so it starts from its icon while the phone's developer
-# disk image is mounted.
-# `build.sh test` instead runs the smoke test on an iPhone simulator (target/HivePhone/smoke.xcresult).
+# Hive, the iPhone app: the phone as Hive's node, and the dashboard. iOS lets an app see and touch the whole screen only
+# as a UI test, so Hive is one, our own (HivePhone/, no WebDriverAgent): it dials out to the Hive Server and answers the
+# server's WebDriverAgent-style calls in-process (nothing can reach in), and shows the dashboard in its own window
+# whenever it's in front. A Hive Server on a tailnet is reached through Tailscale inside the app: tailscale/libtailscale
+# (BSD-3-Clause), built here from a pinned commit.
+# Makes target/Hive.ipa, unsigned (SideStore or the owner's Apple developer team signs it). Packaging follows
+# OpenMinis/iCTRL (Apache-2.0) so it starts from its icon while the phone's developer disk image is mounted.
+# `build.sh test` instead tries it on an iPhone simulator: the smoke test under xcodebuild (target/HivePhone/smoke.xcresult),
+# then the packaged app launched from its icon, as a person would, with its window probed (target/HivePhone/probe).
 # Needs Xcode and Go.
 set -e
 cd "$(dirname "$0")/../.."
@@ -24,41 +23,58 @@ if [ ! -d $lib ]; then
   mkdir -p $ts/include && cp $ts/tailscale.h $ts/include/
   xcodebuild -create-xcframework -library $ts/libtailscale-ios.a -headers $ts/include -library $ts/libtailscale-ios-sim-arm.a -headers $ts/include -output $lib
 fi
-project="-project phone/ios/HivePhone.xcodeproj -configuration Debug"
+project="-project phone/ios/HivePhone.xcodeproj -scheme HivePhone -configuration Debug"
+id=app.hive.xctrunner
+# Xcode's test runner app with our test inside, as the app a person installs: its name, id, icon and version, ad-hoc signed.
+dress() {
+  for p in $1/Info.plist $1/PlugIns/*.xctest/Info.plist; do plutil -replace CFBundleIdentifier -string $id $p; done
+  plutil -replace CFBundleDisplayName -string Hive $1/Info.plist
+  plutil -replace HiveVersion -string "$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)" $1/Info.plist
+  sips -z 120 120 dashboard/icon.png --out $1/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $1/AppIcon60x60@3x.png
+  plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $1/Info.plist
+  find $1 -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
+  codesign -f -s - --timestamp=none $1
+}
 if [ "$1" = test ]; then
   sim=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')
   xcrun simctl boot "$sim" 2> /dev/null || true
-  # The smoke test opens the Hive app too.
-  xcodebuild build $project -scheme Hive -quiet -destination "id=$sim" -derivedDataPath $out/sim ARCHS=arm64
-  xcrun simctl install "$sim" $out/sim/Build/Products/Debug-iphonesimulator/Hive.app
-  rm -rf $out/smoke.xcresult
-  TEST_RUNNER_HIVE_SMOKE=1 xcodebuild test $project -scheme HivePhone -destination "id=$sim" -derivedDataPath $out/sim \
-    -resultBundlePath $out/smoke.xcresult -only-testing:HivePhone/HivePhone/testSmoke ARCHS=arm64
-  exit
+  rm -rf $out/smoke.xcresult $out/probe; mkdir -p $out/probe
+  docs() { echo "$(xcrun simctl get_app_container "$sim" $id data 2> /dev/null)/Documents"; }
+  # 1. Every call the server makes, with the runner started by xcodebuild.
+  TEST_RUNNER_HIVE_SMOKE=1 xcodebuild test $project -destination "id=$sim" -derivedDataPath $out/sim -resultBundlePath $out/smoke.xcresult \
+    -only-testing:HivePhone/HivePhone/testSmoke ARCHS=arm64 || failed=1
+  cp "$(docs)"/probe-smoke* $out/probe/ 2> /dev/null || true
+  # 2. As a person uses it: the packaged app launched from its icon (what simctl launch does), its window probed while
+  # the runner carries on (Probe.icon), and at 30 seconds launched from its icon again. A simulator has no developer
+  # disk image, so this one keeps the XCTest frameworks Xcode put in it.
+  app=$out/icon/Hive.app
+  rm -rf $out/icon; mkdir -p $out/icon
+  ditto $out/sim/Build/Products/Debug-iphonesimulator/HivePhone-Runner.app $app
+  dress $app
+  xcrun simctl uninstall "$sim" $id 2> /dev/null || true
+  xcrun simctl install "$sim" $app
+  launch() {
+    SIMCTL_CHILD_HIVE_PROBE=1 xcrun simctl launch --stdout=$PWD/$out/probe/stdout-$1.txt --stderr=$PWD/$out/probe/stderr-$1.txt "$sim" $id \
+      >> $out/probe/host.txt 2>&1 || echo "launch $1 failed: $?" >> $out/probe/host.txt
+  }
+  launch 1
+  for t in $(seq 1 90); do
+    sleep 1
+    case $t in 5|12|22|28|38) xcrun simctl io "$sim" screenshot $out/probe/host-$t.png > /dev/null 2>&1 || true ;; esac
+    if [ $t = 30 ]; then launch 2; fi
+    if grep -q '"step":"done"' "$(docs)/probe-icon.log" 2> /dev/null; then break; fi
+  done
+  echo "waited $t s" >> $out/probe/host.txt
+  cp "$(docs)"/probe-icon* $out/probe/ 2> /dev/null || true
+  xcrun simctl spawn "$sim" log show --last 3m --style compact --predicate 'process == "HivePhone-Runner"' > $out/probe/log.txt 2>&1 || true
+  exit ${failed:-0}
 fi
-device="-quiet -destination generic/platform=iOS -derivedDataPath $out/derived CODE_SIGNING_ALLOWED=NO ARCHS=arm64 DEBUG_INFORMATION_FORMAT=dwarf"
-xcodebuild build-for-testing $project -scheme HivePhone $device
-xcodebuild build $project -scheme Hive $device
-version=$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)
-# Hive Phone is Xcode's test runner app with our test inside.
-runner() {
-  # Everything Xcode embeds in Frameworks is XCTest's, which comes from the phone's developer disk image, matched to its iOS.
-  rm -rf $1/Frameworks
-  for p in $1/Info.plist $1/PlugIns/*.xctest/Info.plist; do plutil -replace CFBundleIdentifier -string app.hive.phone.xctrunner $p; done
-  plutil -replace CFBundleDisplayName -string "Hive Phone" $1/Info.plist
-}
-# target/$2.ipa from the app built at $1: Payload/$2.app with the icon and the version, ad-hoc signed.
-ipa() {
-  pay=$out/$2/Payload; app=$pay/$2.app
-  rm -rf $pay; mkdir -p $pay; ditto "$1" $app
-  if [ $2 = HivePhone ]; then runner $app; fi
-  plutil -replace HiveVersion -string "$version" $app/Info.plist
-  sips -z 120 120 dashboard/icon.png --out $app/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $app/AppIcon60x60@3x.png
-  plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $app/Info.plist
-  find $app -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s - --timestamp=none {} 2> /dev/null
-  codesign -f -s - --timestamp=none $app
-  (cd $out/$2 && rm -f ../../$2.ipa && zip -qry ../../$2.ipa Payload) && echo target/$2.ipa
-}
-built=$out/derived/Build/Products/Debug-iphoneos
-ipa $built/HivePhone-Runner.app HivePhone
-ipa $built/Hive.app Hive
+xcodebuild build-for-testing $project -quiet -destination generic/platform=iOS -derivedDataPath $out/derived \
+  CODE_SIGNING_ALLOWED=NO ARCHS=arm64 DEBUG_INFORMATION_FORMAT=dwarf
+rm -rf $out/Payload; mkdir -p $out/Payload
+app=$out/Payload/Hive.app
+ditto $out/derived/Build/Products/Debug-iphoneos/HivePhone-Runner.app $app
+# Everything Xcode embeds in Frameworks is XCTest's, which comes from the phone's developer disk image, matched to its iOS.
+rm -rf $app/Frameworks
+dress $app
+(cd $out && rm -f ../Hive.ipa && zip -qry ../Hive.ipa Payload) && echo target/Hive.ipa

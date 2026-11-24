@@ -1,6 +1,6 @@
-# The iPhone's apps (phone/ios/build.sh): every push and pull request that touches them builds the unsigned HivePhone.ipa
-# and Hive.ipa and runs the smoke test on an iPhone simulator. After each release of main they're built again and added
-# to the `latest` release: on their own here, so a phone build that fails never holds back the server and other devices.
+# Hive, the iPhone app (phone/ios/build.sh): every push and pull request that touches it builds the unsigned Hive.ipa and
+# tries it on an iPhone simulator. After each release of main it's built again and added to the `latest` release: on its
+# own here, so a phone build that fails never holds back the server and the other devices.
 name: phone
 on:
   push:
@@ -25,12 +25,12 @@ jobs:
         with: { go-version: stable, cache: false }
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
-        with: { name: ipa, path: "target/*.ipa" }
+        with: { name: Hive, path: target/Hive.ipa }
       - if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest target/HivePhone.ipa target/Hive.ipa --clobber
-      # Only to learn from: what a simulator says about the runner and the Hive app, kept in the xcresult.
+        run: gh release upload latest target/Hive.ipa --clobber
+      # Only to learn from: what a simulator says about the runner and its window, kept in the xcresult and the probe.
       - if: github.event_name != 'workflow_run'
         continue-on-error: true
         timeout-minutes: 20
@@ -56,6 +56,43 @@ jobs:
           except Exception as e:
               print(f"::error title=smoke::couldn't read the results: {e}")
           EOF
+      # What iOS said about Hive's window at each step (Probe.swift), one annotation per run: under xcodebuild (smoke) and
+      # launched from its icon (icon).
+      - if: always() && github.event_name != 'workflow_run'
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os
+          d = "target/HivePhone/probe"
+          def say(kind, title, lines):
+              print(f"::{kind} title={title}::" + "%0A".join(l.replace("%", "%25") for l in lines)[:6000])
+          for run in ("smoke", "icon"):
+              f = f"{d}/probe-{run}.log"
+              if not os.path.exists(f):
+                  say("error", f"probe {run}", [f"no probe log: the runner's test never got to its window ({run})"])
+                  continue
+              out = []
+              for l in open(f):
+                  try:
+                      s = json.loads(l)
+                  except Exception:
+                      out.append(l.strip())
+                      continue
+                  sc = "; ".join(f"{x['class']} {x['state']} w{x['windows']} key={x['keyWindow']}" for x in s.get("scenes", [])) or "no scenes"
+                  w = s.get("window")
+                  w = f"window inScene={w['inScene']} {w['sceneState']} key={w['key']} hidden={w['hidden']} reload={w['reload']}" if isinstance(w, dict) else "no window"
+                  out.append(f"{s.get('n')}. {s.get('step')} | app={s.get('app')} delegate={s.get('delegate')} manifest={s.get('sceneManifest')} | {sc} | {w} | taps={s.get('taps')}")
+              say("notice", f"probe {run}", out)
+          notes = []
+          for f in sorted(glob.glob(f"{d}/host.txt") + glob.glob(f"{d}/std*.txt")):
+              tail = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()][-6:]
+              notes += [f"{os.path.basename(f)}: {l}" for l in tail]
+          say("notice", "probe host", notes or ["nothing from the host"])
+          EOF
       - if: always() && github.event_name != 'workflow_run'
         uses: actions/upload-artifact@v4
-        with: { name: smoke, path: target/HivePhone/smoke.xcresult, if-no-files-found: ignore }
+        with:
+          name: smoke
+          path: |
+            target/HivePhone/smoke.xcresult
+            target/HivePhone/probe
+          if-no-files-found: ignore

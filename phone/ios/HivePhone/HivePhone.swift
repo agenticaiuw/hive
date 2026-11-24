@@ -1,9 +1,9 @@
+import UIKit
 import XCTest
 
-/// Hive Phone. iOS lets an app see and touch the whole screen only as a UI test, so Hive Phone is one, run by Xcode's
-/// test runner app, which starts from its icon (build.sh): testRun never ends. It keeps the link to its Hive (Link.swift)
-/// and answers the server's phone calls (Runner.swift). It has no window: iOS keeps a running UI test's own app in the
-/// background, so the dashboard is the Hive app's (phone/ios/Hive).
+/// Hive, the iPhone app. iOS lets an app see and touch the whole screen only as a UI test, so Hive is one, run by Xcode's
+/// test runner app, which starts from its icon (build.sh): testRun never ends. It shows its window whenever it's in front
+/// (Dashboard.swift), keeps the link to its Hive Server (Link.swift) and answers the server's phone calls (Runner.swift).
 final class HivePhone: XCTestCase {
     /// `build.sh test` sets HIVE_SMOKE: testSmoke checks the runner on a simulator, and testRun stands aside.
     static let smoke = ProcessInfo.processInfo.environment["HIVE_SMOKE"] != nil
@@ -11,26 +11,31 @@ final class HivePhone: XCTestCase {
     override func setUp() { continueAfterFailure = true }
 
     /// A failed XCUITest call becomes the error of the server's call that made it, never a failed test, which would end
-    /// Hive Phone.
+    /// Hive.
     override func record(_ issue: XCTIssue) {
         if Runner.shared.inCall || !HivePhone.smoke { Runner.shared.failed(issue.compactDescription) } else { super.record(issue) }
     }
 
     func testRun() throws {
         try XCTSkipIf(HivePhone.smoke, "the smoke test runs instead")
-        // With no window of its own, Hive Phone signs its Tailscale node in by opening the sign-in page in Safari, once
+        Dashboard.show()
+        let probe = ProcessInfo.processInfo.environment["HIVE_PROBE"] != nil
+        // The window's button signs Tailscale in; when Hive isn't in front to show it, the sign-in opens in Safari, once
         // for each new link.
         var opened: URL?
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { _ in
-            guard let url = Tailnet.shared.loginURL, url != opened, !Runner.locked() else { return }
+            guard let url = Tailnet.shared.loginURL, url != opened, !probe, !Runner.locked(),
+                  UIApplication.shared.applicationState == .background else { return }
             opened = url
             XCUIDevice.shared.system.open(url)
         }
         Link.shared.start()
+        if probe { Probe.icon() }
+        // The main run loop, as an app's own: the window takes touches, and the link and the server's calls run.
         while true { _ = RunLoop.main.run(mode: .default, before: .distantFuture) }
     }
 
-    /// Every call the server makes, on a simulator, and that the Hive app starts on its pairing screen.
+    /// Every call the server makes, on a simulator, and what iOS says about Hive's window meanwhile (Probe.swift).
     func testSmoke() throws {
         try XCTSkipUnless(HivePhone.smoke, "only for build.sh test")
         func call(_ m: String, _ p: String, _ b: [String: Any]? = nil, _ want: Int = 200) -> [String: Any] {
@@ -48,6 +53,16 @@ final class HivePhone: XCTestCase {
         }
         func spin(_ secs: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(secs)) }
         func front() -> String? { (call("GET", "/wda/activeAppInfo")["value"] as? [String: Any])?["bundleId"] as? String }
+        // Hive's window under xcodebuild, which starts the runner its own way: what iOS says, at each step.
+        func note(_ step: String) {
+            let a = XCTAttachment(string: Probe.log(step, "smoke"))
+            a.name = step
+            a.lifetime = .keepAlways
+            add(a)
+        }
+        Dashboard.show()
+        spin(2)
+        note("started by xcodebuild")
 
         // The pairing the dashboard copies.
         let pairing = "hive-phone:" + Data(#"{"url":"wss://hive.example.ts.net/phone/device","token":"\#(String(repeating: "t", count: 40))"}"#.utf8)
@@ -83,6 +98,7 @@ final class HivePhone: XCTestCase {
         _ = call("POST", "/session/\(sid)/wda/apps/activate", ["bundleId": "com.apple.Preferences"])
         spin(2)
         XCTAssertEqual(front(), "com.apple.Preferences")
+        note("Settings in front (an agent's action)")
         let source = call("GET", "/session/\(sid)/source")["value"] as? String ?? ""
         XCTAssertTrue(source.contains("<XCUIElementTypeApplication"), String(source.prefix(300)))
         let texts = call("POST", "/session/\(sid)/elements", ["using": "predicate string", "value": "type == 'XCUIElementTypeStaticText' AND visible == 1"])
@@ -104,14 +120,14 @@ final class HivePhone: XCTestCase {
         _ = call("POST", "/wda/homescreen", [:])
         spin(2)
         XCTAssertEqual(front(), Runner.springboard)
-        shot("Home screen")
+        note("home screen (an agent's action)")
 
-        // The Hive app (build.sh test installs it): it starts unpaired, on its pairing screen.
-        let hive = XCUIApplication(bundleIdentifier: "app.hive")
-        hive.activate()
-        XCTAssertTrue(hive.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Sign in with Tailscale'")).firstMatch.waitForExistence(timeout: 10),
-                      "the Hive app didn't show its pairing screen")
-        XCTAssertEqual(front(), "app.hive")
-        shot("Hive app")
+        // Hive back in front, as an agent or the owner would bring it: does its window show and take a tap?
+        XCUIApplication(bundleIdentifier: Bundle.main.bundleIdentifier ?? "").activate()
+        spin(3)
+        note("back in front via XCUIApplication.activate()")
+        Probe.tapReload()
+        spin(1)
+        note("after a tap on Reload")
     }
 }

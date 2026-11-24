@@ -64,6 +64,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         old?.cancel(with: .goingAway, reason: nil)
         session?.invalidateAndCancel()
         session = nil
+        changed()
         connect()
     }
 
@@ -93,6 +94,27 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         guard webSocketTask == socket else { return }
         connected = true
         refused = false
+        changed()
+    }
+
+    /// The window (Dashboard.swift) follows the link and Tailscale through one notification.
+    private func changed() { NotificationCenter.default.post(name: Tailnet.changed, object: nil) }
+
+    /// How it stands, in the owner's words, for the window.
+    var summary: String {
+        let t = Tailnet.shared
+        guard let p = pairing else {
+            let lead = t.running ? "Signed in to Tailscale. Looking for your Hive Server there (on the same Tailscale account)…" :
+                "Sign in with Tailscale (the same account as your Hive Server)."
+            return lead + "\nA Hive Server not on Tailscale (a cloud VM): on its dashboard, Nodes → Connect an iPhone copies a " +
+                "pairing; Hive picks it up from the clipboard."
+        }
+        if p.tailnet && !t.running {
+            return t.loginURL != nil ? "Your Hive Server is on your tailnet: sign Hive in with Tailscale to reach it." :
+                t.state.hasPrefix("Tailscale didn't") ? t.state : "Starting Tailscale…"
+        }
+        if refused { return "\(p.host) turned this pairing down: connect the iPhone again from the dashboard." }
+        return connected ? "Connected to \(p.host)." : "Connecting to \(p.host)…"
     }
 
     private func reconnect(_ ws: URLSessionWebSocketTask) {
@@ -104,6 +126,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         // The server turned this pairing down: take a new one from the clipboard when it comes.
         if status == 401 || status == 403 { refused = true; watch.reset() }
         ws.cancel(with: .goingAway, reason: nil)
+        changed()
         let delay = refused ? 60 : min(30, 1 << min(retry, 5))
         retry += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(delay)) { if self.socket == nil { self.connect() } }

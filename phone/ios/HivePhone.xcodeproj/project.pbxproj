@@ -15,10 +15,8 @@
 		A10000000000000000000006 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* Pairing.swift */; };
 		A10000000000000000000007 /* Catch.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* Catch.m */; };
 		A10000000000000000000008 /* libtailscale.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* libtailscale.xcframework */; };
-		A10000000000000000000011 /* Hive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* Hive.swift */; };
-		A10000000000000000000012 /* Tailnet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* Tailnet.swift */; };
-		A10000000000000000000013 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* Pairing.swift */; };
-		A10000000000000000000014 /* libtailscale.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* libtailscale.xcframework */; };
+		A10000000000000000000009 /* Dashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* Dashboard.swift */; };
+		A1000000000000000000000A /* Probe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* Probe.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,10 +31,8 @@
 		A20000000000000000000009 /* Bridging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridging.h; sourceTree = "<group>"; };
 		A2000000000000000000000A /* libtailscale.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = libtailscale.xcframework; path = ../../target/libtailscale.xcframework; sourceTree = SOURCE_ROOT; };
 		A2000000000000000000000B /* HivePhone.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HivePhone.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A20000000000000000000011 /* Hive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Hive.swift; sourceTree = "<group>"; };
-		A20000000000000000000012 /* Bridging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridging.h; sourceTree = "<group>"; };
-		A20000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		A20000000000000000000014 /* Hive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Hive.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* Dashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dashboard.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* Probe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Probe.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -48,14 +44,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		A30000000000000000000011 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A10000000000000000000014 /* libtailscale.xcframework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -63,7 +51,6 @@
 			isa = PBXGroup;
 			children = (
 				A40000000000000000000002 /* HivePhone */,
-				A40000000000000000000012 /* Hive */,
 				A40000000000000000000013 /* Shared */,
 				A2000000000000000000000A /* libtailscale.xcframework */,
 				A40000000000000000000003 /* Products */,
@@ -74,24 +61,16 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* HivePhone.swift */,
+				A2000000000000000000000C /* Dashboard.swift */,
 				A20000000000000000000002 /* Runner.swift */,
 				A20000000000000000000003 /* Tree.swift */,
 				A20000000000000000000004 /* Link.swift */,
+				A2000000000000000000000D /* Probe.swift */,
 				A20000000000000000000007 /* Catch.m */,
 				A20000000000000000000008 /* Catch.h */,
 				A20000000000000000000009 /* Bridging.h */,
 			);
 			path = HivePhone;
-			sourceTree = "<group>";
-		};
-		A40000000000000000000012 /* Hive */ = {
-			isa = PBXGroup;
-			children = (
-				A20000000000000000000011 /* Hive.swift */,
-				A20000000000000000000012 /* Bridging.h */,
-				A20000000000000000000013 /* Info.plist */,
-			);
-			path = Hive;
 			sourceTree = "<group>";
 		};
 		A40000000000000000000013 /* Shared */ = {
@@ -107,7 +86,6 @@
 			isa = PBXGroup;
 			children = (
 				A2000000000000000000000B /* HivePhone.xctest */,
-				A20000000000000000000014 /* Hive.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -131,22 +109,6 @@
 			productReference = A2000000000000000000000B /* HivePhone.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
-		A50000000000000000000011 /* Hive */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = A70000000000000000000003 /* Build configuration list for PBXNativeTarget "Hive" */;
-			buildPhases = (
-				A30000000000000000000012 /* Sources */,
-				A30000000000000000000011 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = Hive;
-			productName = Hive;
-			productReference = A20000000000000000000014 /* Hive.app */;
-			productType = "com.apple.product-type.application";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -157,9 +119,6 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					A50000000000000000000001 = {
-						CreatedOnToolsVersion = 16.0;
-					};
-					A50000000000000000000011 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 				};
@@ -178,7 +137,6 @@
 			projectRoot = "";
 			targets = (
 				A50000000000000000000001 /* HivePhone */,
-				A50000000000000000000011 /* Hive */,
 			);
 		};
 /* End PBXProject section */
@@ -189,22 +147,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* HivePhone.swift in Sources */,
+				A10000000000000000000009 /* Dashboard.swift in Sources */,
 				A10000000000000000000002 /* Runner.swift in Sources */,
 				A10000000000000000000003 /* Tree.swift in Sources */,
 				A10000000000000000000004 /* Link.swift in Sources */,
+				A1000000000000000000000A /* Probe.swift in Sources */,
 				A10000000000000000000005 /* Tailnet.swift in Sources */,
 				A10000000000000000000006 /* Pairing.swift in Sources */,
 				A10000000000000000000007 /* Catch.m in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		A30000000000000000000012 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A10000000000000000000011 /* Hive.swift in Sources */,
-				A10000000000000000000012 /* Tailnet.swift in Sources */,
-				A10000000000000000000013 /* Pairing.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -255,24 +205,10 @@
 					/System/Developer/Library/Frameworks,
 					/System/Developer/Library/PrivateFrameworks,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.hive.phone;
+				PRODUCT_BUNDLE_IDENTIFIER = app.hive;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = HivePhone/Bridging.h;
 				USES_XCTRUNNER = YES;
-			};
-			name = Debug;
-		};
-		A80000000000000000000003 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				INFOPLIST_FILE = Hive/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.hive;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = Hive/Bridging.h;
 			};
 			name = Debug;
 		};
@@ -291,14 +227,6 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A80000000000000000000002 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
-		A70000000000000000000003 /* Build configuration list for PBXNativeTarget "Hive" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				A80000000000000000000003 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

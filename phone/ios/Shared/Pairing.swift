@@ -1,10 +1,9 @@
 import Foundation
 import UIKit
 
-/// The pairing both iPhone apps hold: the server's phone WebSocket and the phone's key. Each app gets it from the Hive
-/// Server over Tailscale (TailnetPairing), or else from the dashboard's "Connect an iPhone", which copies "hive-phone:" +
-/// base64url(JSON {url, token}). Each app keeps its own copy in Documents/phone-relay.json (they can't share a folder
-/// unsigned), so each finds it, or the one copied pairing has to reach both.
+/// The pairing Hive holds, in Documents/phone-relay.json: the server's phone WebSocket and the phone's key. Hive gets it
+/// from the Hive Server over Tailscale (TailnetPairing), or else from the dashboard's "Connect an iPhone", which copies
+/// "hive-phone:" + base64url(JSON {url, token}).
 struct Pairing: Equatable {
     static let prefix = "hive-phone:"
     static var saved: URL { URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/phone-relay.json") }
@@ -86,16 +85,17 @@ final class TailnetPairing {
                 pairing = Pairing.checked(try? JSONSerialization.jsonObject(with: b))
             }
             session.invalidateAndCancel()
+            let result = pairing
             await MainActor.run {
                 self.busy = false
-                if let pairing { pairing.save(); found(pairing) }
+                if let result { result.save(); found(result) }
             }
         }
     }
 }
 
 /// Watches the clipboard for a pairing (the change count, which asks nothing) and reads each new copy once. A pairing it
-/// takes goes back on the clipboard for two minutes, this iPhone only, so the other app can take it too, and is gone after.
+/// takes is cleared from the clipboard.
 final class PairingWatch {
     private var seen = -1, looking = false
 
@@ -114,8 +114,7 @@ final class PairingWatch {
             let pairing = Pairing.from(text)
             if let pairing {
                 pairing.save()
-                UIPasteboard.general.setItems([["public.utf8-plain-text": text]],
-                    options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)])
+                UIPasteboard.general.items = []
             }
             DispatchQueue.main.async {
                 self.looking = false

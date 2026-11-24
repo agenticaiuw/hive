@@ -1,13 +1,12 @@
 import Foundation
 import Network
 
-/// Tailscale inside each iPhone app (tailscale/libtailscale, built by build.sh), for a Hive Server at home on the owner's
-/// tailnet: the app finds it there (TailnetPairing) and reaches it through its node's local SOCKS5 proxy, so the iPhone
-/// needs neither the Tailscale app nor a VPN. Each app is its own node (`hostname`), since apps can't share one; its keys
-/// stay in the app's container, so the owner signs each in once, in Safari.
+/// Tailscale inside Hive (tailscale/libtailscale, built by build.sh), for a Hive Server at home on the owner's tailnet:
+/// the app finds it there (TailnetPairing) and reaches it through its node's local SOCKS5 proxy, so the iPhone needs
+/// neither the Tailscale app nor a VPN. The node is hive-phone on the tailnet; its keys stay in the app's container, so
+/// the owner signs it in once.
 final class Tailnet {
     static let shared = Tailnet()
-    /// Its name on the tailnet, set before start: hive-phone (Hive Phone) or hive-app (Hive).
     var hostname = "hive-phone"
     static let changed = Notification.Name("hive.changed")
 
