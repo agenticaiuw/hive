@@ -141,7 +141,15 @@ fn ask(text: &str, app: &str) -> String {
 
 /// Asks the owner, in a floating window, to hand over the Mac's own pointer and keyboard to a task's agent: who, why, and for about
 /// how long. True once they press Hand over; false for Not now, or no answer in ten minutes (the window then closes).
-pub fn hand_over(who: &str, why: &str, minutes: u64) -> bool {
+/// One ask at a time: a second alert would sit on the first, and the first's timeout would close the wrong one.
+static ASKING: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn hand_over(who: &str, why: &str, minutes: u64) -> Result<(), String> {
+    {
+        let mut asking = ASKING.lock().unwrap();
+        if !asking.is_empty() { return Err(format!("The owner is already being asked for the Mac by {asking}; ask again once that's answered.")); }
+        *asking = who.to_string();
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let text = format!("{why}\n\nIt needs your pointer and keyboard for about {minutes} minute{}. A window shows what it does as it goes; \
         close it to take your Mac back.", if minutes == 1 { "" } else { "s" });
@@ -157,10 +165,14 @@ pub fn hand_over(who: &str, why: &str, minutes: u64) -> bool {
         NSApplication::sharedApplication(mtm).activate();
         tx.send(alert.runModal() == NSAlertFirstButtonReturn).ok();
     });
-    rx.recv_timeout(Duration::from_secs(600)).unwrap_or_else(|_| {
+    let handed = rx.recv_timeout(Duration::from_secs(600)).unwrap_or_else(|_| {
         DispatchQueue::main().exec_async(|| NSApplication::sharedApplication(MainThreadMarker::new().expect("main thread")).abortModal());
         false
-    })
+    });
+    ASKING.lock().unwrap().clear();
+    if handed { Ok(()) } else {
+        Err("The owner didn't hand the Mac over (they said not now, or didn't answer in ten minutes). Find another way, or end saying exactly what you need the Mac for.".into())
+    }
 }
 
 thread_local! { static FOLLOW: RefCell<Option<(Retained<NSPanel>, Retained<NSTextView>, String)>> = const { RefCell::new(None) }; }

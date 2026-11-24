@@ -37,6 +37,8 @@ extern "C" {
     fn CGEventCreate(source: Ref) -> Ref;
     fn CGEventGetLocation(event: Ref) -> Point;
     fn CGMainDisplayID() -> u32;
+    fn CGDisplayIsAsleep(display: u32) -> u32;
+    fn CGSessionCopyCurrentDictionary() -> Ref;
     fn CGDisplayBounds(display: u32) -> Rect;
     fn CGEventSourceCreate(state: i32) -> Ref;
     fn CGEventCreateMouseEvent(source: Ref, kind: u32, at: Point, button: u32) -> Ref;
@@ -87,9 +89,11 @@ static HANDED: Mutex<Option<Instant>> = Mutex::new(None);
 pub fn take_over(a: &Value) -> Result<Value, String> {
     let minutes = a["minutes"].as_u64().unwrap_or(10).clamp(1, 120);
     let (task, title) = (a["task"]["id"].as_i64().unwrap_or(0), a["task"]["title"].as_str().unwrap_or("A task").to_string());
-    if !crate::bar::hand_over(&format!("#{task} {title}"), a["why"].as_str().unwrap_or(""), minutes) {
-        return Err("The owner didn't hand the Mac over (they said not now, or didn't answer in ten minutes). Find another way, or end saying exactly what you need the Mac for.".into());
+    if away() {
+        return Err("The owner isn't at the Mac (its screen is asleep or locked), so nobody can hand it over now. Go on with what works \
+            without it, or end saying exactly what you need the Mac for.".into());
     }
+    crate::bar::hand_over(&format!("#{task} {title}"), a["why"].as_str().unwrap_or(""), minutes)?;
     let until = Instant::now() + std::time::Duration::from_secs(minutes * 60);
     *HANDED.lock().unwrap() = Some(until);
     crate::bar::follow(task, &title, until);
@@ -101,6 +105,15 @@ pub fn take_over(a: &Value) -> Result<Value, String> {
 }
 
 /// The owner took the Mac back (closed the window that follows the agent).
+/// Whether nobody could answer on the Mac now: its screen is asleep or locked.
+fn away() -> bool {
+    unsafe {
+        if CGDisplayIsAsleep(CGMainDisplayID()) != 0 { return true; }
+        let Some(session) = Retained::from_raw(CGSessionCopyCurrentDictionary() as *mut NSDictionary<NSString, AnyObject>) else { return true };
+        session.objectForKey(&NSString::from_str("CGSSessionScreenIsLocked")).and_then(|v| v.downcast::<NSNumber>().ok()).is_some_and(|v| v.boolValue())
+    }
+}
+
 pub fn give_back() { *HANDED.lock().unwrap() = None; }
 
 /// (x, y) in the last screenshot as a point on the screen.
