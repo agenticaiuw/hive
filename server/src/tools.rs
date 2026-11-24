@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 pub fn cloud(nodes: &[String]) -> Vec<Value> {
     let mut t = vec![
+        tool("claim_task", "Claim an unassigned open task to work on after your current task.",
+            json!({ "task": n("The task id.") }), &["task"]),
         tool("message_agent", "Send a message to the agent working on another task (to coordinate, hand over, or ask).",
             json!({ "task": n("The other task's id."), "text": s("The message.") }), &["task", "text"]),
         tool("info", "The owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, \

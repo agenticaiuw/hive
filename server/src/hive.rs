@@ -32,6 +32,7 @@ pub struct Hive {
     rechecked: Mutex<HashSet<i64>>,
     last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
+    assignments: Mutex<()>,
     changed: (Mutex<u64>, Condvar),
     /// Claude Code agents' processes while they work, by agent.
     claudes: Mutex<HashMap<i64, Arc<Claude>>>,
@@ -81,6 +82,7 @@ impl Hive {
     pub fn new(db: Db, state: PathBuf, repo: Option<PathBuf>, engine: Engine, version: String, local: String) -> Arc<Hive> {
         Arc::new(Hive {
             db, state, repo, engine, version, local,
+            assignments: Mutex::new(()),
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
             turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), rechecked: Mutex::new(HashSet::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
@@ -181,6 +183,13 @@ impl Hive {
             let me = self.clone();
             std::thread::spawn(move || me.start_agent(id));
         }
+        // Claimed tasks wait while their agent works on its current task.
+        for a in self.db.all("select id from agents where kind!='claude' and status in ('idle','done') and exists (select 1 from tasks where agent_id=agents.id and status='queued')", &[]) {
+            let agent = a["id"].as_i64().unwrap_or(0);
+            if let Some(t) = self.db.get("select id from tasks where agent_id=? and status='queued' order by id limit 1", args!(agent)) {
+                self.start_agent(t["id"].as_i64().unwrap_or(0));
+            }
+        }
         // A repeating task that's done runs again once its hours have passed since it ended.
         for t in self.db.all("select id, every from tasks where every>0 and status='done' and updated<=?-every*3600000", args!(now())) {
             let (id, every) = (t["id"].as_i64().unwrap_or(0), t["every"].as_i64().unwrap_or(0));
@@ -227,7 +236,7 @@ impl Hive {
         let ctx = s(&req["context"]);
         if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
         t += "\nOpen tasks:\n";
-        for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','working','needs') order by id", &[]) {
+        for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','queued','working','needs') order by id", &[]) {
             t += &format!("#{} [{}] {} (nodes {}, project {})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
         }
         t += "\nThe owner's rules:\n";
@@ -340,6 +349,9 @@ impl Hive {
         let ctx: Value = serde_json::from_str(&s(&req["context"])).unwrap_or(json!({}));
         let mut t = format!("{AGENT}\n\nYour task: #{} {}\nThe owner's words: \"{}\"\nThe whole request (from {}): {}\n",
             task["id"], s(&task["title"]), s(&task["quote"]), s(&req["node"]), s(&req["text"]));
+        for entry in self.db.all("select who, text from log where task_id=? and who='owner' order by id", args!(task["id"].clone())) {
+            t += &format!("\nOwner follow-up: {}\n", s(&entry["text"]));
+        }
         if !ctx.as_object().map(|o| o.is_empty()).unwrap_or(true) { t += &format!("Its context: {ctx}\n"); }
         t += "\nThe owner's rules (enforced; follow every one that applies):\n";
         let mut all_nodes = nodes.clone();
@@ -349,6 +361,7 @@ impl Hive {
             if scope.strip_prefix("node:").is_some_and(|k| !all_nodes.iter().any(|n| n == k)) { continue; }
             t += &if scope.is_empty() { format!("- R{} {}\n", r["id"], s(&r["text"])) } else { format!("- R{} [{scope}] {}\n", r["id"], s(&r["text"])) };
         }
+        t += "\nYou can claim more open tasks with claim_task; Hive runs them sequentially after this task.\n";
         t += "\nWhere you work:\n";
         match &self.repo {
             Some(repo) => {
@@ -366,13 +379,39 @@ impl Hive {
         t
     }
 
+    /// Claim without interrupting the agent's current task. Existing owners cannot be displaced.
+    pub fn claim_task(&self, agent: i64, task: i64) -> Result<(), String> {
+        let _assignment = self.assignments.lock().unwrap();
+        self.db.get("select id from agents where id=? and kind!='claude'", args!(agent)).ok_or("no such Hive agent")?;
+        self.db.run("update tasks set agent_id=?, status='queued', updated=? where id=? and agent_id is null and status='open'", args!(agent, now(), task));
+        self.db.get("select id from tasks where id=? and agent_id=?", args!(task, agent)).ok_or("task is already claimed or closed")?;
+        self.bump();
+        Ok(())
+    }
+
     pub fn start_agent(self: &Arc<Self>, task_id: i64) {
+        let _assignment = self.assignments.lock().unwrap();
         let Some(task) = self.db.get("select * from tasks where id=?", args!(task_id)) else { return };
+        if !matches!(s(&task["status"]).as_str(), "open" | "working" | "queued") { return; }
         let level = s(&task["level"]);
         let effort = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]).2;
         let on_claude = matches!(self.engine, Engine::Claude { .. });
-        let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
-            args!(task_id, if on_claude { CLAUDE_AGENT } else { "codex" }, short(&s(&task["title"]), 60), now(), now()));
+        let kind = if on_claude { CLAUDE_AGENT } else { "codex" };
+        let owner = task["agent_id"].as_i64().or_else(|| {
+            let project = s(&task["project"]);
+            if project.is_empty() { return None; }
+            self.db.get("select a.id from agents a join tasks t on t.agent_id=a.id where a.kind=? and t.project=? order by a.id desc limit 1", args!(kind, project)).and_then(|a| a["id"].as_i64())
+        });
+        let agent = if let Some(agent) = owner {
+            self.db.run("update tasks set agent_id=?, status='queued' where id=?", args!(agent, task_id));
+            if self.db.get("select id from agents where id=? and status='working'", args!(agent)).is_some() { self.bump(); return; }
+            if let Some(c) = self.claudes.lock().unwrap().remove(&agent) { c.close(); }
+            self.db.run("update agents set task_id=?, thread=null, tools='', status='working', updated=? where id=?", args!(task_id, now(), agent));
+            agent
+        } else {
+            self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
+                args!(task_id, kind, short(&s(&task["title"]), 60), now(), now()))
+        };
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
         self.log(agent, task_id, 0, "session input", &self.instructions(&task));
         let result = if on_claude { self.claude_turn(agent, "Start on your task now.") }
@@ -459,6 +498,11 @@ impl Hive {
             self.bump();
             return Ok(());
         }
+        if a["task_id"] != task["id"] {
+            self.db.run("update tasks set status='queued', updated=? where id=?", args!(now(), task_id));
+            self.bump();
+            return Ok(());
+        }
         let text = format!("Message from {from}: {text}");
         if s(&a["kind"]) == CLAUDE_AGENT {
             // Mid-turn it's a steer, read once the current tool calls finish; else it starts a turn.
@@ -479,7 +523,7 @@ impl Hive {
 
     pub fn drop_task(self: &Arc<Self>, task_id: i64) {
         self.db.run("update tasks set status='dropped', updated=? where id=?", args!(now(), task_id));
-        if let Some(a) = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=?", args!(task_id)) {
+        if let Some(a) = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=? and a.task_id=t.id", args!(task_id)) {
             let thread = s(&a["thread"]);
             if let Some(c) = a["id"].as_i64().and_then(|id| self.claudes.lock().unwrap().get(&id).cloned()) {
                 // Its turn's result then ends it (after_turn); between turns there's nothing to wait for.
@@ -781,6 +825,10 @@ impl Hive {
 
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
         match name {
+            "claim_task" => {
+                self.claim_task(agent, a["task"].as_i64().ok_or("give the task id")?)?;
+                return Ok(json!("Claimed. It runs after your current task."));
+            }
             "message_agent" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;
                 self.message_task(to, 0, &s(&a["text"]), &format!("task #{task}'s agent"))?;
@@ -890,7 +938,7 @@ Claude Code session) comes to you first, and you route it. You don't write rules
 request does, since it has the context.
 - messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent: \
 task = its id, text = the owner's words.
-- tasks: otherwise one new task, for a new agent: title = short imperative; quote = the owner's exact words; nodes = where the \
+- tasks: otherwise one new task (an existing agent for the same project can queue it): title = short imperative; quote = the owner's exact words; nodes = where the \
 work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level = \
 easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. None for a request from a \
 Claude Code session (claude:…): that session writes its own. A question is a task too (vm, easy) unless the answer is right \
@@ -932,6 +980,33 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claims_queue_without_displacing_current_work() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let agent = hive.db.run("insert into agents(task_id, kind, status) values(10, 'codex', 'working')", &[]);
+        let other = hive.db.run("insert into agents(kind) values('codex')", &[]);
+        let task = hive.add_task(0, &json!({"title":"Next", "quote":"next"}));
+        hive.claim_task(agent, task).unwrap();
+        assert!(hive.claim_task(other, task).is_err());
+        let a = hive.db.get("select * from agents where id=?", args!(agent)).unwrap();
+        assert_eq!(a["task_id"], 10);
+        assert_eq!(a["status"], "working");
+        hive.message_task(task, 0, "More detail", "owner").unwrap();
+        assert_eq!(hive.db.get("select status from tasks where id=?", args!(task)).unwrap()["status"], "queued");
+        hive.drop_task(task);
+        assert_eq!(hive.db.get("select status from agents where id=?", args!(agent)).unwrap()["status"], "working");
+        let next = hive.add_task(0, &json!({"title":"Next task", "quote":"do next"}));
+        hive.claim_task(agent, next).unwrap();
+        assert!(hive.finish(agent, 10, &json!({"done":true,"outcome":"finished"})));
+        // An unavailable engine stops the next task, but keeps the same agent and task history.
+        hive.start_agent(next);
+        let a = hive.db.get("select * from agents where id=?", args!(agent)).unwrap();
+        assert_eq!(a["task_id"], next);
+        assert_eq!(hive.db.get("select count(*) as n from agents", &[]).unwrap()["n"], 2);
+        assert_eq!(hive.db.get("select agent_id from tasks where id=?", args!(task)).unwrap()["agent_id"], agent);
+    }
+
     #[test]
     fn a_session_outside_hive_works_on_its_own_tasks() {
         let state = std::env::temp_dir().join(format!("hive-sessions-test-{}", std::process::id()));

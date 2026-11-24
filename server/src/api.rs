@@ -154,7 +154,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
             "tasks": hive.db.all("select * from tasks order by id desc", &[]),
-            "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') and t.status in ('working','needs') order by a.id desc", &[]),
+            "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued') order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),
             "requests": hive.db.all("select * from requests order by id desc limit 30", &[]),
             "locks": hive.locks(),
