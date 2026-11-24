@@ -103,7 +103,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
             let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
             let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
-            res.upgrade = Some(Box::new(hive_phone::device));
+            let version = req.headers.get("x-hive-version").cloned().unwrap_or_default();
+            res.upgrade = Some(Box::new(move |conn| hive_phone::device(conn, version)));
             return res;
         }
         // A Claude Code agent's tools (claude.rs), over MCP: the secret in the path is the agent's own, so it signs it in.

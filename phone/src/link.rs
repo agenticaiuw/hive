@@ -38,14 +38,26 @@ pub fn call(method: &str, path: &str, body: &str, secs: u64) -> Result<(u16, Str
     r.map_err(|e| if e == RecvTimeoutError::Timeout { "phone request timed out" } else { "phone disconnected" }.to_string())
 }
 
-/// Serves the phone's WebSocket until it closes or a newer one replaces it.
-pub fn device(mut conn: TcpStream) {
+/// Serves the phone's WebSocket until it closes or a newer one replaces it. While the phone's Hive (`version`, its
+/// X-Hive-Version) is older than the newest signed build, it's told where to install that ({update: link}), once per build.
+pub fn device(mut conn: TcpStream, version: String) {
     let me = NEXT.fetch_add(1, Ordering::Relaxed);
     let (out, rx) = channel::<String>();
+    let tell = out.clone();
     *LINK.lock().unwrap() = Some(Link { id: me, out, pending: HashMap::new() });
+    let ours = move || LINK.lock().unwrap().as_ref().is_some_and(|l| l.id == me);
+    std::thread::spawn(move || {
+        let mut told = String::new();
+        while ours() {
+            if let Some(link) = crate::update(&version).filter(|l| *l != told) {
+                tell.send(json!({ "update": link }).to_string()).ok();
+                told = link;
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
     conn.set_read_timeout(Some(Duration::from_millis(25))).ok();
     let (mut buf, mut msg, mut heard, mut chunk) = (Vec::new(), Vec::new(), Instant::now(), vec![0u8; 64 << 10]);
-    let ours = || LINK.lock().unwrap().as_ref().is_some_and(|l| l.id == me);
     let _ = (|| -> Result<(), String> {
         while ours() {
             while let Ok(text) = rx.try_recv() { frame(&mut conn, 1, text.as_bytes()).map_err(|e| e.to_string())?; }
@@ -118,7 +130,7 @@ mod tests {
     fn passes_calls_to_the_phone_and_back() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || { device(l.accept().unwrap().0) });
+        std::thread::spawn(move || { device(l.accept().unwrap().0, "dev".into()) });
         let mut phone = TcpStream::connect(addr).unwrap();
         while !connected() { std::thread::sleep(Duration::from_millis(10)); }
         let caller = std::thread::spawn(|| call("GET", "/status", "", 5));

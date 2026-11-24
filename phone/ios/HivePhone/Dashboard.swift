@@ -58,6 +58,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     private let status = UILabel()
     private let signIn = UIButton(type: .system)
     private let reload = UIButton(type: .system)
+    private let install = UIButton(type: .system)
     private let web = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
     private var shown: URL?
     private var page = "nothing yet"
@@ -74,11 +75,13 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         signIn.addAction(UIAction { _ in if let u = Tailnet.shared.loginURL { UIApplication.shared.open(u) } }, for: .touchUpInside)
         reload.setTitle("Reload", for: .normal)
         reload.addAction(UIAction { [weak self] _ in Dashboard.taps += 1; self?.shown = nil; self?.refresh() }, for: .touchUpInside)
-        for b in [signIn, reload] {
+        install.setTitle("Update Hive", for: .normal)
+        install.addAction(UIAction { _ in if let u = Link.shared.update { UIApplication.shared.open(u) } }, for: .touchUpInside)
+        for b in [install, signIn, reload] {
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
-        let buttons = UIStackView(arrangedSubviews: [signIn, reload, UIView()])
+        let buttons = UIStackView(arrangedSubviews: [install, signIn, reload, UIView()])
         buttons.spacing = 20
         let bar = UIStackView(arrangedSubviews: [status, buttons])
         bar.axis = .vertical
@@ -102,6 +105,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     private func refresh() {
         status.text = Link.shared.summary
         signIn.isHidden = Tailnet.shared.loginURL == nil || Tailnet.shared.running
+        install.isHidden = Link.shared.update == nil
         guard let p = Link.shared.pairing, Tailnet.shared.running, shown != p.dashboard else { return }
         // WebKit's network process takes its proxy from the data store, so it's set before each new page.
         web.configuration.websiteDataStore.proxyConfigurations = Tailnet.shared.proxy.map { [$0] } ?? []

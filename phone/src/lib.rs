@@ -10,6 +10,8 @@ pub mod bootstrap;
 use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Where phone.yml publishes each signed Hive for iPhone: Hive.ipa, the manifest.plist iOS installs it from, and phone.json,
 /// read here. GitHub Pages, since a release download redirects to a short-lived signed address, which iOS's installer isn't
@@ -46,6 +48,26 @@ pub fn start(state: PathBuf, conf: hive_protocol::Conf) {
 pub fn listing(udid: &str) -> String {
     let u = udid.trim().replace('-', "").to_ascii_uppercase();
     ring::digest::digest(&ring::digest::SHA256, u.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The newest signed Hive for iPhone: phone.json, {version, install, devices (each a `listing`)}, asked for at most every
+/// ten minutes; Null while there's none.
+fn release() -> Value {
+    static LAST: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((_, v)) = last.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(600)) { return v.clone(); }
+    let v = ureq::get(&format!("{SITE}/phone.json")).timeout(Duration::from_secs(20)).call().ok()
+        .and_then(|r| r.into_string().ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    *last = Some((Instant::now(), v.clone()));
+    v
+}
+
+/// The install link for the newest build, if the phone's Hive (its X-Hive-Version) is older; never for a build of its own.
+pub fn update(version: &str) -> Option<String> {
+    if version.len() < 7 { return None; }
+    let r = release();
+    let (want, link) = (r["version"].as_str()?, r["install"].as_str()?);
+    (want.len() >= 7 && !want.starts_with(version) && !version.starts_with(want)).then(|| link.to_string())
 }
 
 /// For the dashboard: whether Hive Phone is connected and a passcode is saved.
