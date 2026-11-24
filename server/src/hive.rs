@@ -55,7 +55,8 @@ pub const CLAUDE_LEVELS: [(&str, &str, &str); 4] = [
     ("hard", "claude-opus-5-5", "high"), ("hardest", "claude-opus-5-5", "xhigh"),
 ];
 const CLAUDE_PLANNER: (&str, &str) = ("claude-sonnet-5-5", "low");
-/// Hive's own Claude Code agents; 'claude' is the owner's own Claude Code sessions (`hive task`, the inbox).
+/// Hive's own Claude Code agents; 'claude' is the owner's own sessions outside Hive (Claude Code, Codex, any agent with `hive mcp`),
+/// named after their request's `agent`.
 const CLAUDE_AGENT: &str = "claude-agent";
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
@@ -275,8 +276,9 @@ impl Hive {
     }
 
     pub fn apply_plan(self: &Arc<Self>, id: i64, req: &Value, plan: &Value) -> String {
-        // A Claude Code session writes its own tasks (`hive task`): it has the context the orchestrator lacks.
-        if !s(&req["agent"]).starts_with("claude:") {
+        // A session outside Hive (a request with an `agent`) writes its own tasks with `hive mcp`: it has the context the
+        // orchestrator lacks.
+        if s(&req["agent"]).is_empty() {
             for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
         }
         for m in plan["messages"].as_array().into_iter().flatten() {
@@ -289,8 +291,8 @@ impl Hive {
         s(&plan["reply"])
     }
 
-    /// A task for a request, written by the orchestrator or by the agent that took the request. A Claude Code session's
-    /// tasks are its own: it works on them itself; any other task gets a new agent.
+    /// A task for a request, written by the orchestrator or by the agent that took the request. A session outside Hive
+    /// works on its own tasks itself; any other task gets a new agent.
     pub fn add_task(self: &Arc<Self>, request: i64, t: &Value) -> i64 {
         let level = s(&t["level"]);
         let level = if LEVELS.iter().any(|l| l.0 == level) { level } else { "normal".into() };
@@ -299,8 +301,8 @@ impl Hive {
         let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, every, at, updated) values(?,?,?,?,?,?,?,?,?)",
             args!(request, s(&t["project"]), s(&t["title"]), s(&t["quote"]), nodes, level, every, now(), now()));
         let requester = self.db.get("select agent from requests where id=?", args!(request)).map(|r| s(&r["agent"])).unwrap_or_default();
-        if let Some(session) = requester.strip_prefix("claude:") {
-            let agent = self.agent_for_session(session, tid);
+        if !requester.is_empty() {
+            let agent = self.agent_for_session(&requester, tid);
             self.db.run("update tasks set agent_id=?, status='working' where id=?", args!(agent, tid));
         }
         self.log(0, tid, request, "hive", &format!("New task #{tid}: {}", s(&t["title"])));
@@ -320,8 +322,7 @@ impl Hive {
         Ok(rid)
     }
 
-    fn agent_for_session(&self, session: &str, task: i64) -> i64 {
-        let name = format!("claude:{session}");
+    fn agent_for_session(&self, name: &str, task: i64) -> i64 {
         if let Some(a) = self.db.get("select id from agents where kind='claude' and name=?", args!(name)) {
             let id = a["id"].as_i64().unwrap_or(0);
             self.db.run("update agents set task_id=?, status='working', updated=? where id=?", args!(task, now(), id));
@@ -925,3 +926,23 @@ const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen 
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
 view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and type_password types one, here or in a device. Hive's files \
 (shared with the dashboard and nodes) are in /var/lib/hive/files.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_session_outside_hive_works_on_its_own_tasks() {
+        let state = std::env::temp_dir().join(format!("hive-sessions-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let request = |agent: &str| hive.db.run("insert into requests(at, node, agent, text, status) values(?, 'mac', ?, 'fix it', 'done')", args!(now(), agent));
+        let (claude, codex) = (request("claude:s1"), request("codex:s2"));
+        for (rid, name) in [(claude, "claude:s1"), (codex, "codex:s2")] {
+            let tid = hive.add_task(rid, &json!({ "title": "Fix it", "quote": "fix it" }));
+            let t = hive.db.get("select t.status, a.kind, a.name from tasks t join agents a on a.id=t.agent_id where t.id=?", args!(tid)).unwrap();
+            assert_eq!((s(&t["status"]), s(&t["kind"]), s(&t["name"])), ("working".into(), "claude".into(), name.into()));
+            hive.end_task(tid, &json!({ "done": true, "outcome": "fixed" })).unwrap();
+        }
+        std::fs::remove_dir_all(&state).ok();
+    }
+}
