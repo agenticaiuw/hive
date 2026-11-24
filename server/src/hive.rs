@@ -615,9 +615,11 @@ impl Hive {
 
     pub fn call_node(&self, node: &Value, tool: &str, args: &Value, agent: i64, secs: u64) -> Result<Value, String> {
         let (id, kind) = (s(&node["id"]), s(&node["kind"]));
-        if node["seen"].as_i64().unwrap_or(0) < now() - 90_000 {
-            return Err(format!("The owner's {kind} ({}) isn't connected to Hive right now, so {tool} can't run. Do the task another way, \
-                or end saying it needs to be online.", s(&node["name"])));
+        // A device that's away for a moment (restarting into an update, its network changing) gets three minutes to come back.
+        let here = || self.db.get("select seen from nodes where id=?", args!(id)).and_then(|n| n["seen"].as_i64()).filter(|t| *t >= now() - 90_000);
+        if here().is_none() && self.wait_until(180_000, here).is_none() {
+            return Err(format!("The owner's {kind} ({}) hasn't been connected to Hive for over three minutes, so {tool} can't run. Do the task \
+                another way, or end saying it needs to be online.", s(&node["name"])));
         }
         let call = self.db.run("insert into calls(node, tool, args, agent_id, at) values(?,?,?,?,?)", args!(id, tool, args.clone(), agent, now()));
         self.bump();
@@ -629,7 +631,8 @@ impl Hive {
             Some(r) => Ok(serde_json::from_str(&r).unwrap_or(json!({ "text": r }))),
             None => {
                 self.db.run("update calls set status='timeout' where id=?", args!(call));
-                Err(format!("The {kind} didn't answer {tool} within {secs}s."))
+                Err(if here().is_none() { format!("The {kind} went offline during {tool} (it may be restarting into an update), so it may not have run: check, then try again.") }
+                    else { format!("The {kind} didn't answer {tool} within {secs}s.") })
             }
         }
     }
