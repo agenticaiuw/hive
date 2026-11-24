@@ -50,6 +50,7 @@ jobs:
         run: |
           cargo test --locked --features usb-setup --manifest-path phone/ios/bootstrap/Cargo.toml
           cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s phone/ios -p sign_test.py
       - run: phone/ios/Bootstrap/build.sh
       - run: phone/ios/Loopback/build.sh
       - run: phone/ios/build.sh
@@ -115,7 +116,9 @@ jobs:
           for f in ["target/HivePhone/disk-image.txt"] + sorted(glob.glob(f"{d}/host.txt") + glob.glob(f"{d}/std*.txt")):
               if not os.path.exists(f):
                   continue
-              tail = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()][-12:]
+              lines = [l.strip() for l in open(f, errors="replace").read().splitlines() if l.strip()]
+              failures = [l for l in lines if "Terminating app" in l or "reason:" in l]
+              tail = failures[-3:] + lines[-12:]
               notes += [f"{os.path.basename(f)}: {l}" for l in tail]
           say("notice", "probe host", notes or ["nothing from the host"])
           EOF

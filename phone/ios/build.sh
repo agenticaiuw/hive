@@ -29,6 +29,9 @@ id=app.hive.xctrunner
 dress() {
   for p in $1/Info.plist $1/PlugIns/*.xctest/Info.plist; do plutil -replace CFBundleIdentifier -string $id $p; done
   plutil -replace CFBundleDisplayName -string Hive $1/Info.plist
+  # A runner template has no launch screen and otherwise gets a 320x480
+  # compatibility viewport, which makes its window and screen coordinates differ.
+  plutil -replace UILaunchScreen -json '{}' $1/Info.plist
   plutil -replace HiveVersion -string "$(git log -1 --format=%h --abbrev=12 -- phone/ios 2> /dev/null || echo dev)" $1/Info.plist
   sips -z 120 120 dashboard/icon.png --out $1/AppIcon60x60@2x.png > /dev/null; cp dashboard/icon.png $1/AppIcon60x60@3x.png
   plutil -replace CFBundleIcons -json '{"CFBundlePrimaryIcon":{"CFBundleIconFiles":["AppIcon60x60"]}}' $1/Info.plist
@@ -47,7 +50,11 @@ if [ "$1" = test ]; then
   rm -rf $out/smoke.xcresult $out/probe; mkdir -p $out/probe
   docs() { echo "$(xcrun simctl get_app_container "$sim" $id data 2> /dev/null)/Documents"; }
   # 1. Every call the server makes, with the runner started by xcodebuild.
-  TEST_RUNNER_HIVE_SMOKE=1 xcodebuild test $project -destination "id=$sim" -derivedDataPath $out/sim -resultBundlePath $out/smoke.xcresult \
+  xcodebuild build-for-testing $project -destination "id=$sim" -derivedDataPath $out/sim ARCHS=arm64
+  smoke=$out/sim/Build/Products/Debug-iphonesimulator/HivePhone-Runner.app
+  plutil -replace UILaunchScreen -json '{}' $smoke/Info.plist
+  codesign -f -s - --timestamp=none $smoke
+  TEST_RUNNER_HIVE_SMOKE=1 xcodebuild test-without-building $project -destination "id=$sim" -derivedDataPath $out/sim -resultBundlePath $out/smoke.xcresult \
     -only-testing:HivePhone/HivePhone/testSmoke ARCHS=arm64 || failed=1
   cp "$(docs)"/probe-smoke* $out/probe/ 2> /dev/null || true
   # 2. As a person uses it: the packaged app launched from its icon (what simctl launch does), its window probed while

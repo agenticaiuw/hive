@@ -85,6 +85,9 @@
     @try {
         [configuration setValue:bundle forKey:@"testBundleURL"];
         [configuration setValue:NSUUID.UUID forKey:@"sessionIdentifier"];
+        [configuration setValue:@YES forKey:@"initializeForUITesting"];
+        [configuration setValue:@YES forKey:@"testsMustRunOnMainThread"];
+        [configuration setValue:@NO forKey:@"reportResultsToIDE"];
         run(configuration);
     } @catch (NSException *exception) {
         self.status.text = @"Hive couldn’t start phone control.";
