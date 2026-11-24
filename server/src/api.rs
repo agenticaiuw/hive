@@ -245,7 +245,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
-        ("GET", ["api", "vm", "control"]) => crate::vm::control(&req),
+        ("GET", ["api", "vm", "control"]) => crate::vm::control(&req, owners(hive, &req)),
         ("GET", ["api", "vm", "credentials"]) => match std::fs::read_to_string("/home/ubuntu/.vnc/vm-screen.passwd") {
             Ok(password) => Res::json(&json!({ "password": password.trim() })),
             Err(_) => Res::err(503, "The VM's VNC service isn't configured."),

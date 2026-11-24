@@ -44,12 +44,15 @@ pub fn reinstall(repo: &Path) -> Result<Value, String> {
 
 /// Bridge the dashboard's authenticated WebSocket to the loopback-only VNC service.
 /// Both directions are bounded by socket timeouts; closing the tab releases the VNC session.
-pub fn control(req: &crate::http::Req) -> crate::http::Res {
+pub fn control(req: &crate::http::Req, owner: bool) -> crate::http::Res {
     use crate::http::Res;
     // Cookies authenticate the upgrade, so reject cross-origin WebSocket requests.
     let origin = req.headers.get("origin").map(String::as_str).unwrap_or("");
     let host = req.headers.get("host").map(String::as_str).unwrap_or("");
-    if host.is_empty() || ![format!("http://{host}"), format!("https://{host}")].contains(&origin.to_string()) {
+    let same_origin = !host.is_empty() && [format!("http://{host}"), format!("https://{host}")].contains(&origin.to_string());
+    // The Mac's authenticated tailnet door changes Host to the server address.
+    let local_door = owner && origin == "http://127.0.0.1:8791";
+    if !same_origin && !local_door {
         return Res::err(403, "Open screen control from your Hive dashboard.");
     }
     let key = match req.headers.get("sec-websocket-key") {
