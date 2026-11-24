@@ -19,6 +19,11 @@ final class HivePhone: XCTestCase {
     func testRun() throws {
         try XCTSkipIf(HivePhone.smoke, "the smoke test runs instead")
         Dashboard.show()
+        // UI-test initialization can background its runner. Opening Hive ends
+        // with its dashboard in front, before the server starts sending calls.
+        if UIApplication.shared.applicationState != .active {
+            XCUIApplication(bundleIdentifier: Bundle.main.bundleIdentifier ?? "").activate()
+        }
         let probe = ProcessInfo.processInfo.environment["HIVE_PROBE"] != nil
         // The window's button signs Tailscale in; when Hive isn't in front to show it, the sign-in opens in Safari, once
         // for each new link.

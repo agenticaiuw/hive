@@ -6,6 +6,7 @@ import XCTest
 /// screenshot beside it. phone.yml turns the lines into annotations, readable without signing in.
 enum Probe {
     private static var count = 0
+    private static var failures: [[String: Any]] = []
 
     static func state() -> [String: Any] {
         let app = UIApplication.shared
@@ -26,7 +27,7 @@ enum Probe {
         }
         let delegate: String = app.delegate.map { String(describing: type(of: $0)) } ?? "none"
         return ["app": appState, "delegate": delegate, "scenes": scenes, "window": window, "taps": Dashboard.taps,
-                "sceneManifest": Bundle.main.object(forInfoDictionaryKey: "UIApplicationSceneManifest") != nil]
+                "sceneManifest": Bundle.main.object(forInfoDictionaryKey: "UIApplicationSceneManifest") != nil, "calls": failures]
     }
 
     /// Notes a step: its state as one line, and a screenshot. Returns the line.
@@ -49,8 +50,10 @@ enum Probe {
     @discardableResult
     static func call(_ m: String, _ p: String, _ b: [String: Any]? = nil) -> Int {
         var status = 0
+        var response = ""
         let body = b.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) } ?? ""
-        Runner.shared.handle(m, p, body) { s, _ in status = s }
+        Runner.shared.handle(m, p, body) { s, b in status = s; response = b }
+        if status != 200 { failures.append(["method": m, "path": p, "status": status, "error": String(response.prefix(512))]) }
         return status
     }
 
@@ -92,10 +95,18 @@ enum Probe {
             (39, { log("after a tap on Reload", run) }),
             (40, { log("done", run) }),
         ]
-        let start = Date()
-        for (at, step) in steps {
-            Timer.scheduledTimer(withTimeInterval: max(0, at - Date().timeIntervalSince(start)), repeats: false) { _ in step() }
+        // XCUITest waits by running the main loop. Scheduling every timer at
+        // once re-enters an unfinished gesture from the next timer, unlike the
+        // server's serialized phone calls. Schedule only after a step returns.
+        func next(_ index: Int) {
+            guard index < steps.count else { return }
+            let delay = steps[index].0 - (index == 0 ? 0 : steps[index - 1].0)
+            Timer.scheduledTimer(withTimeInterval: max(delay, 0.01), repeats: false) { _ in
+                steps[index].1()
+                next(index + 1)
+            }
         }
+        next(0)
     }
 }
 
