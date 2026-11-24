@@ -258,7 +258,8 @@ fn screen_size() -> (f64, f64) {
 
 /// The front window of the app called `app` (or whose name has it in it): one on this desktop if it has one, else one on
 /// another desktop.
-fn window(app: &str) -> Result<(Target, String), String> {
+/// An app's windows, best first. Some can't be captured (one full screen on another desktop, a tab bar), so the caller tries each.
+fn windows(app: &str) -> Result<Vec<(Target, String)>, String> {
     let list = unsafe { Retained::from_raw(CGWindowListCopyWindowInfo(16, 0) as *mut NSArray<NSDictionary<NSString, AnyObject>>) }
         .ok_or("macOS didn't list the windows")?;
     let get = |d: &NSDictionary<NSString, AnyObject>, k: &str| d.objectForKey(&NSString::from_str(k));
@@ -282,28 +283,35 @@ fn window(app: &str) -> Result<(Target, String), String> {
     }).collect();
     // An app's real windows have titles; its untitled ones are overlays (popovers, previews) that would hide the page behind them.
     windows.sort_by_key(|w| (w.1.is_empty(), w.3));
-    let found = windows.iter().find(|w| w.0.to_lowercase() == want).or_else(|| windows.iter().find(|w| w.0.to_lowercase().contains(&want)));
-    let (owner, title, t, _) = found.ok_or_else(|| format!("{app} has no window (it isn't open, or its windows are minimized)"))?;
-    Ok((*t, if title.is_empty() { owner.clone() } else { format!("{owner}'s window \"{title}\"") }))
+    let exact = windows.iter().any(|w| w.0.to_lowercase() == want);
+    let found: Vec<_> = windows.iter().filter(|w| if exact { w.0.to_lowercase() == want } else { w.0.to_lowercase().contains(&want) })
+        .map(|(owner, title, t, _)| (*t, if title.is_empty() { owner.clone() } else { format!("{owner}'s window \"{title}\"") })).collect();
+    if found.is_empty() { return Err(format!("{app} has no window (it isn't open, or its windows are minimized)")); }
+    Ok(found)
 }
 
 /// The whole screen, or one app's front window (even under other windows); the other tools then act in what it showed.
 pub fn screenshot(app: &str) -> Result<Value, String> {
     let file = std::env::temp_dir().join(format!("hive-shot-{}.jpg", std::process::id()));
     let p = file.to_string_lossy().into_owned();
-    let (t, what) = if app.trim().is_empty() { (Target::Mac, String::new()) } else { window(app)? };
-    let (args, width) = match t {
-        Target::App { window, size, .. } => (vec!["-x".to_string(), "-o".into(), "-l".into(), window.to_string()], size.x),
-        Target::Mac => (vec!["-x".to_string(), "-m".into()], screen_size().0),
-    };
-    let out = Command::new("screencapture").args(&args).args(["-t", "jpg", &p]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() || !file.exists() {
-        // Say what really went wrong: a missing permission is only one cause, and asking the owner for it otherwise sends them on a chase.
-        if !unsafe { CGPreflightScreenCaptureAccess() } { return Err("Hive doesn't have the Screen Recording permission on this Mac".into()); }
+    let tries = if app.trim().is_empty() { vec![(Target::Mac, String::new())] } else { windows(app)? };
+    let mut failed = Vec::new();
+    let (t, what, width) = tries.into_iter().find_map(|(t, what)| {
+        let (args, width) = match t {
+            Target::App { window, size, .. } => (vec!["-x".to_string(), "-o".into(), "-l".into(), window.to_string()], size.x),
+            Target::Mac => (vec!["-x".to_string(), "-m".into()], screen_size().0),
+        };
+        std::fs::remove_file(&file).ok();
+        let out = Command::new("screencapture").args(&args).args(["-t", "jpg", &p]).output().ok()?;
+        if out.status.success() && file.exists() { return Some((t, what, width)) }
         let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let of = if what.is_empty() { "the screen".to_string() } else { what.clone() };
-        return Err(format!("screencapture couldn't capture {of} ({}); Hive has the Screen Recording permission", if why.is_empty() { "it gave no reason" } else { &why }));
-    }
+        failed.push(format!("{} ({})", if what.is_empty() { "the screen" } else { &what }, if why.is_empty() { "it gave no reason" } else { &why }));
+        None
+    }).ok_or_else(|| {
+        // Say what really went wrong: a missing permission is only one cause, and asking the owner for it otherwise sends them on a chase.
+        if !unsafe { CGPreflightScreenCaptureAccess() } { return "Hive doesn't have the Screen Recording permission on this Mac".to_string() }
+        format!("screencapture couldn't capture {}; Hive has the Screen Recording permission", failed.join(", "))
+    })?;
     // Retina captures are 2x; shrink to points so the image's pixels are the coordinates the other tools take.
     Command::new("sips").args(["--resampleWidth", &(width as i64).to_string(), &p]).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
     let data = std::fs::read(&file).map_err(|e| e.to_string())?;
