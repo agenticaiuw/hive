@@ -53,6 +53,15 @@ fn pair(hive: &Hive, secret: &str, node: &str, peer: &str) -> Result<String, &'s
     Ok(t)
 }
 
+/// Hive Phone's link to this Hive Server: its WebSocket address and the phone's key (made once).
+fn phone_pairing(hive: &Arc<Hive>) -> Result<(String, String), Res> {
+    let address = crate::tls::address(&hive.state).ok_or_else(|| Res::err(409, "Hive Server has no address yet; try again in a minute."))?;
+    let file = hive.state.join("phone-token");
+    let key = std::fs::read_to_string(&file).ok().filter(|k| k.len() >= 40).unwrap_or_else(|| { let k = random(32); crate::private(&file, &k); k });
+    hive.start_phone();
+    Ok((format!("{}/phone/device", address.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1)), key))
+}
+
 pub fn new_code(db: &crate::db::Db) -> String {
     let n = u32::from_str_radix(&random(4)[..7], 16).unwrap_or(0) % 100_000_000;
     let code = format!("{n:08}");
@@ -108,6 +117,17 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         },
         // Hive opens no event streams, which MCP asks a server to say this way.
         ("GET" | "DELETE", ["mcp", _]) => return Res::new(405, "application/json", "").header("Allow", "POST"),
+        // The owner's own devices join through Tailscale with no pairing link: the tailnet helper (tailnet/) says a request comes
+        // from a device signed in to the same Tailscale account as this Hive Server, and only it can (it's on this computer).
+        ("POST", ["api", "pair", "tailnet"] | ["api", "phone", "tailnet"]) => {
+            let owners = req.peer.starts_with("127.0.0.1") && req.headers.get("x-hive-tailnet-owner").is_some_and(|v| v == "1");
+            if !owners { return Res::err(403, "Only your own devices, signed in to the same Tailscale account as your Hive Server, join without a pairing link."); }
+            let b = req.json();
+            if parts[1] == "phone" { return phone_pairing(hive).map(|(url, token)| Res::json(&json!({ "url": url, "token": token }))).unwrap_or_else(|e| e) }
+            let t = random(24);
+            hive.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(hash(&t), format!("{}:{}", s(&b["kind"]), s(&b["name"])), now()));
+            return Res::json(&json!({ "token": t }));
+        }
         ("POST", ["api", "pair"]) => {
             let b = req.json();
             return match pair(hive, &s(&b["code"]), &format!("{}:{}", s(&b["kind"]), s(&b["name"])), &req.peer) {
@@ -180,15 +200,14 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "phone"]) => Res::json(&hive_phone::status(&hive.state)),
         // "Connect an iPhone": what Hive Phone takes from the clipboard ("hive-phone:" + base64url of {url, token}).
-        ("POST", ["api", "phone", "pair"]) => {
-            let Some(address) = crate::tls::address(&hive.state) else { return Res::err(409, "Hive has no secure address yet; try again in a minute.") };
-            let file = hive.state.join("phone-token");
-            let key = std::fs::read_to_string(&file).ok().filter(|k| k.len() >= 40).unwrap_or_else(|| { let k = random(32); crate::private(&file, &k); k });
-            hive.start_phone();
-            let json = json!({ "url": format!("{}/phone/device", address.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1)), "token": key }).to_string();
-            let b64 = hive_protocol::b64::encode(json.as_bytes()).replace('+', "-").replace('/', "_").replace('=', "");
-            Res::json(&json!({ "pairing": format!("hive-phone:{b64}") }))
-        }
+        ("POST", ["api", "phone", "pair"]) => match phone_pairing(hive) {
+            Ok((url, token)) => {
+                let json = json!({ "url": url, "token": token }).to_string();
+                let b64 = hive_protocol::b64::encode(json.as_bytes()).replace('+', "-").replace('/', "_").replace('=', "");
+                Res::json(&json!({ "pairing": format!("hive-phone:{b64}") }))
+            }
+            Err(e) => e,
+        },
         ("POST", ["api", "phone", "passcode"]) => match hive_phone::save_passcode(&hive.state, &s(&b["passcode"])) {
             Ok(()) => Res::json(&hive_phone::status(&hive.state)),
             Err(e) => Res::err(409, &e),

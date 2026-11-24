@@ -5,11 +5,15 @@
 //	    the Hive server: joins the owner's tailnet as `name` and serves http://<name>.<tailnet>.ts.net (its 100.x address
 //	    when the tailnet has MagicDNS off) through to `to`. Plain HTTP inside the tailnet: WireGuard already encrypts it end to
 //	    end and only the owner's devices reach it, so the owner never has to turn on HTTPS certificates in Tailscale's console.
-//	hive-tailnet dial --state DIR --name NAME --to http://hive.<tailnet>.ts.net --listen 127.0.0.1:PORT
-//	    a Hive device: a plain-HTTP port on this computer that reaches the server across the tailnet
+//	hive-tailnet dial --state DIR --name NAME --to http://hive.<tailnet>.ts.net|auto --listen 127.0.0.1:PORT
+//	    a Hive device: a plain-HTTP port on this computer that reaches the server across the tailnet; `auto` finds the
+//	    owner's Hive Server on their tailnet itself and says {"server": url}
+//
+// The server tells Hive whose device each request comes from (X-Hive-Tailnet-Owner: 1 when the device is signed in to the
+// same Tailscale account as the server, X-Hive-Tailnet-Device: its name), so the owner's own devices need no pairing link.
 //
 // It says what's happening as one JSON line per change on stdout: {"login": url} until the owner signs in, {"address": url}
-// once serving, {"error": text}. It
+// once serving, {"server": url} when `auto` found the server, {"error": text}. It
 // stops when its stdin closes, so it never outlives the program that started it.
 package main
 
@@ -29,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -119,12 +124,25 @@ func serve(s *tsnet.Server, host, to string) {
 	}
 	target := &url.URL{Scheme: "http", Host: to}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	// Hive sees who's asking: the tailnet address of the owner's device.
+	lc, _ := s.LocalClient()
+	owner := ownerOf(s)
+	// Hive sees who's asking: the device's tailnet address, and whether Tailscale says it's the owner's own. Headers that say
+	// so only ever come from here: any a device sends are dropped.
 	proxy.Director = func(r *http.Request) {
 		peer, _, _ := net.SplitHostPort(r.RemoteAddr)
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
 		r.Header.Set("X-Forwarded-For", peer)
 		r.Header.Set("X-Forwarded-Proto", "http")
+		r.Header.Del("X-Hive-Tailnet-Owner")
+		r.Header.Del("X-Hive-Tailnet-Device")
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if who, err := lc.WhoIs(ctx, r.RemoteAddr); err == nil && who.Node != nil && who.UserProfile != nil {
+			r.Header.Set("X-Hive-Tailnet-Device", who.Node.ComputedName)
+			if owner != 0 && who.UserProfile.ID == owner && !who.Node.IsTagged() {
+				r.Header.Set("X-Hive-Tailnet-Owner", "1")
+			}
+		}
 	}
 	say(map[string]string{"address": "http://" + host})
 	if err := http.Serve(ln, proxy); err != nil {
@@ -133,8 +151,65 @@ func serve(s *tsnet.Server, host, to string) {
 	}
 }
 
+// ownerOf is the Tailscale account the server is signed in to.
+func ownerOf(s *tsnet.Server) tailcfg.UserID {
+	lc, err := s.LocalClient()
+	if err != nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if st, err := lc.StatusWithoutPeers(ctx); err == nil && st.Self != nil {
+		return st.Self.UserID
+	}
+	return 0
+}
+
+// find looks on the owner's tailnet for their Hive Server: a machine named hive (hive-1, … when there's more than one) that
+// answers as Hive, online, the most recently seen first.
+func find(s *tsnet.Server) string {
+	lc, err := s.LocalClient()
+	if err != nil {
+		return ""
+	}
+	c := s.HTTPClient()
+	c.Timeout = 5 * time.Second
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		st, err := lc.Status(ctx)
+		cancel()
+		if err == nil {
+			for _, p := range st.Peer {
+				if !p.Online || !strings.HasPrefix(strings.ToLower(p.HostName), "hive") {
+					continue
+				}
+				host := strings.TrimSuffix(p.DNSName, ".")
+				if host == "" && len(p.TailscaleIPs) > 0 {
+					host = p.TailscaleIPs[0].String()
+				}
+				r, err := c.Get("http://" + host + "/health")
+				if err != nil {
+					continue
+				}
+				var h struct{ Ok bool }
+				json.NewDecoder(r.Body).Decode(&h)
+				r.Body.Close()
+				if h.Ok {
+					return "http://" + host
+				}
+			}
+		}
+		say(map[string]string{"looking": "no Hive Server is online on this Tailscale account yet"})
+		time.Sleep(5 * time.Second)
+	}
+}
+
 // dial gives this computer a plain-HTTP port that reaches the Hive server across the tailnet (encrypted by WireGuard).
 func dial(s *tsnet.Server, to, listen string) {
+	if to == "auto" {
+		to = find(s)
+		say(map[string]string{"server": to})
+	}
 	target, err := url.Parse(to)
 	if err != nil || target.Host == "" {
 		say(map[string]string{"error": "not a server address: " + to})

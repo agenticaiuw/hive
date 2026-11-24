@@ -1,7 +1,8 @@
 //! A Hive on a laptop at home lives on its owner's Tailscale network (server/src/tailnet.rs). This computer reaches it through
 //! Hive's own Tailscale helper (tailnet/, `hive-tailnet dial`), which the app runs while it's open: a plain-HTTP door on this
-//! computer (127.0.0.1:8791) that goes across the tailnet, HTTPS end to end. The first time, the owner signs in to the same
-//! Tailscale account in the browser. Claude Code's hook goes through the app's door too.
+//! computer (127.0.0.1:8791) that goes across the tailnet, encrypted by WireGuard. Signing in to the same Tailscale account
+//! as the Hive Server is all it takes: the app finds the server and joins it (server/src/api.rs, /api/pair/tailnet). Claude
+//! Code's hook goes through the app's door too.
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -26,11 +27,14 @@ pub fn load() -> Option<hive_protocol::Conf> {
 
 fn dir() -> PathBuf { hive_protocol::conf_path("node").with_file_name("") }
 
-/// Opens the door to `server` (once per app run) and returns it, after the owner has signed in to Tailscale if they need to.
-/// `login` is told Tailscale's sign-in link.
-pub fn open(server: &str, label: &str, login: &dyn Fn(&str)) -> Result<String, String> {
+/// Opens the door to `server` (once per app run), after the owner has signed in to Tailscale if they need to, and returns it
+/// with the server's address. `server` "auto" finds the owner's Hive Server on their tailnet. `login` is told Tailscale's
+/// sign-in link.
+pub fn open(server: &str, label: &str, login: &dyn Fn(&str)) -> Result<(String, String), String> {
     let door = format!("http://{DOOR}");
-    if std::net::TcpStream::connect_timeout(&DOOR.parse().unwrap(), Duration::from_millis(300)).is_ok() { return Ok(door) }
+    if server != "auto" && std::net::TcpStream::connect_timeout(&DOOR.parse().unwrap(), Duration::from_millis(300)).is_ok() {
+        return Ok((door, server.into()))
+    }
     let exe = helper()?;
     let name: String = format!("hive-{label}").to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let mut c = Command::new(&exe);
@@ -49,10 +53,12 @@ pub fn open(server: &str, label: &str, login: &dyn Fn(&str)) -> Result<String, S
         }
         child.wait().ok();
     });
+    let mut found = server.to_string();
     loop {
         let v = rx.recv_timeout(Duration::from_secs(600)).map_err(|_| "Tailscale sign-in didn't finish.".to_string())?;
         if let Some(u) = v["login"].as_str() { login(u) }
-        if v["address"].is_string() { return Ok(door) }
+        if let Some(s) = v["server"].as_str() { found = s.into() }
+        if v["address"].is_string() { return Ok((door, found)) }
         if let Some(e) = v["error"].as_str() { return Err(format!("Tailscale: {e}")) }
     }
 }
