@@ -347,7 +347,7 @@ function markSeen() {
 }
 async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; markSeen(); chatAfter = 0; render(); }
 function chatPane() {
-  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="showContext(${chat})">Context</button><button class="plain" onclick="dropTask(${chat})">Drop</button></div>
+  return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="showContext(${chat})">Context</button></div>
     <div id="chatlog" class="log chat-log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
@@ -418,7 +418,7 @@ function updateTasks() {
   const sections = taskFilter === 'Done' ? [['Done', ['done','dropped']]] : [['Needs me', ['needs']], ['Working', ['working']], ['Queued', ['open','queued']]];
   const html = `<div class="row task-filters">${['Active','Done'].map(f => `<button class="${f === taskFilter ? '' : 'plain'}" onclick="taskFilter='${f}';updateTasks()">${f}</button>`).join('')}</div>` + sections.map(([label, statuses]) => {
     const tasks = state.tasks.filter(t => statuses.includes(t.status));
-    return `<section><h2>${label} <span class="muted">${tasks.length}</span></h2>${tasks.map(t => `<div class="card task-row"><button class="task-open" onclick="openTask(${t.id})">${esc(t.title)}<span class="muted">#${t.id}${t.agent_id ? ' · Agent #' + t.agent_id : ''}</span></button>${t.status === 'needs' ? `<div class="task-need">${esc(t.why)}<br><b>${esc(t.need)}</b></div><button class="plain" onclick="resumeTask(${t.id},this)">Resume</button>` : ''}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
+    return `<section><h2>${label} <span class="muted">${tasks.length}</span></h2>${tasks.map(t => `<div class="card task-row"><button class="task-open" onclick="openTask(${t.id})">${esc(t.title)}<span class="muted">#${t.id}${t.agent_id ? ' · Agent #' + t.agent_id : ''}</span></button>${t.status === 'needs' ? `<div class="task-need">${esc(t.why)}<br><b>${esc(t.need)}</b></div><button class="plain" onclick="resumeTask(${t.id},this)">Resume</button>` : ''}${statuses.includes('done') ? '' : `<button class="plain" onclick="dropTask(${t.id})">Drop task</button>`}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;
   }).join('');
   if (board.dataset.snapshot !== html) { board.innerHTML = html; board.dataset.snapshot = html; }
 }
@@ -428,7 +428,7 @@ async function resumeTask(id, button) {
   catch(e) { button.disabled = false; button.textContent = 'Retry resume'; alert(e.message); }
 }
 async function msgTask(id) { await sendComposer(`task-${id}`, `api/tasks/${sessionTask(id)?.id ?? id}/message`); loadChat(); }
-async function dropTask(id) { await api(`api/tasks/${sessionTask(id)?.id ?? id}/drop`, { method: 'POST' }); refresh(); }
+async function dropTask(id) { await api(`api/tasks/${id}/drop`, { method: 'POST' }); refresh(); }
 $('#view').addEventListener('keydown', e => { if (e.target.closest('[data-task]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(Number(e.target.closest('[data-task]').dataset.task)); return; } if (e.target.closest('[data-session]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openChat(Number(e.target.closest('[data-session]').dataset.session)); return; } if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); msgTask(chat); } });
 
 function table(rows) {

@@ -583,6 +583,8 @@ impl Hive {
     }
 
     pub fn drop_task(self: &Arc<Self>, task_id: i64) {
+        let Some(task) = self.db.get("select status from tasks where id=?", args!(task_id)) else { return };
+        if !matches!(s(&task["status"]).as_str(), "open" | "queued" | "working" | "needs") { return; }
         self.db.run("update tasks set status='dropped', updated=? where id=?", args!(now(), task_id));
         if let Some(a) = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=? and a.task_id=t.id", args!(task_id)) {
             let thread = s(&a["thread"]);
@@ -593,7 +595,7 @@ impl Hive {
             if let Some(turn) = self.turns.lock().unwrap().get(&thread).cloned() {
                 if let Ok(c) = self.codex() { c.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), 30).ok(); }
             }
-            self.db.run("update agents set status='done' where id=?", args!(a["id"].clone()));
+            self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), a["id"].clone()));
         }
         self.bump();
     }
@@ -651,7 +653,7 @@ impl Hive {
         let t = self.db.get("select status from tasks where id=?", args!(task)).map(|r| s(&r["status"])).unwrap_or_default();
         let end = self.last.lock().unwrap().remove(&agent).and_then(|m| ended(&m));
         if t != "working" || status == "interrupted" {
-            self.db.run("update agents set status=?, updated=? where id=?", args!(if t == "done" || t == "dropped" { "done" } else { "idle" }, now(), agent));
+            self.db.run("update agents set status=?, updated=? where id=?", args!(if t == "done" { "done" } else { "idle" }, now(), agent));
             self.bump();
             return;
         }
@@ -1197,6 +1199,24 @@ mod tests {
         assert_eq!(hive.db.get("select task_id from agents where id=?",args!(agent)).unwrap()["task_id"],10);
         assert!(hive.db.all("select * from log where who='model input'", &[]).is_empty());
         assert!(hive.session_context(11).unwrap_err().contains("live session has ended"));
+    }
+
+    #[test]
+    fn dropping_a_task_preserves_its_agent_and_other_tasks() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let agent = hive.db.run("insert into agents(task_id,kind,status) values(10,'codex','working')", &[]);
+        hive.db.run("insert into tasks(id,agent_id,status) values(10,?,'working')", args!(agent));
+        hive.db.run("insert into tasks(id,agent_id,status) values(11,?,'queued')", args!(agent));
+        hive.drop_task(10);
+        hive.after_turn(agent, 10, "interrupted".into());
+        assert_eq!(hive.db.get("select status from tasks where id=10", &[]).unwrap()["status"], "dropped");
+        assert_eq!(hive.db.get("select status from tasks where id=11", &[]).unwrap()["status"], "queued");
+        assert_eq!(hive.db.get("select status from agents where id=?", args!(agent)).unwrap()["status"], "idle");
+        assert!(!hive.ready_for_task(agent));
+        hive.db.run("update tasks set status='done' where id=10", &[]);
+        hive.drop_task(10);
+        assert_eq!(hive.db.get("select status from tasks where id=10", &[]).unwrap()["status"], "done");
     }
 
     #[test]
