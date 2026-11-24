@@ -9,6 +9,8 @@ ureq = "2"
 serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+hive-phone-bootstrap = { path = "../phone/ios/bootstrap", features = ["usb-setup"] }
+tokio = { version = "1", features = ["rt", "time"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"

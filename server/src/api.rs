@@ -62,6 +62,14 @@ fn phone_pairing(hive: &Arc<Hive>) -> Result<(String, String), Res> {
     Ok((format!("{}/phone/device", address.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1)), key))
 }
 
+fn developer_identity(hive: &Hive, device: &str) -> Res {
+    match hive_phone::bootstrap::load(&hive.state, device) {
+        Ok(Some(bytes)) => Res::new(200, "application/x-plist", bytes).header("Cache-Control", "no-store"),
+        Ok(None) => Res::err(404, "No saved pairing identity for this iPhone."),
+        Err(e) => Res::err(400, e),
+    }
+}
+
 pub fn new_code(db: &crate::db::Db) -> String {
     let n = u32::from_str_radix(&random(4)[..7], 16).unwrap_or(0) % 100_000_000;
     let code = format!("{n:08}");
@@ -99,6 +107,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 }
                 Err(e) => Res::err(401, e),
             };
+        }
+        // A phone can restore its Apple pairing identity using its own Hive key.
+        ("GET", ["phone", "bootstrap", device]) => {
+            let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
+            if key.is_empty() || token(&req) != key { return Res::err(401, "Connect the iPhone again from the dashboard."); }
+            return developer_identity(hive, device);
         }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
         ("GET", ["phone", "device"]) => {
@@ -196,6 +210,16 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 Res::json(&json!(hive.db.all("select * from rules where active=1 order by id", &[])))
             } else {
                 Res::json(&json!(rules_for(hive, &[req.q("node").to_string()], req.q("site"), req.q("app"), req.q("folder"))))
+            }
+        }
+        ("GET", ["api", "phone", "bootstrap", device]) => developer_identity(hive, device),
+        ("POST", ["api", "phone", "bootstrap", device]) => {
+            match hive_phone::bootstrap::save(&hive.state, device, &req.body) {
+                Ok(()) => match phone_pairing(hive) {
+                    Ok((url, token)) => Res::json(&json!({ "url": url, "token": token, "developerDevice": device })).header("Cache-Control", "no-store"),
+                    Err(e) => e,
+                },
+                Err(e) => Res::err(409, e),
             }
         }
         ("GET", ["api", "phone"]) => Res::json(&hive_phone::status(&hive.state)),
@@ -357,6 +381,23 @@ fn mime(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn developer_identity_requires_a_device_or_owner_key() {
+        let state = std::env::temp_dir().join(format!("hive-bootstrap-api-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        crate::private(&state.join("phone-token"), "phone-test-key");
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, "owner".into(), String::new(), String::new());
+        let request = |path: &str, key: &str| Req { method: "GET".into(), path: path.into(), query: Default::default(),
+            headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
+        let path = "/phone/bootstrap/00008110-001A2B3C00000000";
+        assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
+        assert_eq!(handle(&hive, request(path, "phone-test-key")).status, 404);
+        assert_eq!(handle(&hive, request("/phone/bootstrap/..", "phone-test-key")).status, 400);
+        let path = "/api/phone/bootstrap/00008110-001A2B3C00000000";
+        assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
+        assert_eq!(handle(&hive, request(path, "owner")).status, 404);
+        std::fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn codes_pair_once_and_guessing_stops() {
         let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, "owner".into(), String::new(), String::new());

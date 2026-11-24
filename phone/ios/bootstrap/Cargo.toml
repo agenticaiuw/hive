@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[workspace]
 
 [lib]
 crate-type = ["staticlib", "rlib"]
@@ -18,8 +17,3 @@ tokio = { version = "1", features = ["rt", "net", "time", "fs"] }
 plist = "1"
 # Upstream has debug tracing of pairing plists; compile it out in every build.
 tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
-
-[profile.release]
-opt-level = "s"
-lto = true
-panic = "abort"

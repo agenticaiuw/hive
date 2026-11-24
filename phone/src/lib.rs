@@ -5,6 +5,8 @@ mod link;
 mod phone;
 
 pub use link::{accept, device, Conn};
+pub mod bootstrap;
+
 use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};

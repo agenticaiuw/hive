@@ -8,6 +8,8 @@
 #[cfg(target_os = "macos")]
 mod bar;
 mod common;
+#[cfg(target_os = "macos")]
+mod phone_setup;
 mod hook;
 mod tailnet;
 #[cfg(target_os = "macos")]
@@ -110,6 +112,8 @@ fn ask(prompt: &str, default: &str) -> Option<String> {
 }
 
 fn serve(c: hive_protocol::Conf) {
+    #[cfg(target_os = "macos")]
+    phone_setup::start(&c);
     hive_protocol::run(c, hive_protocol::Node { kind: os::KIND, name: os::host(), package: "hive", tools: common::tools(),
         notes: format!("The owner's {}: {}_* tools. One agent at a time drives its input; the shell ({}) and files work alongside.",
             os::NAME, os::KIND, os::SHELL) },

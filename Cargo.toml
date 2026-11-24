@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocol", "server", "desktop", "phone"]
+members = ["protocol", "server", "desktop", "phone", "phone/ios/bootstrap"]
 resolver = "2"
 
 [workspace.package]
