@@ -585,11 +585,11 @@ impl Hive {
         k
     }
 
-    /// The devices a task's agent gets: the task's own, plus the owner's Mac and (on a Hive with a checkout) Hive's own code, its
-    /// way around a technical problem.
+    /// The devices a task's agent gets: the task's own, plus the owner's Mac and iPhone (for sign-in verifications) and, on a Hive
+    /// with a checkout, Hive's own code: its way around a technical problem.
     fn task_kinds(&self, task: &Value) -> Vec<String> {
         let mut kinds = list(&task["nodes"]);
-        let extra = if self.repo.is_some() { &["mac", "hive"][..] } else { &["mac"][..] };
+        let extra = if self.repo.is_some() { &["mac", "phone", "hive"][..] } else { &["mac", "phone"][..] };
         for k in extra { if !kinds.iter().any(|n| n == k) { kinds.push(k.to_string()); } }
         kinds
     }
@@ -869,9 +869,13 @@ keep going. You heard the owner in context, so you write what follows from their
 (always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \
 that's truly separate from yours becomes a task (the task tool). Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
-sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password). A technical \
-problem is yours to solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and keyboard) is your extra pair of \
-hands, and when it's Hive itself that falls short, improve Hive's own code. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password), and approve \
+its verification yourself on the owner's iPhone (the phone tools: a Duo push, a code in Messages). A technical problem is yours to \
+solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and keyboard) is your extra pair of hands, and when it's \
+Hive itself that falls short, improve Hive's own code. When one app's window can't do it (a menu shortcut, a system dialog, a page \
+that won't respond), don't end with a blocker: ask for the whole Mac with mac_take_over (why, and about how many minutes), and once \
+the owner hands it over, use its own pointer and keyboard. Never take over their screen any other way, like bringing an app to the \
+front. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
 /// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
 const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \

@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use std::ffi::c_void;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 pub const KIND: &str = "mac";
 pub const NAME: &str = "Mac";
@@ -70,7 +71,26 @@ fn target() -> Result<Target, String> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err("macOS isn't letting Hive control this Mac yet: the owner turns on Hive in System Settings > Privacy & Security > Accessibility.".into());
     }
-    Ok(*TARGET.lock().unwrap())
+    let t = *TARGET.lock().unwrap();
+    if matches!(t, Target::Mac) && HANDED.lock().unwrap().is_none_or(|end| Instant::now() > end) {
+        return Err("Input on the whole screen uses the owner's own pointer and keyboard: ask for them first with mac_take_over \
+            (why, and about how many minutes), or work in one app's window (mac_screenshot with its name).".into());
+    }
+    Ok(t)
+}
+
+/// Until when the owner has handed the Mac's own pointer and keyboard over to the agents.
+static HANDED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Asks the owner in a floating window for the Mac's own pointer and keyboard, for about `minutes`.
+pub fn take_over(why: &str, minutes: u64) -> Result<Value, String> {
+    let minutes = minutes.clamp(1, 120);
+    if !crate::bar::hand_over(why, minutes) {
+        return Err("The owner didn't hand the Mac over (they said not now, or didn't answer in ten minutes). Find another way, or end saying exactly what you need the Mac for.".into());
+    }
+    *HANDED.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_secs(minutes * 60));
+    Ok(json!({ "text": format!("The owner handed the Mac over for {minutes} minutes. Take a mac_screenshot of the whole screen (app \"\"); \
+        clicks, keys and typing then use the Mac's own pointer and keyboard, which reach everything (menus, the Dock, system dialogs).") }))
 }
 
 /// (x, y) in the last screenshot as a point on the screen.

@@ -29,12 +29,21 @@ pub fn tools() -> Vec<Value> {
             other windows. The other mac tools then act in what it showed, x/y being its pixels: in an app's window they go to that app alone, \
             in the background, and the owner keeps their pointer and keyboard (clicks, scrolling, typing and keys like return work there; \
             shortcuts through the app's menus, like cmd+s, don't); on the whole screen they use the Mac's own pointer and keyboard, \
-            which reach everything (Dock, menu bar, cmd+space) but move the owner's pointer.",
+            which reach everything (Dock, menu bar, cmd+space, system dialogs), once the owner has handed them over with mac_take_over.",
             json!({ "app": s("An app's name for only its window, or \"\" for the whole screen") }), &["app"])
     } else {
         tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in the other {k} tools are pixels in this image."), json!({}), &[])
     };
     let mut all = vec![shot];
+    if cfg!(target_os = "macos") {
+        let mut t = tool("mac_take_over", "When working in one app's window can't do it (a menu shortcut, a system dialog, a page that won't \
+            respond): ask the owner, in a floating window on their Mac, to hand over its own pointer and keyboard, saying why and about how \
+            long. Waits for their answer; once they hand it over, the whole screen's input works for that long.",
+            json!({ "why": s("What you're doing and why you need the whole Mac, in a sentence or two for the owner"), "minutes": n("About how many minutes you need") }),
+            &["why", "minutes"]);
+        t["timeout"] = json!(660);
+        all.push(t);
+    }
     all.append(&mut input);
     all.extend([
         tool(&format!("{k}_shell"), &format!("Run a command on the owner's {on} ({}, as the owner) and get its output.", os::SHELL),
@@ -61,6 +70,8 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
             os::type_text(password)?; done("Typed the saved password.")
         }
         "key" => { os::key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
+        #[cfg(target_os = "macos")]
+        "take_over" => os::take_over(a["why"].as_str().unwrap_or(""), a["minutes"].as_u64().unwrap_or(10)),
         "shell" => shell(os::shell(a["command"].as_str().unwrap_or("")), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
         "get_file" => {
             let path = a["path"].as_str().unwrap_or("");
@@ -113,6 +124,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 10);
+        assert_eq!(tools().len(), 10 + cfg!(target_os = "macos") as usize);
     }
 }

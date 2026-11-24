@@ -6,7 +6,7 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
     NSFloatingWindowLevel, NSFont, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSTextField, NSVariableStatusItemLength, NSWindowStyleMask, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
 use serde_json::json;
@@ -136,4 +136,27 @@ fn ask(text: &str, app: &str) -> String {
         Ok((code, r)) => format!("Hive answered {code}: {r}"),
         Err(e) => format!("Couldn't reach Hive: {e}"),
     }
+}
+
+/// Asks the owner, in a floating window, to hand over the Mac's own pointer and keyboard to a task's agent: why, and for about
+/// how long. True once they press Hand over; false for Not now, or no answer in ten minutes (the window then closes).
+pub fn hand_over(why: &str, minutes: u64) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let text = format!("{why}\n\nIt needs your pointer and keyboard for about {minutes} minute{}. They're yours again once that's up.",
+        if minutes == 1 { "" } else { "s" });
+    DispatchQueue::main().exec_async(move || {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("A Hive agent is asking for your Mac"));
+        alert.setInformativeText(&NSString::from_str(&text));
+        alert.addButtonWithTitle(&NSString::from_str("Hand over"));
+        alert.addButtonWithTitle(&NSString::from_str("Not now"));
+        alert.window().setLevel(NSFloatingWindowLevel);
+        NSApplication::sharedApplication(mtm).activate();
+        tx.send(alert.runModal() == NSAlertFirstButtonReturn).ok();
+    });
+    rx.recv_timeout(Duration::from_secs(600)).unwrap_or_else(|_| {
+        DispatchQueue::main().exec_async(|| NSApplication::sharedApplication(MainThreadMarker::new().expect("main thread")).abortModal());
+        false
+    })
 }
