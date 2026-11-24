@@ -15,7 +15,9 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
         tool("task", "Make a task for work that's truly separate from yours; a new agent takes it.",
             json!({ "title": s("Short imperative."), "quote": s("The owner's exact words for it."), "project": s("Short project name."),
             "nodes": { "type": "array", "items": { "type": "string" }, "description": "Where the work happens: vm, hive, browser, phone, mac…" },
-            "level": s("easy, normal, hard or hardest.") }), &["title", "quote", "project", "nodes", "level"]),
+            "level": s("easy, normal, hard or hardest."),
+            "every": n("Hours between runs, when the owner wants it done again and again; leave out for once.") }),
+            &["title", "quote", "project", "nodes", "level"]),
         tool("type_password", "Type a saved login's password (`hive-cred list` shows them) without you seeing it: with tool empty, into \
             the focused field of the VM's screen (:99); else through a device's typing tool, e.g. browser_type (Safari, Chrome) or mac_type.",
             json!({ "site": s("The site, e.g. x.com"), "username": s("Which login; empty for the only one."),

@@ -166,6 +166,15 @@ impl Hive {
             let me = self.clone();
             std::thread::spawn(move || me.start_agent(id));
         }
+        // A repeating task that's done runs again once its hours have passed since it ended.
+        for t in self.db.all("select id, every from tasks where every>0 and status='done' and updated<=?-every*3600000", args!(now())) {
+            let (id, every) = (t["id"].as_i64().unwrap_or(0), t["every"].as_i64().unwrap_or(0));
+            let text = format!("Time for this task's next run (it repeats every {every} hours): do it again, using what you saved last time.");
+            if let Err(e) = self.message_task(id, 0, &text, "hive") {
+                eprintln!("couldn't repeat task {id}: {e}");
+                self.db.run("update tasks set updated=? where id=?", args!(now(), id));
+            }
+        }
     }
 
     fn resume_working(self: &Arc<Self>) {
@@ -272,8 +281,9 @@ impl Hive {
         let level = s(&t["level"]);
         let level = if LEVELS.iter().any(|l| l.0 == level) { level } else { "normal".into() };
         let nodes = if t["nodes"].is_array() { t["nodes"].clone() } else { json!(["vm"]) };
-        let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, at, updated) values(?,?,?,?,?,?,?,?)",
-            args!(request, s(&t["project"]), s(&t["title"]), s(&t["quote"]), nodes, level, now(), now()));
+        let every = t["every"].as_i64().unwrap_or(0).max(0);
+        let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, every, at, updated) values(?,?,?,?,?,?,?,?,?)",
+            args!(request, s(&t["project"]), s(&t["title"]), s(&t["quote"]), nodes, level, every, now(), now()));
         let requester = self.db.get("select agent from requests where id=?", args!(request)).map(|r| s(&r["agent"])).unwrap_or_default();
         if let Some(session) = requester.strip_prefix("claude:") {
             let agent = self.agent_for_session(session, tid);

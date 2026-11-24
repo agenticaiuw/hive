@@ -9,7 +9,7 @@ create table if not exists requests(id integer primary key, at integer, node tex
   status text default 'new', reply text);
 create table if not exists tasks(id integer primary key, request_id integer, project text default '', title text, quote text,
   nodes text default '[]', level text default 'normal', status text default 'open', agent_id integer, outcome text,
-  why text, need text, at integer, updated integer);
+  why text, need text, at integer, updated integer, every integer default 0);
 create table if not exists rules(id integer primary key, text text, quote text, scope text default '', code text,
   at integer, active integer default 1);
 create table if not exists agents(id integer primary key, task_id integer, kind text default 'codex', name text, thread text,
@@ -65,6 +65,8 @@ impl Db {
         let c = Connection::open(path).expect("open database");
         c.execute_batch("pragma journal_mode=wal; pragma busy_timeout=5000;").ok();
         c.execute_batch(SCHEMA).expect("schema");
+        // Columns added since a database was made (fails harmlessly once it has them).
+        c.execute_batch("alter table tasks add column every integer default 0").ok();
         Db(Mutex::new(c))
     }
 
@@ -137,5 +139,17 @@ mod tests {
         assert_eq!(row["title"], "t");
         assert_eq!(row["nodes"], "[\"mac\"]");
         assert_eq!(row["status"], "open");
+    }
+    #[test]
+    fn older_database_gains_repeats() {
+        let path = std::env::temp_dir().join(format!("hive-old-{}.db", std::process::id()));
+        Connection::open(&path).unwrap().execute_batch("create table tasks(id integer primary key, title text, status text, updated integer)").unwrap();
+        let db = Db::open(path.to_str().unwrap());
+        db.run("insert into tasks(title, status, updated, every) values('daily', 'done', 0, 24)", &[]);
+        db.run("insert into tasks(title, status, updated) values('once', 'done', 0)", &[]);
+        let due = db.all("select title from tasks where every>0 and status='done' and updated<=?-every*3600000", args!(now()));
+        assert_eq!(due, vec![json!({ "title": "daily" })]);
+        drop(db);
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -117,7 +117,7 @@ const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 function taskCard(t, click = true) {
   return `<div class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
     <div class="row">${badge(t.status)} <b>#${t.id}</b> ${esc(t.title)}</div>
-    <div class="muted">${esc(JSON.parse(t.nodes || '[]').join(', ') || 'vm')} · ${esc(t.project || '')} · ${ago(t.updated)}</div>
+    <div class="muted">${esc(JSON.parse(t.nodes || '[]').join(', ') || 'vm')} · ${esc(t.project || '')}${t.every ? ` · every ${t.every} h` : ''} · ${ago(t.updated)}</div>
     ${t.status === 'needs' ? `<div><b>Why:</b> ${esc(t.why)}<br><b>Needs:</b> ${esc(t.need)}</div>` : ''}
     ${t.outcome ? `<div class="muted">${esc(t.outcome)}</div>` : ''}</div>`;
 }
