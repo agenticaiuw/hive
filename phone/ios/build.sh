@@ -4,7 +4,7 @@
 # server's WebDriverAgent-style calls in-process (nothing can reach in), and shows the dashboard in its own window
 # whenever it's in front. A Hive Server on a tailnet is reached through Tailscale inside the app: tailscale/libtailscale
 # (BSD-3-Clause), built here from a pinned commit.
-# Makes target/Hive.ipa, unsigned (SideStore or the owner's Apple developer team signs it). Packaging follows
+# Makes target/Hive.ipa: signed by the owner's Apple team when its profile is here (below), else unsigned. Packaging follows
 # OpenMinis/iCTRL (Apache-2.0) so it starts from its icon while the phone's developer disk image is mounted.
 # `build.sh test` instead tries it on an iPhone simulator: the smoke test under xcodebuild (target/HivePhone/smoke.xcresult),
 # then the packaged app launched from its icon, as a person would, with its window probed (target/HivePhone/probe).
@@ -93,5 +93,27 @@ ditto $out/derived/Build/Products/Debug-iphoneos/HivePhone-Runner.app $app
 # Everything Xcode embeds in Frameworks is XCTest's, which comes from the phone's developer disk image, matched to its iOS.
 rm -rf $app/Frameworks
 dress $app
+# Signed by the owner's Apple team when its provisioning profile for app.hive.xctrunner is here (HIVE_IOS_PROFILE, ad hoc or
+# development, listing the iPhones that may install it) and its certificate is in the keychain. Those iPhones then install
+# it from Safari with a link to target/manifest.plist: itms-services://?action=download-manifest&url=<manifest.plist's address>.
+if [ -n "$HIVE_IOS_PROFILE" ]; then
+  security cms -D -i "$HIVE_IOS_PROFILE" > $out/profile.plist
+  plutil -extract Entitlements xml1 -o $out/entitlements.plist $out/profile.plist
+  # The keychain's certificate that the profile lists.
+  for c in 0 1 2 3 4 5 6 7 8 9; do plutil -extract DeveloperCertificates.$c raw $out/profile.plist 2> /dev/null | base64 -d | shasum | awk '{ print toupper($1) }'; done > $out/certificates.txt
+  signer=$(security find-identity -v -p codesigning | awk '{ print $2 }' | grep -xF -f $out/certificates.txt | head -1)
+  [ -n "$signer" ] || { echo "No certificate in the keychain matches HIVE_IOS_PROFILE" >&2; exit 1; }
+  cp "$HIVE_IOS_PROFILE" $app/embedded.mobileprovision
+  find $app -name '*.framework' -o -name '*.xctest' -o -name '*.dylib' | sort -r | xargs -I{} codesign -f -s $signer {}
+  codesign -f -s $signer --entitlements $out/entitlements.plist $app
+  cat > target/manifest.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>items</key><array><dict>
+<key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>https://github.com/agenticaiuw/hive/releases/download/latest/Hive.ipa</string></dict></array>
+<key>metadata</key><dict><key>bundle-identifier</key><string>$id</string><key>bundle-version</key><string>$(plutil -extract CFBundleVersion raw $app/Info.plist)</string><key>kind</key><string>software</string><key>title</key><string>Hive</string></dict>
+</dict></array></dict></plist>
+EOF
+fi
 echo "From the developer disk image:" $(missing $app) | tee $out/disk-image.txt
 (cd $out && rm -f ../Hive.ipa && zip -qry ../Hive.ipa Payload) && echo target/Hive.ipa

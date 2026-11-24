@@ -16,6 +16,8 @@ jobs:
   ipa:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: macos-latest
+    env:
+      SIGNED: ${{ secrets.IOS_PROFILE != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,13 +25,29 @@ jobs:
           fetch-depth: 0 # HiveVersion is the last commit to phone/ios
       - uses: actions/setup-go@v5
         with: { go-version: stable, cache: false }
+      # The owner's Apple team signs it once its certificate and profile are this repository's secrets: IOS_CERTIFICATE (the
+      # .p12, base64), IOS_CERTIFICATE_PASSWORD, and IOS_PROFILE (the .mobileprovision for app.hive.xctrunner, base64).
+      - if: env.SIGNED == 'true'
+        env:
+          IOS_PROFILE: ${{ secrets.IOS_PROFILE }}
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          k=$RUNNER_TEMP/hive.keychain
+          security create-keychain -p hive $k && security set-keychain-settings $k && security unlock-keychain -p hive $k
+          echo "$IOS_CERTIFICATE" | base64 -d > $RUNNER_TEMP/hive.p12
+          security import $RUNNER_TEMP/hive.p12 -k $k -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k hive $k > /dev/null
+          security list-keychains -d user -s $k $(security list-keychains -d user | tr -d '"')
+          echo "$IOS_PROFILE" | base64 -d > $RUNNER_TEMP/hive.mobileprovision
+          echo "HIVE_IOS_PROFILE=$RUNNER_TEMP/hive.mobileprovision" >> $GITHUB_ENV
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: Hive, path: target/Hive.ipa }
       - if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest target/Hive.ipa --clobber
+        run: gh release upload latest target/Hive.ipa $(ls target/manifest.plist 2> /dev/null) --clobber
       # Only to learn from: what a simulator says about the runner and its window, kept in the xcresult and the probe.
       - if: github.event_name != 'workflow_run'
         continue-on-error: true
