@@ -81,7 +81,7 @@ if [ "$1" = test ]; then
   # start our full automation bundle. It carries no XCTest load command.
   executable=$(plutil -extract CFBundleExecutable raw $app/Info.plist)
   xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 -fobjc-arc \
-    -framework UIKit -framework Foundation -Wl,-rpath,@executable_path/Frameworks \
+    -framework UIKit -framework Foundation -framework CoreFoundation -Wl,-rpath,@executable_path/Frameworks \
     phone/ios/Bootstrap/Main.m -o $app/$executable
   if otool -L $app/$executable | grep -q XCTest; then echo "Bootstrap links XCTest before mount" >&2; exit 1; fi
   dress $app

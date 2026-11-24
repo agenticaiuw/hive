@@ -6,7 +6,7 @@ archive=${CARGO_TARGET_DIR:-target/phone-bootstrap}/aarch64-apple-ios/release/li
 out=target/HivePhone/HiveBootstrap
 mkdir -p "$(dirname "$out")"
 xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=18.0 -fobjc-arc \
-  -framework UIKit -framework Foundation -framework NetworkExtension \
+  -framework UIKit -framework Foundation -framework CoreFoundation -framework NetworkExtension \
   -framework Security -framework SystemConfiguration -lresolv -lc++ \
   -Wl,-rpath,@executable_path/Frameworks \
   -Wl,-rpath,/System/Developer/Library/Frameworks \

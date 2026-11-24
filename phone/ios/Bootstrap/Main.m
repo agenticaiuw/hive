@@ -3,6 +3,7 @@
 // from reaching its mount code.
 #import <UIKit/UIKit.h>
 #import <TargetConditionals.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #if !TARGET_OS_SIMULATOR
 #import "Mount.h"
@@ -76,13 +77,21 @@
     self.started = YES;
 #if TARGET_OS_SIMULATOR
     // The simulator has no personalized DDI; build.sh embeds its XCTest runtime.
-    dispatch_async(dispatch_get_main_queue(), ^{ [self runXCTest]; });
+    [self scheduleXCTest];
 #else
     [HiveMount start:^(NSString *status) { self.status.text = status; } completion:^(BOOL mounted) {
-        if (mounted) [self runXCTest];
+        if (mounted) [self scheduleXCTest];
         else self.started = NO;
     }];
 #endif
+}
+- (void)scheduleXCTest {
+    // _XCTestMain and testRun keep running the main run loop. Starting them
+    // inside a GCD main-queue block would keep that serial block alive forever,
+    // starving WebKit and XCTest's own application-state callbacks. Apple's
+    // runner enters through a CFRunLoop block so the main queue can drain.
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{ [self runXCTest]; });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
 }
 - (void)runXCTest {
     NSArray<NSString *> *locations = @[
