@@ -6,6 +6,7 @@
 //!   hive end <task> …           a Claude Code session says how its task ended
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(target_os = "macos")]
+#[path = "../mac/bar.rs"]
 mod bar;
 mod common;
 #[cfg(target_os = "macos")]
@@ -13,10 +14,10 @@ mod phone_setup;
 mod hook;
 mod tailnet;
 #[cfg(target_os = "macos")]
-#[path = "mac.rs"]
+#[path = "../mac/mac.rs"]
 mod os;
 #[cfg(windows)]
-#[path = "windows.rs"]
+#[path = "../windows/windows.rs"]
 mod os;
 
 /// Joins through Tailscale: once this computer is signed in to the same Tailscale account as the Hive Server, it finds the

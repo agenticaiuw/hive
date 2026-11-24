@@ -87,7 +87,7 @@ jobs:
         with: { fetch-depth: 0 } # the devices' version is the last commit to their code
       - run: cargo build --release -p hive -p hive-server
       - shell: bash
-        run: mkdir out && cp target/release/hive.exe out/hive-windows.exe && cp target/release/hive-server.exe out/hive-server-windows.exe
+        run: desktop/windows/package.sh out && server/windows/package.sh out
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: out }
   linux:

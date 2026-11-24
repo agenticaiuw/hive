@@ -1,5 +1,5 @@
 //! The tools every computer has, and what they do the same way everywhere (the shell's time limit, files to and from the VM).
-//! The screen, mouse and keyboard are the operating system's: mac.rs and windows.rs. x/y everywhere are pixels in the latest
+//! The screen, mouse and keyboard are the operating system's: mac/mac.rs and windows/windows.rs. x/y everywhere are pixels in the latest
 //! screenshot.
 use crate::os;
 use hive_protocol::{b64, n, s, tool};
