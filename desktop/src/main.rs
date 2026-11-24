@@ -1,9 +1,8 @@
-//! `hive`: the Hive app for Mac and Windows, and Claude Code's way into Hive. The app has no window (the dashboard is the web
+//! `hive`: the Hive app for Mac and Windows, and every agent's way into Hive. The app has no window (the dashboard is the web
 //! page): it makes this computer one of a Hive's devices, and on a Mac it carries Hive for Safari and the fn key's type bar.
 //!   hive                        open the app: this computer is one of a Hive's devices while it runs (the server is its own download)
 //!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
-//!   hive task <request> …       a Claude Code session writes a task for a prompt; `hive rule <scope> …` a rule
-//!   hive end <task> …           a Claude Code session says how its task ended
+//!   hive mcp                    MCP server on stdio: any agent (Claude Code, Codex, Cursor, …) saves its tasks and rules in Hive
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(target_os = "macos")]
 #[path = "../mac/bar.rs"]
@@ -12,6 +11,7 @@ mod common;
 #[cfg(target_os = "macos")]
 mod phone_setup;
 mod hook;
+mod mcp;
 mod tailnet;
 #[cfg(target_os = "macos")]
 #[path = "../mac/mac.rs"]
@@ -56,9 +56,7 @@ fn main() {
     let fail = |e: String| -> ! { eprintln!("{e}"); std::process::exit(1) };
     match args.first().map(|s| s.as_str()) {
         Some("hook") => hook::run(),
-        Some("end") => hook::end(&args[1..]).unwrap_or_else(|e| fail(e)),
-        Some("task") => hook::task(&args[1..]).unwrap_or_else(|e| fail(e)),
-        Some("rule") => hook::rule(&args[1..]).unwrap_or_else(|e| fail(e)),
+        Some("mcp") => mcp::serve(),
         Some("--version") => println!("{}", hive_protocol::DEVICES),
         None => {
             #[cfg(target_os = "macos")]
@@ -75,6 +73,6 @@ fn main() {
                 Err(_) => {}
             }
         }
-        _ => fail("usage: hive | hive hook | hive task … | hive rule … | hive end <task> …".into()),
+        _ => fail("usage: hive | hive hook | hive mcp".into()),
     }
 }

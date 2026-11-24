@@ -1,0 +1,195 @@
+//! `hive mcp`: Hive as an MCP server over stdio, for any agent on this computer (Claude Code, Codex, Cursor, Claude
+//! Desktop, …), so the work the owner gives them is saved as their Hive tasks wherever they run. Its tools call the Hive
+//! Server's own API with this computer's token, through the app's door (tailnet.rs); the server decides what's allowed.
+//! Claude Code's hook (hook.rs) uses the same calls.
+use hive_protocol::{n, s, tool};
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+
+const INSTRUCTIONS: &str = "Hive is the owner's own agent system: every piece of work they give you is saved as one of their Hive \
+    tasks, whichever app you run in. When the owner asks for new work, call add_task with their exact words before you start; \
+    when it ends, call end_task. When they give a standing instruction (always, never, from now on, a preference), call add_rule. \
+    Call get_rules when you start in a folder and follow every rule it gives.";
+
+/// One call to the Hive Server through this computer's door: its answer, or why it didn't come.
+pub fn call(method: &str, path: &str, body: Option<&Value>, secs: u64) -> Result<Value, String> {
+    let c = crate::tailnet::load().ok_or("This computer hasn't joined a Hive yet: open the Hive app.")?;
+    match hive_protocol::call(&c, method, path, body, secs).map_err(|e| format!("Couldn't reach Hive (is the Hive app open?): {e}"))? {
+        (200, v) => Ok(v),
+        (_, v) => Err(v["error"].as_str().unwrap_or("Hive refused").to_string()),
+    }
+}
+
+/// The owner's rules (the server's rows) as a list for an agent; rules with code are enforced by Hive itself.
+pub fn rules(rows: &Value) -> String {
+    rows.as_array().into_iter().flatten().filter(|x| x["code"].is_null())
+        .map(|x| format!("- R{} {}", x["id"], x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")
+}
+
+fn tools() -> Vec<Value> {
+    vec![
+        tool("add_task", "Save the work the owner just gave you as a task in their Hive; you work on it yourself. Call it once per new \
+            piece of work, before you start, not when they continue one of your tasks. Returns the task's id.",
+            json!({ "title": s("A short title"), "quote": s("The owner's exact words that asked for it"),
+                "request": n("The request id Hive's hook gave you for this prompt, if it gave one") }), &["title", "quote"]),
+        tool("end_task", "Say how one of your Hive tasks ended: done with the outcome, or not done with exactly why you stopped and \
+            exactly what the owner must do. Stop only when you truly need the owner.",
+            json!({ "task": n("The task's id"), "done": { "type": "boolean", "description": "Everything the owner asked for is done" },
+                "outcome": s("When done: what was done"), "why": s("When not done: exactly why you stopped"),
+                "need": s("When not done: exactly what the owner must do") }), &["task", "done"]),
+        tool("task_status", "See a Hive task: its status, outcome or what it needs, and its latest log (including the owner's messages \
+            to it). Without a task, lists the owner's open tasks.", json!({ "task": n("The task's id") }), &[]),
+        tool("add_rule", "Save a standing instruction from the owner (always, never, from now on, a preference) as a Hive rule, which \
+            every agent then follows. Scope it as far as they meant: folder:<path> for this project, \"\" only when they clearly mean \
+            everything they do (also node:<kind>, site:<host>, app:<name>).",
+            json!({ "scope": s("folder:<path>, node:<kind>, site:<host>, app:<name>, or \"\" for everywhere"),
+                "rule": s("The rule, said plainly"), "quote": s("The owner's exact words") }), &["scope", "rule", "quote"]),
+        tool("get_rules", "The owner's rules for a folder (and this computer): follow every one.",
+            json!({ "folder": s("The folder you work in; this session's folder when left out") }), &[]),
+    ]
+}
+
+/// This MCP session, as Hive knows it: `<client>:<id>`, the agent its own requests come from.
+pub struct Session { pub name: String, pub folder: String }
+
+impl Session {
+    fn new(client: &str, folder: String) -> Session {
+        let client: String = client.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        Session { name: format!("{}:{}-{at}", if client.is_empty() { "agent" } else { &client }, std::process::id()), folder }
+    }
+}
+
+type Hive<'a> = &'a dyn Fn(&str, &str, Option<&Value>) -> Result<Value, String>;
+
+/// One tool call: what the agent reads back.
+fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String> {
+    let id = |k: &str| a[k].as_i64().ok_or(format!("give {k} as a number"));
+    let text = |k: &str| a[k].as_str().unwrap_or("").to_string();
+    match name {
+        "add_task" => {
+            let request = match a["request"].as_i64() {
+                Some(r) => r,
+                // No hook gave one: the owner's words go to the orchestrator first, as a request from this session.
+                None => hive("POST", "/api/requests", Some(&json!({ "text": text("quote"), "node": crate::os::KIND, "agent": me.name,
+                    "context": { "folder": me.folder } })))?["id"].as_i64().ok_or("Hive didn't save the request")?,
+            };
+            let t = hive("POST", "/api/tasks", Some(&json!({ "request": request, "title": text("title"), "quote": text("quote"), "nodes": [crate::os::KIND] })))?;
+            Ok(format!("Task #{} is saved in Hive, and it's yours. When it ends, call end_task.", t["id"]))
+        }
+        "end_task" => {
+            let body = json!({ "done": a["done"] == true, "outcome": text("outcome"), "why": text("why"), "need": text("need") });
+            hive("POST", &format!("/api/tasks/{}/end", id("task")?), Some(&body))?;
+            Ok("Recorded in Hive.".into())
+        }
+        "task_status" => {
+            let line = |t: &Value| format!("#{} [{}] {}", t["id"], t["status"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
+            let Some(task) = a["task"].as_i64() else {
+                let open: Vec<String> = hive("GET", "/api/state", None)?["tasks"].as_array().into_iter().flatten().map(line).collect();
+                return Ok(if open.is_empty() { "The owner has no open tasks.".into() } else { open.join("\n") });
+            };
+            let r = hive("GET", &format!("/api/tasks/{task}"), None)?;
+            let t = &r["task"];
+            if t.is_null() { return Err(format!("There's no task #{task}.")) }
+            let mut out = line(t);
+            for (k, label) in [("outcome", "Outcome"), ("why", "Why it stopped"), ("need", "Needs from the owner")] {
+                if let Some(v) = t[k].as_str().filter(|v| !v.is_empty()) { out += &format!("\n{label}: {v}"); }
+            }
+            let log = r["log"].as_array().cloned().unwrap_or_default();
+            for l in &log[log.len().saturating_sub(10)..] {
+                let words: String = l["text"].as_str().unwrap_or("").chars().take(500).collect();
+                out += &format!("\n{}: {words}", l["who"].as_str().unwrap_or(""));
+            }
+            Ok(out)
+        }
+        "add_rule" => {
+            let r = hive("POST", "/api/rules", Some(&json!({ "scope": text("scope"), "text": text("rule"), "quote": text("quote") })))?;
+            Ok(format!("Rule R{} is saved; every agent follows it now.", r["id"]))
+        }
+        "get_rules" => {
+            let folder = Some(text("folder")).filter(|f| !f.is_empty()).unwrap_or(me.folder.clone());
+            let q = |v: &str| v.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+            let r = rules(&hive("GET", &format!("/api/rules?folder={}&node={}", q(&folder), crate::os::KIND), None)?);
+            Ok(if r.is_empty() { "The owner has no rules for here.".into() } else { format!("The owner's rules here (follow every one):\n{r}") })
+        }
+        _ => Err(format!("Hive has no tool {name}")),
+    }
+}
+
+/// One MCP message, answered; the first names the session after its client.
+pub fn handle(m: &Value, me: &mut Option<Session>, folder: &str, hive: Hive) -> Option<Value> {
+    if me.is_none() {
+        let client = m["params"]["clientInfo"]["name"].as_str().or(m["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"].as_str());
+        if client.is_some() || m["method"] == "tools/call" { *me = Some(Session::new(client.unwrap_or(""), folder.into())); }
+    }
+    hive_protocol::mcp::answer(m, INSTRUCTIONS, tools, |name, a| {
+        match run(name, a, me.as_ref().expect("named above"), hive) { Ok(t) => (true, t, vec![]), Err(e) => (false, e, vec![]) }
+    })
+}
+
+/// Serve MCP on stdin and stdout, one JSON-RPC message per line, until the agent closes stdin.
+pub fn serve() {
+    let folder = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let hive = |method: &str, path: &str, body: Option<&Value>| call(method, path, body, 30);
+    let mut me = None;
+    let mut out = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        if line.trim().is_empty() { continue }
+        let reply = match serde_json::from_str::<Value>(&line) {
+            Ok(m) => handle(&m, &mut me, &folder, &hive),
+            Err(e) => Some(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("not JSON: {e}") } })),
+        };
+        if let Some(r) = reply { if writeln!(out, "{r}").and_then(|_| out.flush()).is_err() { return } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn tools_call_the_servers_api() {
+        let calls = RefCell::new(Vec::new());
+        let hive = |method: &str, path: &str, body: Option<&Value>| -> Result<Value, String> {
+            calls.borrow_mut().push((format!("{method} {path}"), body.cloned().unwrap_or(Value::Null)));
+            Ok(match path {
+                "/api/requests" => json!({ "id": 7 }),
+                "/api/tasks" => json!({ "id": 12 }),
+                "/api/tasks/12" => json!({ "task": { "id": 12, "status": "needs", "title": "Fix it", "why": "no key", "need": "add one" },
+                    "log": [{ "who": "owner", "text": "use the old one" }] }),
+                p if p.starts_with("/api/rules?") => json!([{ "id": 3, "text": "Use tabs", "code": null }, { "id": 4, "text": "x", "code": "js" }]),
+                "/api/tasks/12/end" => json!({ "ok": true }),
+                _ => return Err("Hive refused".into()),
+            })
+        };
+        let mut me = None;
+        let mut send = |m: Value| handle(&m, &mut me, "/work/my app", &hive).unwrap();
+        let init = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "Codex MCP" } } }));
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("add_task"));
+        let names: Vec<Value> = send(json!({ "id": 2, "method": "tools/list" }))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
+        assert_eq!(names, ["add_task", "end_task", "task_status", "add_rule", "get_rules"]);
+        let tool = |send: &mut dyn FnMut(Value) -> Value, name: &str, a: Value| {
+            let r = send(json!({ "id": 3, "method": "tools/call", "params": { "name": name, "arguments": a } }));
+            (r["result"]["isError"] == true, r["result"]["content"][0]["text"].as_str().unwrap().to_string())
+        };
+        // Without a hook's request, the owner's words go to the orchestrator first, from this session.
+        assert_eq!(tool(&mut send, "add_task", json!({ "title": "Fix it", "quote": "fix the build" })), (false, "Task #12 is saved in Hive, and it's yours. When it ends, call end_task.".into()));
+        // With one, the task joins it.
+        tool(&mut send, "add_task", json!({ "title": "Fix it", "quote": "fix the build", "request": 5 }));
+        let status = tool(&mut send, "task_status", json!({ "task": 12 })).1;
+        assert_eq!(status, "#12 [needs] Fix it\nWhy it stopped: no key\nNeeds from the owner: add one\nowner: use the old one");
+        assert_eq!(tool(&mut send, "end_task", json!({ "task": 12, "done": true, "outcome": "fixed" })), (false, "Recorded in Hive.".into()));
+        assert!(tool(&mut send, "end_task", json!({ "done": true })).0, "a task id is needed");
+        assert_eq!(tool(&mut send, "get_rules", json!({})).1, "The owner's rules here (follow every one):\n- R3 Use tabs");
+        assert_eq!(tool(&mut send, "add_rule", json!({ "scope": "", "rule": "r", "quote": "q" })), (true, "Hive refused".into()));
+        let calls = calls.into_inner();
+        let session = calls[0].1["agent"].as_str().unwrap();
+        assert!(session.starts_with("codex-mcp:"), "{session}");
+        assert_eq!((calls[0].0.as_str(), &calls[0].1["context"]["folder"]), ("POST /api/requests", &json!("/work/my app")));
+        assert_eq!(calls[1].1["request"], 7);
+        assert_eq!((calls[2].0.as_str(), &calls[2].1["request"]), ("POST /api/tasks", &json!(5)));
+        assert_eq!((calls[4].0.as_str(), &calls[4].1), ("POST /api/tasks/12/end", &json!({ "done": true, "outcome": "fixed", "why": "", "need": "" })));
+        assert_eq!(calls[5].0, format!("GET /api/rules?folder=/work/my%20app&node={}", crate::os::KIND));
+    }
+}
