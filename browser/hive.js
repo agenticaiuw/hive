@@ -42,6 +42,7 @@ async function request(url, { signal, ...init }) {
 export async function findServer(selected) {
   const peers = await tailnet.peers();
   if (peers?.error) throw new Error(peers.error);
+  const failures = [];
   const matches = await Promise.all(peers.map(async (p) => {
     const host = p.dnsName.replace(/\.$/, '') || p.ips[0];
     if (!p.online || !/^hive/i.test(p.hostName) || !host) return;
@@ -50,9 +51,12 @@ export async function findServer(selected) {
     try {
       const r = await request(`${server}/health`, { timeout: 5000 });
       if (r.ok && (await r.json()).ok === true) return server;
-    } catch {}
+    } catch (err) {
+      failures.push(`${host}: ${err.message || err}`);
+    }
   }));
   const servers = [...new Set(matches.filter(Boolean))].sort();
+  if (!servers.length && failures.length) throw Object.assign(new Error(`Hive connection failed. ${failures.sort()[0]}. Retrying…`), { again: true });
   if (servers.length > 1) throw Object.assign(new Error('Choose your Hive Server.'), { servers });
   return servers[0] || null;
 }

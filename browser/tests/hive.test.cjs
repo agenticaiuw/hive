@@ -62,6 +62,17 @@ test('with MagicDNS off the Hive Server is found by its tailnet address; with no
   assert.equal(await hive({ peers: [] }).lib.findServer(), null);
 });
 
+test('discovery reports a failed transport and still accepts another healthy server', async () => {
+  const name = 'hive.example.ts.net';
+  const error = { error: 'Dialer not initialized correctly' };
+  const peers = [peer('hive', name)];
+  const answers = { [`http://${name}/health`]: error };
+  const { lib } = hive({ peers, answers });
+  await assert.rejects(lib.joinTailnet(), e => e.again && e.message.includes(name) && e.message.includes(error.error));
+  peers.push(peer('hive-2', 'hive-2.example.ts.net'));
+  assert.equal(await lib.findServer(), 'http://hive-2.example.ts.net');
+});
+
 test('signing in with Tailscale joins the Hive Server it finds and keeps its key', async () => {
   const { lib, seen, stored } = hive({
     peers: [peer('hive', 'hive.example.ts.net.')],

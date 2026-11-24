@@ -65,12 +65,22 @@ func start(_ js.Value, args []js.Value) any {
 		return err.Error()
 	}
 	sys.Set(ns)
+	// A browser has no OS tunnel to receive replies to its outbound connections.
+	ns.ProcessLocalIPs = true
 	// Everything this node dials goes over the tailnet, through netstack.
 	dialer.UseNetstackForIP = func(netip.Addr) bool { return true }
 	dialer.NetstackDialTCP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
 		c, err := ns.DialContextTCP(ctx, dst)
 		if err != nil {
 			return nil, err // not c: a nil *gonet.TCPConn isn't a nil net.Conn
+		}
+		return c, nil
+	}
+	// UserDial requires both transports even for the HTTP client's TCP connections.
+	dialer.NetstackDialUDP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
+		c, err := ns.DialContextUDP(ctx, dst)
+		if err != nil {
+			return nil, err
 		}
 		return c, nil
 	}
