@@ -5,7 +5,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 } # the privacy test reads every commit message
+        # The privacy test reads every commit message; on a pull request it reads the branch's own commits, not the
+        # merge commit GitHub makes to test it, which nobody in the repo wrote.
+        with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha || github.sha }}" }
       - run: cargo build --workspace
       - run: cargo test --workspace
       - run: node --test .github/privacy.test.mjs
