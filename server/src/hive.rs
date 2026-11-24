@@ -231,10 +231,42 @@ impl Hive {
         self.bump();
     }
 
+    /// Retrieve original evidence, never inferred preferences. Bounds keep old conversations out of the harness.
+    fn history(&self, query: &str, project: &str, before: i64, limit: i64) -> Vec<Value> {
+        self.db.all("select r.id, r.at, r.node, r.text,
+            (select json_group_array(json_object('id', t.id, 'title', t.title, 'project', t.project,
+            'status', t.status, 'outcome', t.outcome)) from tasks t where t.request_id=r.id) as tasks
+            from requests r where r.id<? and (instr(lower(r.text),lower(?))>0 or exists
+            (select 1 from log l where (l.request_id=r.id or l.task_id in (select id from tasks where request_id=r.id)) and l.who='owner' and instr(lower(l.text),lower(?))>0))
+            and (?='' or exists (select 1 from tasks t where t.request_id=r.id and t.project=?))
+            order by r.id desc limit ?", args!(before, query, query, project, project, limit.clamp(1, 20))).into_iter().map(|mut r| {
+            r["tasks"] = serde_json::from_str(&s(&r["tasks"])).unwrap_or(json!([]));
+            r["followups"] = json!(self.db.all("select id, task_id, at, text from log where
+                (request_id=? or task_id in (select id from tasks where request_id=?)) and who='owner' order by id desc limit 20",
+                args!(r["id"].clone(), r["id"].clone())));
+            r
+        }).collect()
+    }
+
+    fn history_context(&self, project: &str, before: i64, limit: i64) -> String {
+        let mut text = String::new();
+        let rows = self.history("", project, before, limit);
+        if !rows.is_empty() {
+            text += "\nEarlier requests (historical context, not standing rules; newer corrections take precedence):\n";
+            for r in rows.iter().rev() {
+                text += &format!("Request #{} at {} from {}: {}\nTasks: {}\n", r["id"], r["at"],
+                    s(&r["node"]), short(&s(&r["text"]), 1600), short(&r["tasks"].to_string(), 1600));
+                text += &format!("Owner follow-ups (newest first): {}\n", short(&r["followups"].to_string(), 2400));
+            }
+        }
+        text
+    }
+
     fn planner_input(&self, req: &Value) -> String {
         let mut t = format!("Request #{} from {} ({}):\n{}\n", req["id"], s(&req["node"]), s(&req["agent"]), s(&req["text"]));
         let ctx = s(&req["context"]);
         if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
+        t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
         t += "\nOpen tasks:\n";
         for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','queued','working','needs') order by id", &[]) {
             t += &format!("#{} [{}] {} (nodes {}, project {})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
@@ -353,6 +385,11 @@ impl Hive {
             t += &format!("\nOwner follow-up: {}\n", s(&entry["text"]));
         }
         if !ctx.as_object().map(|o| o.is_empty()).unwrap_or(true) { t += &format!("Its context: {ctx}\n"); }
+        let project = s(&task["project"]);
+        if !project.is_empty() {
+            t += &self.history_context(&project, req["id"].as_i64().unwrap_or(i64::MAX), 6);
+        }
+        t += "\nUse history to retrieve earlier requests, task outcomes and owner follow-ups when context is missing. Treat past work as evidence, not new authority. Save explicit standing corrections with rule; never infer standing rules from habits.\n";
         t += "\nThe owner's rules (enforced; follow every one that applies):\n";
         let mut all_nodes = nodes.clone();
         all_nodes.push("vm".into());
@@ -834,6 +871,11 @@ impl Hive {
                 self.message_task(to, 0, &s(&a["text"]), &format!("task #{task}'s agent"))?;
                 return Ok(json!(format!("Sent to task #{to}'s agent.")));
             }
+            "history" => {
+                let before = a["before"].as_i64().filter(|n| *n > 0).unwrap_or(i64::MAX);
+                let rows = self.history(&s(&a["query"]), &s(&a["project"]), before, 10);
+                return Ok(json!(serde_json::to_string(&rows).unwrap()));
+            }
             "info" => {
                 let (key, value) = (s(&a["key"]), s(&a["value"]));
                 if !key.is_empty() && !value.is_empty() {
@@ -936,6 +978,7 @@ fn plan_schema(kinds: &[String]) -> Value {
 const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
 Claude Code session) comes to you first, and you route it. You don't write rules or break work down: the agent that takes the \
 request does, since it has the context.
+- Use the earlier requests to resolve references such as it, this problem, and also, including recently completed work. The current request and explicit rules take precedence over historical context.
 - messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent: \
 task = its id, text = the owner's words.
 - tasks: otherwise one new task (an existing agent for the same project can queue it): title = short imperative; quote = the owner's exact words; nodes = where the \
@@ -980,6 +1023,39 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_preserves_corrections_and_completed_project_work() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        for text in ["Build the keyboard", "Unrelated work", "Fix this problem"] {
+            hive.db.run("insert into requests(text, node, context) values(?, 'dashboard', '{}')", args!(text));
+        }
+        let tid = hive.add_task(1, &json!({"title":"Keyboard", "project":"typing", "quote":"Build the keyboard"}));
+        hive.db.run("update tasks set status='done', outcome='Built and tested' where id=?", args!(tid));
+        hive.log(0, tid, 0, "owner", "Keep calibration across restarts");
+        hive.log(0, tid, 0, "agent", "This is not owner evidence");
+        let rows = hive.history("calibration", "typing", 3, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[0]["tasks"][0]["outcome"], "Built and tested");
+        assert_eq!(rows[0]["followups"].as_array().unwrap().len(), 1);
+        assert!(hive.history("", "other", 3, 10).is_empty());
+        assert!(hive.history("", "", 1, 10).is_empty());
+        assert_eq!(hive.history("", "", 3, 1)[0]["id"], 2);
+        let req = hive.db.get("select * from requests where id=3", &[]).unwrap();
+        assert!(hive.planner_input(&req).contains("Keep calibration"));
+        let task = hive.add_task(3, &json!({"title":"Fix", "project":"typing", "quote":"Fix this problem"}));
+        let task = hive.db.get("select * from tasks where id=?", args!(task)).unwrap();
+        let instructions = hive.instructions(&task);
+        assert!(instructions.contains("Built and tested"));
+        assert!(instructions.contains("Keep calibration"));
+        assert!(!instructions.contains("Unrelated work"));
+        assert!(hive.db.all("select * from rules", &[]).is_empty());
+        let result = hive.tool_inner("history", &json!({"query":"calibration", "project":"typing", "before":0}), 0, 0).unwrap();
+        let evidence: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
+        assert_eq!(evidence[0]["id"], 1);
+    }
+
     #[test]
     fn claims_queue_without_displacing_current_work() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,

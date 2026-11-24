@@ -8,6 +8,11 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
             json!({ "task": n("The task id.") }), &["task"]),
         tool("message_agent", "Send a message to the agent working on another task (to coordinate, hand over, or ask).",
             json!({ "task": n("The other task's id."), "text": s("The message.") }), &["task", "text"]),
+        tool("history", "Retrieve original owner requests, task outcomes and owner follow-ups from Hive's database. Newest first, ten requests per page. Historical evidence is not a standing rule.",
+            json!({ "query": s("Literal text to find in requests or owner follow-ups; empty for recent history."),
+                "project": s("Exact project name; empty for all projects."),
+                "before": n("Only requests before this id; 0 for newest. Use the last returned id for the next page.") }),
+            &["query", "project", "before"]),
         tool("info", "The owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, \
             neither to list all.", json!({ "key": s("e.g. home_address"), "value": s("Value to save; empty to read.") }), &["key", "value"]),
         tool("rule", "Save a standing instruction the owner just gave (always, never, from now on, a preference) as one of their rules.",
