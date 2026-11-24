@@ -650,13 +650,14 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "dispatch2",
- "hive-phone-bootstrap",
  "hive-protocol",
+ "idevice",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "serde_json",
  "tokio",
+ "tracing",
  "ureq",
 ]
 
@@ -671,7 +672,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hive-phone-bootstrap"
+name = "hive-phone-launcher"
 version = "0.1.0"
 dependencies = [
  "idevice",

@@ -3,7 +3,7 @@
 # provisioning profiles authorize the Network Extension capability.
 set -eu
 cd "$(dirname "$0")/../../.."
-archive=${CARGO_TARGET_DIR:-target/phone-bootstrap}/aarch64-apple-ios/release/libhive_phone_bootstrap.a
+archive=${CARGO_TARGET_DIR:-target/phone-launcher}/aarch64-apple-ios/release/libhive_phone_launcher.a
 out=target/HivePhone/HiveLoopback.appex
 mkdir -p "$out"
 cp phone/ios/Loopback/Info.plist "$out/Info.plist"

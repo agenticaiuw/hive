@@ -46,10 +46,10 @@ jobs:
           targets: aarch64-apple-ios
       - name: Check the pre-XCTest mount backend
         env:
-          CARGO_TARGET_DIR: target/phone-bootstrap
+          CARGO_TARGET_DIR: target/phone-launcher
         run: |
-          cargo test --locked --features usb-setup --manifest-path phone/ios/bootstrap/Cargo.toml
-          cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/bootstrap/Cargo.toml
+          cargo test --locked --manifest-path phone/ios/Launcher/Cargo.toml
+          cargo build --locked --release --target aarch64-apple-ios --manifest-path phone/ios/Launcher/Cargo.toml
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s phone/ios -p sign_test.py
       - run: phone/ios/build.sh
       - uses: actions/upload-artifact@v4

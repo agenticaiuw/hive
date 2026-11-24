@@ -2,8 +2,8 @@
 # Compile the initial executable independently from the XCTest test bundle.
 set -eu
 cd "$(dirname "$0")/../../.."
-archive=${CARGO_TARGET_DIR:-target/phone-bootstrap}/aarch64-apple-ios/release/libhive_phone_bootstrap.a
-out=target/HivePhone/HiveBootstrap
+archive=${CARGO_TARGET_DIR:-target/phone-launcher}/aarch64-apple-ios/release/libhive_phone_launcher.a
+out=target/HivePhone/HiveLauncher
 mkdir -p "$(dirname "$out")"
 xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=18.0 -fobjc-arc \
   -framework UIKit -framework Foundation -framework CoreFoundation -framework NetworkExtension \
@@ -14,8 +14,8 @@ xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=18.0 -fobjc-arc \
   -Wl,-rpath,/System/Developer/usr/lib \
   -Wl,-rpath,/Developer/Library/Frameworks \
   -Wl,-rpath,/Developer/Library/PrivateFrameworks -Wl,-rpath,/Developer/usr/lib \
-  phone/ios/Bootstrap/Main.m phone/ios/Bootstrap/Mount.m "$archive" -o "$out"
+  phone/ios/Launcher/Main.m phone/ios/Launcher/Mount.m "$archive" -o "$out"
 if otool -L "$out" | grep -q XCTest; then
-  echo "Bootstrap links XCTest before the developer image can be mounted" >&2
+  echo "The launcher links XCTest before the developer image can be mounted" >&2
   exit 1
 fi
