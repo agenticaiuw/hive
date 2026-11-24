@@ -264,7 +264,7 @@ async function loadOrchestrator() {
     const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
     const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
     for (const l of rows) {
-      appendLogEntry(box, l);
+      appendLogEntry(box, l.task_id > 0 ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
       orchestratorAfter = l.id;
     }
     if (atEnd) box.scrollTop = box.scrollHeight;

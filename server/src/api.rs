@@ -149,7 +149,11 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
         }
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
-            "select * from log where task_id=0 and request_id>0 and id>? order by id limit 2000",
+            "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
+            where l.id>? and ((l.task_id=0 and l.request_id>0) or
+            (l.task_id>0 and l.who in ('agent','done','needs you','hive') and
+            (t.request_id>0 or exists (select 1 from log r where r.task_id=l.task_id and r.request_id>0))))
+            order by l.id limit 2000",
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
@@ -365,6 +369,14 @@ mod tests {
         hive.log(0, 0, 1, "owner", "Request");
         hive.log(0, 1, 1, "agent", "Session message");
         hive.log(0, 0, 1, "hive", "Routed");
+        // Normal agent events have request_id=0; the task carries their origin.
+        hive.db.run("update tasks set request_id=1 where id=1", &[]);
+        hive.log(0, 1, 0, "agent", "Checking the repair");
+        hive.log(0, 1, 0, "command", "private command output");
+        hive.log(0, 1, 0, "done", "Fixed and tested");
+        hive.log(0, 2, 2, "owner", "Follow-up on an existing task");
+        hive.log(0, 2, 0, "needs you", "Needs your decision");
+        hive.log(0, 3, 0, "agent", "Unrelated external session");
         let get = |path: &str, after: i64| {
             let req = Req { method: "GET".into(), path: path.into(), query: [("after".into(), after.to_string())].into_iter().collect(),
                 headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
@@ -374,9 +386,14 @@ mod tests {
         };
         assert_eq!(get("/api/state", 0)["tasks"].as_array().unwrap().len(), 4);
         let log = get("/api/orchestrator", 0);
-        assert_eq!(log.as_array().unwrap().len(), 2);
-        assert_eq!(log[1]["text"], "Routed");
-        assert_eq!(get("/api/orchestrator", log[1]["id"].as_i64().unwrap()), json!([]));
+        assert_eq!(log.as_array().unwrap().len(), 6);
+        assert_eq!(log[2]["text"], "Routed");
+        assert_eq!(log[3]["text"], "Checking the repair");
+        assert_eq!(log[4]["text"], "Fixed and tested");
+        assert_eq!(log[4]["task_title"], "Session");
+        assert_eq!(log[5]["text"], "Needs your decision");
+        assert_eq!(get("/api/orchestrator", log[5]["id"].as_i64().unwrap()), json!([]));
+        assert_eq!(get("/api/orchestrator", log[3]["id"].as_i64().unwrap()).as_array().unwrap().len(), 2);
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
