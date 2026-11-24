@@ -304,7 +304,11 @@ async function render() {
   if (sessions) {
     v.innerHTML = `<div class="split"><aside id="session-list" class="session-list" aria-label="Sessions"><div role="button" tabindex="0" class="card item" onclick="openChat(null)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openChat(null)}">Orchestrator · pinned</div></aside><section class="chat-panel"></section></div>`;
     updateSessions();
-    if (chat === null) { $('.chat-panel').append(orchestrator); orchestrator.classList.add('active'); loadOrchestrator(); }
+    if (chat === null) {
+      $('.chat-panel').append(orchestrator); orchestrator.classList.add('active');
+      const box = $('#orchestrator-log'); box.scrollTop = box.scrollHeight;
+      loadOrchestrator();
+    }
     else { $('.chat-panel').innerHTML = chatPane(); chatAfter = 0; loadChat(); }
     document.querySelectorAll('.composer').forEach(paintComposer);
   } else if (tab === 'Rules') {
