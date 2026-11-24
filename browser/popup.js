@@ -6,7 +6,6 @@ const $ = (id) => document.getElementById(id);
 
 async function show() {
   const c = await conf();
-  $('pair').hidden = !!c;
   $('main').hidden = !c;
   if (!c) return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -53,24 +52,28 @@ async function work(c) {
   $('workBox').hidden = !tasks.length;
 }
 
-// This browser's Tailscale. Unpaired, "Sign in with Tailscale" asks the worker to join the owner's Hive Server through it,
-// and opens Tailscale's sign-in page as soon as there is one (the worker carries on once the popup closes for it). Paired,
-// it's the button to sign in again when Tailscale asks.
+// Keep reconnection available when the saved server has moved. The worker finishes pairing if the sign-in tab closes the popup.
 let signIn = false;
 async function tailscale() {
-  const { hive, tailnet: t, joining, pairNote } = await chrome.storage.local.get(['hive', 'tailnet', 'joining', 'pairNote']);
+  const { hive, tailnet: t, joining, pairNote, serverChoices = [] } = await chrome.storage.local.get(['hive', 'tailnet', 'joining', 'pairNote', 'serverChoices']);
   const url = t?.state !== 'Running' && t?.url;
-  $('ts').hidden = !hive || !url;
-  $('tsLogin').onclick = () => chrome.tabs.create({ url });
+  $('server').textContent = hive ? `Saved server: ${hive.server}` : 'Connect this browser to your Hive Server.';
   if (signIn && url) { signIn = false; chrome.tabs.create({ url }); }
-  if (pairNote || joining) $('pairNote').textContent = pairNote || (url ? 'Sign in to Tailscale in the tab that opened, then this browser connects by itself.' : 'Connecting through Tailscale…');
+  $('pairNote').textContent = pairNote || (joining ? 'Connecting through Tailscale…' : '');
+  $('serverChoices').replaceChildren(...serverChoices.map(server => {
+    const button = document.createElement('button');
+    button.textContent = new URL(server).hostname;
+    button.onclick = () => join(server);
+    return button;
+  }));
 }
-chrome.storage.onChanged.addListener((ch) => { tailscale(); if (ch.hive?.newValue) show(); });
+chrome.storage.onChanged.addListener((ch) => { if (ch.hive?.newValue) location.reload(); else tailscale(); });
 tailscale();
 
-$('join').onclick = async () => {
+async function join(server = true) {
   signIn = true;
-  await chrome.storage.local.set({ joining: true, pairNote: '' });
-  tailscale();
-};
+  await chrome.storage.local.set({ joining: server, pairNote: '', serverChoices: [] });
+  await tailscale();
+}
+$('join').onclick = () => join();
 show();

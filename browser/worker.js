@@ -207,10 +207,13 @@ async function pending() {
   if (!joining || busy) return;
   busy = true;
   try {
-    await joinTailnet();
-    await chrome.storage.local.remove(['joining', 'pairNote']);
+    await joinTailnet(typeof joining === 'string' ? joining : undefined);
+    await chrome.storage.local.remove(['joining', 'pairNote', 'serverChoices']);
   } catch (e) {
-    if ((await chrome.storage.local.get('tailnet')).tailnet?.state === 'Running') {
+    if (e.servers) {
+      await chrome.storage.local.set({ serverChoices: e.servers, pairNote: e.message });
+      await chrome.storage.local.remove('joining');
+    } else if ((await chrome.storage.local.get('tailnet')).tailnet?.state === 'Running' || !e.again) {
       await chrome.storage.local.set({ pairNote: e.message });
       if (!e.again) await chrome.storage.local.remove('joining');
     }
@@ -227,11 +230,12 @@ async function pageCode(url) {
   try { u = new URL(url); } catch { return []; }
   const c = await conf();
   if (!c || !/^https?:$/.test(u.protocol) || u.origin === new URL(c.server).origin) return [];
-  const hit = cache.get(u.hostname);
+  const key = `${c.server}/${u.hostname}`;
+  const hit = cache.get(key);
   if (hit && Date.now() - hit.at < 30_000) return hit.code;
   const rules = await api(c, `/api/rules?site=${encodeURIComponent(u.hostname)}&node=browser`).catch(() => []);
   const code = rules.filter((r) => r.code).map((r) => { try { return JSON.parse(r.code); } catch { return {}; } });
-  cache.set(u.hostname, { at: Date.now(), code });
+  cache.set(key, { at: Date.now(), code });
   return code;
 }
 chrome.webNavigation.onCommitted.addListener(async ({ tabId, frameId, url }) => {

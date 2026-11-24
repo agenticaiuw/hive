@@ -12,12 +12,11 @@
   .muted { color: var(--muted); }
   [hidden] { display: none; }
 </style>
-<p id="ts" hidden><button id="tsLogin">Sign in to Tailscale</button> <span class="muted">This browser reaches your Hive Server through Tailscale.</span></p>
-<div id="pair" hidden>
-  <h1>Connect this browser to Hive</h1>
+<div id="pair">
+  <p id="server" class="muted"></p>
   <button id="join">Sign in with Tailscale</button>
-  <p class="muted">Use the same Tailscale account as your Hive Server, and this browser finds it and connects by itself.</p>
   <p id="pairNote"></p>
+  <div id="serverChoices"></div>
 </div>
 <div id="main" hidden>
   <form id="ask">

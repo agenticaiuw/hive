@@ -39,24 +39,28 @@ async function request(url, { signal, ...init }) {
 
 /** The owner's Hive Server on their tailnet, as hive-tailnet's find does: an online machine named hive (hive-1, … when
  * there's more than one) that answers /health as Hive. Null when there's none, or this browser's Tailscale isn't signed in. */
-export async function findServer() {
+export async function findServer(selected) {
   const peers = await tailnet.peers();
   if (peers?.error) throw new Error(peers.error);
-  for (const p of peers) {
+  const matches = await Promise.all(peers.map(async (p) => {
     const host = p.dnsName.replace(/\.$/, '') || p.ips[0];
-    if (!p.online || !/^hive/i.test(p.hostName) || !host) continue;
+    if (!p.online || !/^hive/i.test(p.hostName) || !host) return;
+    const server = `http://${host}`;
+    if (selected && server !== selected) return;
     try {
-      const r = await request(`http://${host}/health`, { timeout: 5000 });
-      if ((await r.json()).ok === true) return `http://${host}`;
+      const r = await request(`${server}/health`, { timeout: 5000 });
+      if (r.ok && (await r.json()).ok === true) return server;
     } catch {}
-  }
-  return null;
+  }));
+  const servers = [...new Set(matches.filter(Boolean))].sort();
+  if (servers.length > 1) throw Object.assign(new Error('Choose your Hive Server.'), { servers });
+  return servers[0] || null;
 }
 
 /** "Sign in with Tailscale": join the Hive Server on the owner's tailnet, which knows this browser is theirs by its
  * Tailscale account. */
-export async function joinTailnet() {
-  const server = await findServer();
+export async function joinTailnet(selected) {
+  const server = await findServer(selected);
   if (!server) throw Object.assign(new Error('Looking for your Hive Server… Make sure it is on and signed in to the same Tailscale account.'), { again: true });
   const brands = (navigator.userAgentData?.brands || []).map((b) => b.brand);
   const safari = !brands.length && /Safari/.test(navigator.userAgent) && !/Chrom/.test(navigator.userAgent);
@@ -68,7 +72,9 @@ export async function joinTailnet() {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `Hive answered ${r.status}`);
-  const c = { server, token: j.token, id: `browser-${crypto.randomUUID().slice(0, 8)}`, name };
-  await chrome.storage.local.set({ hive: c });
+  if (!j.token) throw new Error('Hive did not return a browser pairing.');
+  const previous = await conf();
+  const c = { server, token: j.token, id: previous?.id || `browser-${crypto.randomUUID().slice(0, 8)}`, name };
+  await chrome.storage.local.set(previous?.server === server ? { hive: c } : { hive: c, last: [] });
   return c;
 }

@@ -13,7 +13,7 @@ function hive({ peers = [], answers = {} } = {}) {
     URL, Response, AbortSignal, JSON, crypto,
     navigator: { userAgent: 'Chrome', userAgentData: { brands: [{ brand: 'Google Chrome' }] } },
     chrome: {
-      storage: { local: { set: async (o) => Object.assign(stored, o) } },
+      storage: { local: { get: async () => stored, set: async (o) => Object.assign(stored, o) } },
       runtime: {
         sendMessage: async ({ tailnet, op, args }) => {
           if (op === 'peers') return peers;
@@ -81,6 +81,25 @@ test("joining says why when there's no Hive Server yet (and tries again) or it r
     answers: { 'http://hive.example.ts.net/api/pair/tailnet': { status: 403, headers: {}, body: '{"error":"Only your own devices"}' } },
   });
   await assert.rejects(refused.lib.joinTailnet(), (e) => !e.again && /Only your own devices/.test(e.message));
+});
+
+test('reconnecting asks which server to use and preserves the browser registration', async () => {
+  const first = 'hive-1.example.ts.net';
+  const second = 'hive-2.example.ts.net';
+  const server = 'http://' + second;
+  const { lib, seen, stored } = hive({
+    peers: [peer('hive-1', first), peer('hive-2', second)],
+    answers: { [server + '/api/pair/tailnet']: { status: 200, body: '{"token":"fresh"}' } },
+  });
+  stored.hive = { id: 'browser-existing', server: 'https://legacy.example', token: 'old' };
+  await assert.rejects(lib.joinTailnet(), e => Array.from(e.servers).join(',') === ['http://' + first, server].join(','));
+  assert.equal(stored.hive.token, 'old');
+  assert.equal(seen.some(call => call[3] === 'POST'), false);
+  await lib.joinTailnet(server);
+  assert.equal(stored.hive.id, 'browser-existing');
+  assert.equal(stored.hive.server, server);
+  assert.equal(stored.hive.token, 'fresh');
+  assert.equal(seen.at(-1)[4], undefined);
 });
 
 // The worker's side of "Sign in with Tailscale": it keeps trying until Tailscale is signed in and a Hive Server answers.
