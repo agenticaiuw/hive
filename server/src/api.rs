@@ -31,14 +31,26 @@ fn valid(hive: &Hive, t: &str) -> bool {
 fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
 
 /// Whether a request is the owner's own: from one of their devices on their Tailscale account (the tailnet helper, on this
-/// computer, says so and drops any such header a device sends), or from a browser on this computer itself.
-fn owners(req: &Req) -> bool {
-    let local = req.peer.starts_with("127.0.0.1");
-    let tailnet = req.headers.get("x-hive-tailnet-owner").is_some_and(|v| v == "1");
-    // Through the helper a request is forwarded; one made here names this computer (not a name that only points here).
-    let here = !req.headers.contains_key("x-forwarded-for")
-        && req.headers.get("host").is_some_and(|h| h.starts_with("127.0.0.1:") || h.starts_with("localhost:"));
-    local && (tailnet || here)
+/// computer, says so and drops any such header a device sends), or from a browser on this computer itself. Either way it
+/// must name this Hive Server, so a web page whose own name was pointed here (DNS rebinding) is never signed in.
+fn owners(hive: &Hive, req: &Req) -> bool {
+    let host = req.headers.get("host").map(String::as_str).unwrap_or("");
+    let (name, port) = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map(|(n, p)| (n, p.trim_start_matches(':'))).unwrap_or((v6, "")),
+        None => host.split_once(':').unwrap_or((host, "")),
+    };
+    let name = name.to_ascii_lowercase();
+    if !req.peer.starts_with("127.0.0.1") { return false }
+    if req.headers.contains_key("x-forwarded-for") {
+        // Through the helper: this server's MagicDNS name, or its tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48).
+        let ours = crate::tailnet::address(&hive.state).is_some_and(|a| a.trim_start_matches("http://").trim_end_matches('/').eq_ignore_ascii_case(&name))
+            || name.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+            || name.parse::<std::net::Ipv6Addr>().is_ok_and(|ip| ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]);
+        ours && (port.is_empty() || port == "80") && req.headers.get("x-hive-tailnet-owner").is_some_and(|v| v == "1")
+    } else {
+        // Made on this computer, at this Hive's own local address.
+        ["127.0.0.1", "localhost", "::1"].contains(&name.as_str()) && hive.local.rsplit(':').next() == Some(port)
+    }
 }
 
 fn new_token(hive: &Hive, node: &str) -> String {
@@ -75,7 +87,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         // The dashboard signs in the owner's own devices and this computer by itself. Hive is plain HTTP (WireGuard encrypts
         // it inside the tailnet), so the cookie isn't Secure.
         ("POST", ["api", "login"]) => {
-            if !owners(&req) { return Res::err(401, "Open your dashboard on a device signed in to your Tailscale account, or on your Hive Server itself."); }
+            if !owners(hive, &req) { return Res::err(403, "Open your dashboard on a device signed in to your Tailscale account, or on your Hive Server itself."); }
             let t = new_token(hive, "dashboard");
             return Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"));
         }
@@ -104,7 +116,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET" | "DELETE", ["mcp", _]) => return Res::new(405, "application/json", "").header("Allow", "POST"),
         // The owner's own devices join through Tailscale: signed in to the same Tailscale account as this Hive Server.
         ("POST", ["api", "pair", "tailnet"] | ["api", "phone", "tailnet"]) => {
-            if !owners(&req) { return Res::err(403, "Only your own devices, signed in to the same Tailscale account as your Hive Server, can join it."); }
+            if !owners(hive, &req) { return Res::err(403, "Only your own devices, signed in to the same Tailscale account as your Hive Server, can join it."); }
             if parts[1] == "phone" { return phone_pairing(hive).map(|(url, token)| Res::json(&json!({ "url": url, "token": token }))).unwrap_or_else(|e| e) }
             let b = req.json();
             return Res::json(&json!({ "token": new_token(hive, &format!("{}:{}", s(&b["kind"]), s(&b["name"]))) }));
@@ -350,21 +362,34 @@ mod tests {
     }
     #[test]
     fn only_the_owners_own_devices_and_this_computer_sign_in() {
-        let hive = Hive::new(crate::db::Db::open(":memory:"), std::env::temp_dir(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let state = std::env::temp_dir().join(format!("hive-owners-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("tailnet.json"), r#"{"address":"http://hive.tail1234.ts.net"}"#).unwrap();
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), "http://127.0.0.1:8790".into());
         let request = |path: &str, peer: &str, headers: &[(&str, &str)]| Req { method: "POST".into(), path: path.into(), query: Default::default(),
             headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), body: br#"{"kind":"mac","name":"Mac"}"#.to_vec(), peer: peer.into() };
         let owner = [("host", "hive.tail1234.ts.net"), ("x-forwarded-for", "100.64.0.2"), ("x-hive-tailnet-owner", "1")];
         let shared = [("host", "hive.tail1234.ts.net"), ("x-forwarded-for", "100.64.0.3")];
+        let via = |host: &'static str| [("host", host), ("x-forwarded-for", "100.64.0.2"), ("x-hive-tailnet-owner", "1")];
         for path in ["/api/login", "/api/pair/tailnet"] {
-            assert_eq!(handle(&hive, request(path, "127.0.0.1", &owner)).status, 200, "{path}");
-            assert_eq!(handle(&hive, request(path, "127.0.0.1", &[("host", "127.0.0.1:8790")])).status, 200, "{path}");
-            assert_ne!(handle(&hive, request(path, "127.0.0.1", &shared)).status, 200, "a tailnet device that isn't the owner's");
-            assert_ne!(handle(&hive, request(path, "127.0.0.1", &[("host", "elsewhere.example:8790")])).status, 200, "a name pointed at this computer");
-            assert_ne!(handle(&hive, request(path, "192.0.2.1", &owner[2..])).status, 200, "the header from anywhere but the helper");
+            for ok in [via("hive.tail1234.ts.net"), via("HIVE.tail1234.ts.net:80"), via("100.101.1.2"), via("[fd7a:115c:a1e0::1]")] {
+                assert_eq!(handle(&hive, request(path, "127.0.0.1", &ok)).status, 200, "{path} {ok:?}");
+            }
+            for here in ["127.0.0.1:8790", "localhost:8790", "[::1]:8790"] {
+                assert_eq!(handle(&hive, request(path, "127.0.0.1", &[("host", here)])).status, 200, "{path} {here}");
+            }
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &shared)).status, 403, "a tailnet device that isn't the owner's");
+            // DNS rebinding: a foreign name pointed at this computer or at the server's tailnet address.
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &via("evil.example"))).status, 403, "{path}");
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &via("hive.other.ts.net"))).status, 403, "{path}");
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &[("host", "elsewhere.example:8790")])).status, 403, "{path}");
+            assert_eq!(handle(&hive, request(path, "127.0.0.1", &[("host", "127.0.0.1:9999")])).status, 403, "another port here");
+            assert_eq!(handle(&hive, request(path, "192.0.2.1", &owner[2..])).status, 403, "the header from anywhere but the helper");
         }
         let login = handle(&hive, request("/api/login", "127.0.0.1", &owner));
         let cookie = &login.headers.iter().find(|(k, _)| k == "Set-Cookie").unwrap().1;
         let t = cookie.trim_start_matches("hive=").split(';').next().unwrap();
         assert!(valid(&hive, t) && !valid(&hive, "nope") && !valid(&hive, ""));
+        std::fs::remove_dir_all(state).ok();
     }
 }
