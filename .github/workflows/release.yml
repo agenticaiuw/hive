@@ -132,7 +132,9 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f latest && git push -f origin latest
+          # Only the release's source archives follow the tag. GitHub refuses this token a tag move across changed workflow
+          # files, and that mustn't stop the downloads.
+          git tag -f latest && git push -f origin latest || echo "::warning::the latest tag stays where it was"
           gh release view latest > /dev/null 2>&1 || gh release create latest --title "Hive" --notes "Built from main on every push."
           gh release upload latest out/* --clobber
           echo "${GITHUB_SHA::12}" > version && gh release upload latest version --clobber
