@@ -32,8 +32,8 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
             "js": s("JavaScript run on the page after it loads; may be empty.") }), &["rule", "css", "js"]));
     }
     if nodes.iter().any(|n| n == "hive") {
-        t.push(tool("reinstall", "After you've committed a change to Hive's code: rebuild and restart Hive on the VM and push it to GitHub \
-            (devices update to GitHub's build of it). Returns the build output if it fails.", json!({}), &[]));
+        t.push(tool("reinstall", "After you've committed a change to Hive's code: rebuild and restart this Hive from its checkout, \
+            keeping the change here (devices stay on GitHub's build). Returns the build output if it fails.", json!({}), &[]));
     }
     t
 }

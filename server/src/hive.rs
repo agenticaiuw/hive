@@ -319,7 +319,7 @@ impl Hive {
     // ---- agents ----
 
     fn instructions(&self, task: &Value) -> String {
-        let nodes = list(&task["nodes"]);
+        let nodes = self.task_kinds(task);
         let req = self.db.get("select * from requests where id=?", args!(task["request_id"].clone())).unwrap_or(json!({}));
         let ctx: Value = serde_json::from_str(&s(&req["context"])).unwrap_or(json!({}));
         let mut t = format!("{AGENT}\n\nYour task: #{} {}\nThe owner's words: \"{}\"\nThe whole request (from {}): {}\n",
@@ -337,10 +337,9 @@ impl Hive {
         match &self.repo {
             Some(repo) => {
                 t += VM_NOTES;
-                if nodes.iter().any(|n| n == "hive") {
-                    t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. \
-                        Commit with a clear message, then call reinstall.", repo.display());
-                }
+                t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. Commit with a clear \
+                    message, then call reinstall. Your commits stay on this Hive, the owner's own: push one to GitHub (git push origin \
+                    HEAD:main) only when the owner's own words say it should be a feature for everyone.", repo.display());
             }
             None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
                 with the dashboard and nodes) are in {}.", self.state.join("files").display()),
@@ -355,7 +354,7 @@ impl Hive {
         let Some(task) = self.db.get("select * from tasks where id=?", args!(task_id)) else { return };
         let level = s(&task["level"]);
         let (_, model, effort) = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]);
-        let nodes = list(&task["nodes"]);
+        let nodes = self.task_kinds(&task);
         let on_claude = matches!(self.engine, Engine::Claude { .. });
         let agent = self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
             args!(task_id, if on_claude { CLAUDE_AGENT } else { "codex" }, short(&s(&task["title"]), 60), now(), now()));
@@ -586,6 +585,15 @@ impl Hive {
         k
     }
 
+    /// The devices a task's agent gets: the task's own, plus the owner's Mac and (on a Hive with a checkout) Hive's own code, its
+    /// way around a technical problem.
+    fn task_kinds(&self, task: &Value) -> Vec<String> {
+        let mut kinds = list(&task["nodes"]);
+        let extra = if self.repo.is_some() { &["mac", "hive"][..] } else { &["mac"][..] };
+        for k in extra { if !kinds.iter().any(|n| n == k) { kinds.push(k.to_string()); } }
+        kinds
+    }
+
     /// Every tool a task on these devices gets: the cloud's, then each device's (the most recently seen device of a kind wins).
     fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
         let mut out: Vec<Value> = tools::cloud(kinds);
@@ -718,7 +726,7 @@ impl Hive {
         let task = self.db.get("select t.* from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).unwrap_or(json!({}));
         let tid = task["id"].as_i64().unwrap_or(0);
         let tools = || {
-            let mut t: Vec<Value> = self.tools_for(&list(&task["nodes"])).iter().map(tools::for_mcp).collect();
+            let mut t: Vec<Value> = self.tools_for(&self.task_kinds(&task)).iter().map(tools::for_mcp).collect();
             t.push(crate::claude::end_turn());
             t
         };
@@ -858,7 +866,9 @@ keep going. You heard the owner in context, so you write what follows from their
 (always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \
 that's truly separate from yours becomes a task (the task tool). Never send a message \
 as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
-sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password). Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password). A technical \
+problem is yours to solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and keyboard) is your extra pair of \
+hands, and when it's Hive itself that falls short, improve Hive's own code. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
 
 /// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
 const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \
