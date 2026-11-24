@@ -48,6 +48,7 @@ extern "C" {
     fn CGEventPostToPid(pid: i32, event: Ref);
     fn CGEventPost(tap: u32, event: Ref);
     fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Ref;
+    fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGSMainConnectionID() -> i32;
     fn CGSCopySpacesForWindows(connection: i32, mask: i32, windows: Ref) -> Ref;
 }
@@ -264,8 +265,14 @@ pub fn screenshot(app: &str) -> Result<Value, String> {
         Target::App { window, size, .. } => (vec!["-x".to_string(), "-o".into(), "-l".into(), window.to_string()], size.x),
         Target::Mac => (vec!["-x".to_string(), "-m".into()], screen_size().0),
     };
-    let ok = Command::new("screencapture").args(&args).args(["-t", "jpg", &p]).status().map(|s| s.success()).unwrap_or(false);
-    if !ok { return Err("screencapture failed (Hive needs the Screen Recording permission)".into()); }
+    let out = Command::new("screencapture").args(&args).args(["-t", "jpg", &p]).output().map_err(|e| e.to_string())?;
+    if !out.status.success() || !file.exists() {
+        // Say what really went wrong: a missing permission is only one cause, and asking the owner for it otherwise sends them on a chase.
+        if !unsafe { CGPreflightScreenCaptureAccess() } { return Err("Hive doesn't have the Screen Recording permission on this Mac".into()); }
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let of = if what.is_empty() { "the screen".to_string() } else { what.clone() };
+        return Err(format!("screencapture couldn't capture {of} ({}); Hive has the Screen Recording permission", if why.is_empty() { "it gave no reason" } else { &why }));
+    }
     // Retina captures are 2x; shrink to points so the image's pixels are the coordinates the other tools take.
     Command::new("sips").args(["--resampleWidth", &(width as i64).to_string(), &p]).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
     let data = std::fs::read(&file).map_err(|e| e.to_string())?;
