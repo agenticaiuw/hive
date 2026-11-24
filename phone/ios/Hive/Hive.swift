@@ -2,8 +2,9 @@ import UIKit
 import WebKit
 
 /// Hive, the iPhone app the owner uses: the paired Hive's dashboard, signed in with the phone's own key
-/// (Pairing.dashboard, the server gives it a dashboard token of its own). Above it, how it stands, with Tailscale's
-/// sign-in when its node (hive-app) needs it. Hive Phone, the runner, does the phone's automation on its own.
+/// (Pairing.dashboard, the server gives it a dashboard token of its own). Setting it up is signing in with Tailscale:
+/// its node (hive-app) then finds the owner's Hive Server and gets the pairing (TailnetPairing). Above the dashboard,
+/// how it stands. Hive Phone, the runner, does the phone's automation on its own.
 @main
 final class App: UIResponder, UIApplicationDelegate, UIWindowSceneDelegate {
     var window: UIWindow?
@@ -33,7 +34,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     private var shown: URL?
     private var pairing = Pairing.load()
     private var failed = false
-    private let watch = PairingWatch()
+    private let watch = PairingWatch(), auto = TailnetPairing()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -41,7 +42,7 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
         status.numberOfLines = 0
         status.font = .preferredFont(forTextStyle: .footnote)
         status.textColor = .secondaryLabel
-        signIn.setTitle("Sign in to Tailscale", for: .normal)
+        signIn.setTitle("Sign in with Tailscale", for: .normal)
         signIn.addAction(UIAction { _ in if let u = Tailnet.shared.loginURL { UIApplication.shared.open(u) } }, for: .touchUpInside)
         reload.setTitle("Reload", for: .normal)
         reload.addAction(UIAction { [weak self] _ in self?.shown = nil; self?.refresh() }, for: .touchUpInside)
@@ -58,16 +59,21 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
             bar.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -16),
         ])
         NotificationCenter.default.addObserver(forName: Tailnet.changed, object: nil, queue: .main) { [weak self] _ in self?.refresh() }
-        // Unpaired, or its Hive didn't answer: look at the clipboard whenever it changes (timers stop in the background).
+        // Unpaired, or its Hive Server didn't answer: look for a pairing, on the tailnet and on the clipboard (timers stop
+        // in the background).
+        let adopt = { [weak self] (found: Pairing) in
+            guard let self, self.pairing == nil || self.failed else { return }
+            self.pairing = found
+            self.failed = false
+            self.shown = nil
+            self.refresh()
+        }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self, self.pairing == nil || self.failed else { return }
-            self.watch.look { found in
-                self.pairing = found
-                self.failed = false
-                self.shown = nil
-                self.refresh()
-            }
+            self.auto.look(adopt)
+            self.watch.look(adopt)
         }
+        if pairing == nil { Tailnet.shared.start() }
         refresh()
     }
 
@@ -101,10 +107,14 @@ final class Dashboard: UIViewController, WKNavigationDelegate {
     }
 
     private var summary: String {
-        guard let p = pairing else {
-            return "Not paired yet. On your Hive Server's dashboard, Nodes → Connect an iPhone copies a pairing; Hive and Hive Phone each pick it up from the clipboard."
-        }
         let t = Tailnet.shared
+        guard let p = pairing else {
+            let lead = t.running ? "Signed in to Tailscale. Looking for your Hive Server there (on the same Tailscale account)…" :
+                "Sign in with Tailscale (the same account as your Hive Server). Hive and Hive Phone are each their own device on " +
+                "Tailscale (hive-app, hive-phone), so each signs in once: Hive here, Hive Phone in Safari when you open it."
+            return lead + "\nA Hive Server not on Tailscale (a cloud VM): on its dashboard, Nodes → Connect an iPhone copies a " +
+                "pairing; Hive and Hive Phone each pick it up from the clipboard."
+        }
         if p.tailnet && !t.running {
             return t.loginURL != nil ? "Your Hive Server is on your tailnet: sign Hive in to Tailscale to reach it." :
                 t.state.hasPrefix("Tailscale didn't") ? t.state : "Starting Tailscale…"

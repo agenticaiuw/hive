@@ -1,9 +1,10 @@
 import Foundation
 import UIKit
 
-/// The pairing both iPhone apps take from the dashboard's "Connect an iPhone": "hive-phone:" + base64url(JSON {url, token}),
-/// the server's phone WebSocket and the phone's key. Each app keeps its own copy in Documents/phone-relay.json (they can't
-/// share a folder unsigned), so the owner's one copy has to reach both.
+/// The pairing both iPhone apps hold: the server's phone WebSocket and the phone's key. Each app gets it from the Hive
+/// Server over Tailscale (TailnetPairing), or else from the dashboard's "Connect an iPhone", which copies "hive-phone:" +
+/// base64url(JSON {url, token}). Each app keeps its own copy in Documents/phone-relay.json (they can't share a folder
+/// unsigned), so each finds it, or the one copied pairing has to reach both.
 struct Pairing: Equatable {
     static let prefix = "hive-phone:"
     static var saved: URL { URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/phone-relay.json") }
@@ -52,6 +53,44 @@ struct Pairing: Equatable {
     func save() {
         let json = try? JSONSerialization.data(withJSONObject: ["url": url.absoluteString, "token": token])
         try? json?.write(to: Pairing.saved, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+}
+
+/// Pairing with no link, for the owner's own devices: once this app's node is signed in to Tailscale, it finds the Hive
+/// Server among its peers (Tailnet.hives, then GET /health) and asks it for the phone's pairing. The server gives it only
+/// to a device on the same Tailscale account as itself; a Hive Server on a cloud VM isn't on Tailscale, and the
+/// clipboard is the way there.
+final class TailnetPairing {
+    private var busy = false, last = Date.distantPast
+
+    /// Tries every 10 seconds while it's asked to, once the node runs.
+    func look(_ found: @escaping (Pairing) -> Void) {
+        guard !busy, Tailnet.shared.running, let proxy = Tailnet.shared.proxy, last.timeIntervalSinceNow < -10 else { return }
+        let hosts = Tailnet.hives(in: Tailnet.shared.status)
+        guard !hosts.isEmpty else { return }
+        busy = true
+        last = Date()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 8
+        cfg.proxyConfigurations = [proxy]
+        let session = URLSession(configuration: cfg)
+        Task {
+            var pairing: Pairing?
+            for host in hosts where pairing == nil {
+                guard let base = URL(string: "http://\(host)"),
+                      let (h, _) = try? await session.data(from: base.appendingPathComponent("health")),
+                      (try? JSONSerialization.jsonObject(with: h) as? [String: Any])?["ok"] as? Bool == true else { continue }
+                var r = URLRequest(url: base.appendingPathComponent("api/phone/tailnet"))
+                r.httpMethod = "POST"
+                guard let (b, res) = try? await session.data(for: r), (res as? HTTPURLResponse)?.statusCode == 200 else { continue }
+                pairing = Pairing.checked(try? JSONSerialization.jsonObject(with: b))
+            }
+            session.invalidateAndCancel()
+            await MainActor.run {
+                self.busy = false
+                if let pairing { pairing.save(); found(pairing) }
+            }
+        }
     }
 }
 

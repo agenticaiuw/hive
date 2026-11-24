@@ -1,10 +1,10 @@
 import Foundation
 import Network
 
-/// Tailscale inside each iPhone app (tailscale/libtailscale, built by build.sh), for a Hive at home on the owner's tailnet
-/// (its address ends in .ts.net): the app reaches it through its node's local SOCKS5 proxy, so the iPhone needs neither
-/// the Tailscale app nor a VPN. Each app is its own node (`hostname`), since apps can't share one; its keys stay in the
-/// app's container, so the owner signs each in once, in Safari.
+/// Tailscale inside each iPhone app (tailscale/libtailscale, built by build.sh), for a Hive Server at home on the owner's
+/// tailnet: the app finds it there (TailnetPairing) and reaches it through its node's local SOCKS5 proxy, so the iPhone
+/// needs neither the Tailscale app nor a VPN. Each app is its own node (`hostname`), since apps can't share one; its keys
+/// stay in the app's container, so the owner signs each in once, in Safari.
 final class Tailnet {
     static let shared = Tailnet()
     /// Its name on the tailnet, set before start: hive-phone (Hive Phone) or hive-app (Hive).
@@ -15,6 +15,8 @@ final class Tailnet {
     private(set) var state = ""
     private(set) var loginURL: URL?
     private(set) var proxy: ProxyConfiguration?
+    /// The node's last status (ipnstate.Status, as LocalAPI's /localapi/v0/status serves it), with its peers.
+    private(set) var status: [String: Any] = [:]
     private var sd: Int32 = -1
     private var polling = false
 
@@ -52,6 +54,7 @@ final class Tailnet {
             let proxy = state == "Running" && needProxy ? Tailnet.loopback(s) : nil
             DispatchQueue.main.async {
                 self.polling = false
+                self.status = st
                 self.update(state, state == "Running" ? nil : login, proxy)
             }
         }
@@ -63,6 +66,20 @@ final class Tailnet {
         loginURL = login
         if let proxy { self.proxy = proxy }
         if before != (self.state, loginURL, running) { NotificationCenter.default.post(name: Tailnet.changed, object: nil) }
+    }
+
+    /// The peers that may be the owner's Hive Server, as hosts to try: online, named hive-something (as Hive Server names
+    /// its node), and not one of these iPhone apps' own nodes.
+    static func hives(in status: [String: Any]) -> [String] {
+        let peers = (status["Peer"] as? [String: Any] ?? [:]).values.compactMap { $0 as? [String: Any] }
+        return peers.compactMap { p -> (String, String)? in
+            let name = (p["HostName"] as? String ?? "").lowercased()
+            guard p["Online"] as? Bool == true, name.hasPrefix("hive"), !name.hasPrefix("hive-app"), !name.hasPrefix("hive-phone") else { return nil }
+            var host = p["DNSName"] as? String ?? ""
+            if host.hasSuffix(".") { host.removeLast() }
+            if host.isEmpty { host = (p["TailscaleIPs"] as? [String])?.first ?? "" }
+            return host.isEmpty ? nil : (name, host)
+        }.sorted { $0.0 < $1.0 }.map { $0.1 }
     }
 
     /// The node's SOCKS5 proxy onto the tailnet (user "tsnet", a random password), as URLSession and WebKit take it.

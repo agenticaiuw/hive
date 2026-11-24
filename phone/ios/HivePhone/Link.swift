@@ -4,8 +4,8 @@ import Foundation
 /// takes its phone calls ({id, method, path, body}) and answers each ({id, status, body}) with Runner, in this process;
 /// nothing can reach in. A Hive on a tailnet (*.ts.net) is dialled through Tailscale inside the app (Tailnet.swift).
 ///
-/// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it watches the clipboard for a
-/// pairing (Pairing.swift). A connected phone never reads it.
+/// While Hive Phone isn't connected (unpaired, refused, or its Hive is gone or moved) it looks for a pairing
+/// (Pairing.swift): from the Hive Server on the owner's tailnet, or from the clipboard. A connected phone never reads it.
 final class Link: NSObject, URLSessionWebSocketDelegate {
     static let shared = Link()
     static let protocolVersion = 1
@@ -16,7 +16,7 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
     private var failing = false, retry = 0
-    private let watch = PairingWatch()
+    private let watch = PairingWatch(), auto = TailnetPairing()
 
     static var version: String {
         let v = Bundle.main.object(forInfoDictionaryKey: "HiveVersion") ?? Bundle(for: Link.self).object(forInfoDictionaryKey: "HiveVersion")
@@ -43,22 +43,28 @@ final class Link: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    /// Unpaired: Tailscale first (its sign-in opens in Safari, HivePhone.testRun), then the Hive Server on it, with the
+    /// clipboard alongside. Failing: either may bring a new pairing.
     private func lookForPairing() {
         guard pairing == nil || failing else { return }
-        watch.look { [weak self] found in
-            guard let self else { return }
-            self.pairing = found
-            self.refused = false
-            self.failing = false
-            self.retry = 0
-            let old = self.socket
-            self.socket = nil
-            self.connected = false
-            old?.cancel(with: .goingAway, reason: nil)
-            self.session?.invalidateAndCancel()
-            self.session = nil
-            self.connect()
-        }
+        if pairing == nil { Tailnet.shared.start() }
+        auto.look { [weak self] in self?.adopt($0) }
+        watch.look { [weak self] in self?.adopt($0) }
+    }
+
+    private func adopt(_ found: Pairing) {
+        guard pairing == nil || failing else { return }
+        pairing = found
+        refused = false
+        failing = false
+        retry = 0
+        let old = socket
+        socket = nil
+        connected = false
+        old?.cancel(with: .goingAway, reason: nil)
+        session?.invalidateAndCancel()
+        session = nil
+        connect()
     }
 
     private func connect() {

@@ -57,6 +57,18 @@ final class HivePhone: XCTestCase {
         XCTAssertEqual(p?.dashboard.absoluteString.hasPrefix("https://hive.example.ts.net/#key="), true)
         XCTAssertNil(Pairing.from("hive-phone:e30"))
 
+        // Finding the Hive Server among the node's peers (ipnstate.Status, as /localapi/v0/status has it).
+        let status = try JSONSerialization.jsonObject(with: Data(#"""
+            {"BackendState": "Running", "Peer": {
+              "nodekey:a": {"HostName": "hive", "DNSName": "hive.tail1234.ts.net.", "TailscaleIPs": ["100.101.1.2"], "Online": true},
+              "nodekey:b": {"HostName": "hive-app", "DNSName": "hive-app.tail1234.ts.net.", "Online": true},
+              "nodekey:c": {"HostName": "hive-old", "DNSName": "", "TailscaleIPs": ["100.101.1.3"], "Online": true},
+              "nodekey:d": {"HostName": "hive-2", "DNSName": "hive-2.tail1234.ts.net.", "Online": false},
+              "nodekey:e": {"HostName": "laptop", "DNSName": "laptop.tail1234.ts.net.", "Online": true}}}
+            """#.utf8)) as? [String: Any] ?? [:]
+        XCTAssertEqual(Tailnet.hives(in: status), ["hive.tail1234.ts.net", "100.101.1.3"])
+        XCTAssertNotNil(Pairing.checked(["url": "ws://hive.tail1234.ts.net/phone/device", "token": String(repeating: "t", count: 40)]))
+
         let sid = call("GET", "/status")["sessionId"] as? String ?? ""
         XCTAssertFalse(sid.isEmpty)
         let png = Data(base64Encoded: call("GET", "/screenshot")["value"] as? String ?? "") ?? Data()
@@ -97,7 +109,7 @@ final class HivePhone: XCTestCase {
         // The Hive app (build.sh test installs it): it starts unpaired, on its pairing screen.
         let hive = XCUIApplication(bundleIdentifier: "app.hive")
         hive.activate()
-        XCTAssertTrue(hive.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Not paired'")).firstMatch.waitForExistence(timeout: 10),
+        XCTAssertTrue(hive.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Sign in with Tailscale'")).firstMatch.waitForExistence(timeout: 10),
                       "the Hive app didn't show its pairing screen")
         XCTAssertEqual(front(), "app.hive")
         shot("Hive app")
