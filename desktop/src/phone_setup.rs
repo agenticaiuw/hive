@@ -37,9 +37,19 @@ pub fn start(c: &hive_protocol::Conf) {
         // Keep a newly created identity while a temporary cloud or USB failure
         // is retried, rather than repeatedly asking the device to pair.
         let mut pending = HashMap::<String, Vec<u8>>::new();
+        // Why each plugged-in iPhone's setup hasn't finished, said once per change instead of retried silently.
+        let mut said = HashMap::<String, String>::new();
+        let mut say = |device: &str, why: String| {
+            if said.get(device) != Some(&why) { eprintln!("iPhone setup: {why}"); said.insert(device.to_string(), why); }
+        };
         loop {
             let devices = runtime
                 .block_on(async { tokio::time::timeout(Duration::from_secs(5), devices()).await });
+            match &devices {
+                Ok(Err(e)) => say("", format!("couldn't list the iPhones plugged into this Mac: {e}")),
+                Err(_) => say("", "listing the iPhones plugged into this Mac timed out".into()),
+                Ok(Ok(found)) => say("", format!("{} iPhone(s) plugged in", found.len())),
+            }
             if let Ok(Ok(devices)) = devices {
                 complete.retain(|id| devices.contains(id));
                 for device in devices {
@@ -62,12 +72,13 @@ pub fn start(c: &hive_protocol::Conf) {
                                 .is_err()
                                 || bytes.len() > 16384
                             {
+                                say(&device, "Hive Server's saved pairing for this iPhone couldn't be read".into());
                                 continue;
                             }
                             Some(bytes)
                         }
                         Err(ureq::Error::Status(404, _)) => None,
-                        Err(_) => continue,
+                        Err(e) => { say(&device, format!("couldn't ask Hive Server for this iPhone's pairing: {e}")); continue }
                     };
                     let credential = match credential.or_else(|| pending.get(&device).cloned()) {
                         Some(bytes) => bytes,
@@ -81,8 +92,10 @@ pub fn start(c: &hive_protocol::Conf) {
                                 })
                                 .await
                             });
-                            let Ok(Ok(bytes)) = identity else {
-                                continue;
+                            let bytes = match identity {
+                                Ok(Ok(bytes)) => bytes,
+                                Ok(Err(e)) => { say(&device, format!("couldn't pair with this iPhone: {e} (unlock it and tap Trust)")); continue }
+                                Err(_) => { say(&device, "pairing with this iPhone timed out (unlock it and tap Trust)".into()); continue }
                             };
                             pending.insert(device.clone(), bytes.clone());
                             bytes
@@ -93,11 +106,10 @@ pub fn start(c: &hive_protocol::Conf) {
                         .set("Authorization", &format!("Bearer {token}"))
                         .set("Content-Type", "application/x-plist")
                         .send_bytes(&credential);
-                    let Ok(response) = response else {
-                        continue;
-                    };
-                    let Ok(relay) = response.into_string() else {
-                        continue;
+                    let relay = match response.map(|r| r.into_string()) {
+                        Ok(Ok(relay)) => relay,
+                        Ok(Err(e)) => { say(&device, format!("Hive Server's answer couldn't be read: {e}")); continue }
+                        Err(e) => { say(&device, format!("couldn't save this iPhone's pairing on Hive Server: {e}")); continue }
                     };
                     let installed = runtime.block_on(async {
                         tokio::time::timeout(
@@ -106,9 +118,14 @@ pub fn start(c: &hive_protocol::Conf) {
                         )
                         .await
                     });
-                    if matches!(installed, Ok(Ok(()))) {
-                        complete.insert(device.clone());
-                        pending.remove(&device);
+                    match installed {
+                        Ok(Ok(())) => {
+                            say(&device, "done: Hive on this iPhone can turn on phone control".into());
+                            complete.insert(device.clone());
+                            pending.remove(&device);
+                        }
+                        Ok(Err(e)) => say(&device, format!("couldn't put the pairing into Hive on this iPhone: {e} (is Hive installed on it?)")),
+                        Err(_) => say(&device, "putting the pairing into Hive on this iPhone timed out".into()),
                     }
                 }
             }
@@ -139,12 +156,16 @@ async fn device(udid: &str) -> Result<UsbmuxdDevice> {
         .ok_or("iPhone unplugged")?)
 }
 
+const DOCS: &str = "/Documents";
+
 async fn documents(udid: &str) -> Result<AfcClient> {
     let provider = device(udid)
         .await?
         .to_provider(UsbmuxdAddr::default(), "Hive");
     let house = HouseArrestClient::connect(&provider).await?;
-    Ok(house.vend_documents("app.hive.xctrunner").await?)
+    // The app's whole container: iOS refuses "documents" to Hive (afc: Permission denied), and a development-signed app's
+    // container is open to the computer that set it up. Files go in its Documents folder (DOCS).
+    Ok(house.vend_container("app.hive.xctrunner").await?)
 }
 
 /// Read an already installed identity before making a new one. An unreadable
@@ -152,7 +173,7 @@ async fn documents(udid: &str) -> Result<AfcClient> {
 async fn installed_identity(udid: &str) -> Result<Option<Vec<u8>>> {
     let mut docs = documents(udid).await?;
     if !docs
-        .list_dir("/")
+        .list_dir(DOCS)
         .await?
         .iter()
         .any(|name| name == "developer-pairing.plist")
@@ -160,7 +181,7 @@ async fn installed_identity(udid: &str) -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     let mut file = docs
-        .open("developer-pairing.plist", AfcFopenMode::RdOnly)
+        .open(format!("{DOCS}/developer-pairing.plist"), AfcFopenMode::RdOnly)
         .await?;
     let bytes = file.read_entire().await?;
     file.close().await?;
@@ -207,11 +228,11 @@ async fn install(udid: &str, identity: &[u8], relay: &[u8]) -> Result<()> {
         ("developer-pairing.plist", identity),
         ("phone-relay.json", relay),
     ] {
-        let temporary = format!(".{name}.hive-setup");
+        let temporary = format!("{DOCS}/.{name}.hive-setup");
         let mut file = docs.open(&temporary, AfcFopenMode::WrOnly).await?;
         file.write_entire(bytes).await?;
         file.close().await?;
-        docs.rename(&temporary, name).await?;
+        docs.rename(&temporary, &format!("{DOCS}/{name}")).await?;
     }
     Ok(())
 }

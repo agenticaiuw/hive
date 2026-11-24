@@ -197,22 +197,28 @@ pub unsafe extern "C" fn hive_mount_ddi(
     let (Ok(identity), Ok(assets)) = strings else {
         return Failure::Arguments as i32;
     };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return Failure::Runtime as i32;
-    };
-    match runtime.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(300),
-            ensure_mounted(port, Path::new(identity), Path::new(assets), cryptex),
-        )
-        .await
-    }) {
-        Ok(Ok(())) => 0,
-        Ok(Err(error)) => error as i32,
-        Err(_) => Failure::Timeout as i32,
+    let (identity, assets) = (identity.to_owned(), assets.to_owned());
+    // Its own thread with a desktop-sized stack: iOS gives the background thread that calls this 512 KB, and the
+    // userspace TCP stack under the mount overflows it (EXC_BAD_ACCESS at the stack's guard page).
+    let mount = std::thread::Builder::new().stack_size(16 << 20).spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return Failure::Runtime as i32;
+        };
+        match runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(300),
+                ensure_mounted(port, Path::new(&identity), Path::new(&assets), cryptex),
+            )
+            .await
+        }) {
+            Ok(Ok(())) => 0,
+            Ok(Err(error)) => error as i32,
+            Err(_) => Failure::Timeout as i32,
+        }
+    });
+    match mount.map(|t| t.join()) {
+        Ok(Ok(code)) => code,
+        _ => Failure::Runtime as i32,
     }
 }
 
