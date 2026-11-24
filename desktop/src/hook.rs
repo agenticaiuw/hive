@@ -62,7 +62,7 @@ pub fn rule(args: &[String]) -> Result<(), String> {
 }
 
 fn post(path: &str, body: &Value) -> Result<Value, String> {
-    let c = crate::tailnet::load().ok_or("This computer isn't paired with Hive.")?;
+    let c = crate::tailnet::load().ok_or("This computer hasn't joined a Hive yet: open the Hive app.")?;
     match hive_protocol::call(&c, "POST", path, Some(body), 30)? {
         (200, v) => Ok(v),
         (_, v) => Err(v["error"].as_str().unwrap_or("Hive refused").to_string()),

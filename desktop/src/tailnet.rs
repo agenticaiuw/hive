@@ -1,4 +1,4 @@
-//! A Hive on a laptop at home lives on its owner's Tailscale network (server/src/tailnet.rs). This computer reaches it through
+//! A Hive Server lives on its owner's Tailscale network (server/src/tailnet.rs). This computer reaches it through
 //! Hive's own Tailscale helper (tailnet/, `hive-tailnet dial`), which the app runs while it's open: a plain-HTTP door on this
 //! computer (127.0.0.1:8791) that goes across the tailnet, encrypted by WireGuard. Signing in to the same Tailscale account
 //! as the Hive Server is all it takes: the app finds the server and joins it (server/src/api.rs, /api/pair/tailnet). Claude
@@ -11,17 +11,10 @@ use std::time::Duration;
 
 const DOOR: &str = "127.0.0.1:8791";
 
-/// Whether a Hive server is on a tailnet.
-pub fn on(server: &str) -> bool {
-    let host = server.split("://").nth(1).unwrap_or(server).split(['/', ':']).next().unwrap_or("");
-    // Its MagicDNS name, or its tailnet address (100.64.0.0/10) when the tailnet has MagicDNS off.
-    host.ends_with(".ts.net") || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
-}
-
-/// This computer's pairing, with the server swapped for the door when the Hive is on a tailnet.
+/// This computer's place in its Hive, with the server swapped for the door.
 pub fn load() -> Option<hive_protocol::Conf> {
     let mut c = hive_protocol::load("node")?;
-    if on(&c.server) { c.server = format!("http://{DOOR}") }
+    c.server = format!("http://{DOOR}");
     Some(c)
 }
 
@@ -83,16 +76,4 @@ fn helper() -> Result<PathBuf, String> {
     std::fs::rename(&part, &exe).map_err(|e| e.to_string())?;
     std::fs::write(&stamp, hive_protocol::DEVICES).ok();
     Ok(exe)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn knows_a_tailnet_server() {
-        assert!(super::on("https://hive.tail1234.ts.net"));
-        assert!(super::on("https://hive.tail1234.ts.net/"));
-        assert!(!super::on("https://153.66.203.47"));
-        assert!(!super::on("https://ts.net.example.com"));
-        assert!(super::on("http://100.96.39.78") && !super::on("http://100.200.1.1"));
-    }
 }
