@@ -1015,7 +1015,7 @@ impl Hive {
         // including when a connected device advertises an older tool list.
         let mac_input = node["kind"] == "mac" && matches!(name,
             "mac_screenshot" | "mac_take_over" | "mac_click" | "mac_drag" |
-            "mac_scroll" | "mac_key" | "mac_type" | "mac_type_password");
+            "mac_scroll" | "mac_key" | "mac_type" | "mac_type_password" | "mac_authenticate");
         if let Some(lock) = if mac_input { Some("input") } else { decl["lock"].as_str() } {
             self.take_lock(&format!("{} {lock}", s(&node["id"])), agent)?;
         }

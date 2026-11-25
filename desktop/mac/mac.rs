@@ -220,6 +220,47 @@ pub fn type_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reuse the credential saved by Hive's original Authentication sheet. It stays
+/// inside this process: never a tool argument/result, clipboard value or log.
+pub fn authenticate() -> Result<(), String> {
+    if !matches!(target()?, Target::Mac) { return Err("Mac authentication needs a whole-Mac handover.".into()); }
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        static kSecClass: Ref; static kSecClassGenericPassword: Ref;
+        static kSecAttrService: Ref; static kSecAttrAccount: Ref; static kSecReturnData: Ref;
+        fn SecKeychainSetUserInteractionAllowed(allowed: bool) -> i32;
+        fn SecItemCopyMatching(query: Ref, result: *mut Ref) -> i32;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: Ref;
+        fn CFDictionaryCreate(allocator: Ref, keys: *const Ref, values: *const Ref, count: isize, key_callbacks: Ref, value_callbacks: Ref) -> Ref;
+        fn CFDataGetLength(data: Ref) -> isize;
+        fn CFDataGetBytePtr(data: Ref) -> *const u8;
+    }
+    let service = NSString::from_str("local.personal-agent.authentication");
+    let account = NSString::from_str("mac");
+    let mut secret = unsafe {
+        let keys = [kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData];
+        let values = [kSecClassGenericPassword, Retained::as_ptr(&service).cast(), Retained::as_ptr(&account).cast(), kCFBooleanTrue];
+        let q = CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 4, std::ptr::null(), std::ptr::null());
+        if q.is_null() { return Err("Couldn't prepare Mac authentication.".into()); }
+        SecKeychainSetUserInteractionAllowed(false);
+        let mut data = std::ptr::null();
+        let status = SecItemCopyMatching(q, &mut data);
+        SecKeychainSetUserInteractionAllowed(true);
+        CFRelease(q);
+        if status != 0 || data.is_null() { return Err(format!("Saved Mac credential unavailable (Keychain status {status}).")); }
+        let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize).to_vec();
+        CFRelease(data);
+        bytes
+    };
+    let result = std::str::from_utf8(&secret).map_err(|_| "Saved Mac credential isn't UTF-8.".to_string())
+        .and_then(|s| if s.is_empty() { Err("Saved Mac credential is empty.".into()) } else { type_text(s) });
+    for byte in &mut secret { unsafe { std::ptr::write_volatile(byte, 0); } }
+    result
+}
+
 // CoreGraphics inherits the source's modifier state, including Command left by a
 // shortcut. Every text event must explicitly clear it, on both down and up.
 unsafe fn unicode_event(e: Ref, units: &[u16]) -> Ref {
