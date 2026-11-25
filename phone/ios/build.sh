@@ -78,6 +78,10 @@ if [ "$1" = test ]; then
   app=$out/icon/Hive.app
   rm -rf $out/icon; mkdir -p $out/icon
   ditto $smoke $app
+  # Install the real Safari package in the simulator too: compiling/signing alone
+  # doesn't catch an extension that iOS rejects at installation.
+  sh phone/ios/Safari/build.sh test
+  ditto target/HivePhone/HiveSafari.appex $app/PlugIns/HiveSafari.appex
   # A simulator has no developer disk image: what xcodebuild would take from Xcode goes in the app (lib_TestingInterop.dylib,
   # for one, which Testing.framework loads), until nothing is missing.
   dev=$(xcrun --sdk iphonesimulator --show-sdk-platform-path)/Developer

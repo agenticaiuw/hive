@@ -17,8 +17,11 @@ manifest['permissions'] = [p for p in manifest['permissions'] if p not in ('offs
 manifest['background'] = {'scripts': ['worker.js'], 'type': 'module', 'persistent': False}
 Path(sys.argv[1], 'manifest.json').write_text(json.dumps(manifest, indent=2))
 MANIFEST
-xcrun --sdk iphoneos swiftc -target arm64-apple-ios18.0 \
-  -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" -parse-as-library \
+sdk=iphoneos
+target=arm64-apple-ios18.0
+if [ "${1:-}" = test ]; then sdk=iphonesimulator; target=arm64-apple-ios18.0-simulator; fi
+xcrun --sdk "$sdk" swiftc -target "$target" \
+  -sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" -parse-as-library \
   -emit-executable -module-name HiveSafari -application-extension \
   -Xlinker -e -Xlinker _NSExtensionMain \
   phone/ios/Safari/Main.swift -o "$out/HiveSafari"
