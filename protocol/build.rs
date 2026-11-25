@@ -8,4 +8,6 @@ fn main() {
     println!("cargo:rustc-env=HIVE_DEVICES={}", git(&["log", "-1", "--format=%h", "--abbrev=12", &base, "--", ":/desktop", ":/browser", ":/protocol", ":/Cargo.lock"]));
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs/heads");
+    println!("cargo:rerun-if-changed=../.git/refs/remotes");
+    println!("cargo:rerun-if-changed=../.git/packed-refs");
 }
