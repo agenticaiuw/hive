@@ -16,7 +16,7 @@
 // same Tailscale account as the server, X-Hive-Tailnet-Device: its name).
 //
 // It says what's happening as one JSON line per change on stdout: {"login": url} until the owner signs in, {"address": url}
-// once serving, {"server": url} when `auto` found the server, {"error": text}. It
+// once serving, {"looking": text} while `auto` hasn't found the server yet, {"server": url} when it has, {"error": text}. It
 // stops when its stdin closes, so it never outlives the program that started it.
 //
 // The browser extension's Tailscale is this module too, built for the browser: wasm.go, built by wasm.sh.

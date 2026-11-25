@@ -94,12 +94,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let t = new_token(hive, "dashboard");
             return Res::json(&json!({ "ok": true })).header("Set-Cookie", &format!("hive={t}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"));
         }
-        // A phone can restore its Apple pairing identity using its own Hive key.
-        ("GET", ["phone", "bootstrap", device]) => {
-            let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
-            if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
-            return developer_identity(hive, device);
-        }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
         ("GET", ["phone", "device"]) => {
             let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
@@ -328,6 +322,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("POST", ["api", "sessions", "stream"]) => match crate::sessions::ingest(hive, &b) { Ok(v) => Res::json(&v), Err(e) => Res::err(400, &e) },
         ("GET", ["api", "inbox"]) => {
             let agent = hive.db.get("select id from agents where kind='claude' and name=?", args!(format!("claude:{}", req.q("session")))).and_then(|r| r["id"].as_i64()).unwrap_or(0);
+            // The session's hook asks on every prompt and tool call: that is how Hive knows an outside session is still working.
+            if agent > 0 { hive.external_check_in(agent); }
 
             let rows = hive.db.all("select * from inbox where agent_id=? and seen=0 order by id", args!(agent));
             hive.db.run("update inbox set seen=1 where agent_id=?", args!(agent));
@@ -446,7 +442,7 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]
-    fn developer_identity_requires_the_phones_or_a_devices_key() {
+    fn developer_identity_requires_a_devices_key() {
         let state = std::env::temp_dir().join(format!("hive-bootstrap-api-test-{}", std::process::id()));
         std::fs::create_dir_all(&state).unwrap();
         crate::private(&state.join("phone-token"), "phone-test-key");
@@ -454,13 +450,11 @@ mod tests {
         let request = |path: &str, key: &str| Req { method: "GET".into(), path: path.into(), query: Default::default(),
             headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(), body: vec![], peer: "192.0.2.10".into() };
         let device = new_token(&hive, "mac:Mac");
-        let path = "/phone/bootstrap/00008110-001A2B3C00000000";
-        assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
-        assert_eq!(handle(&hive, request(path, "phone-test-key")).status, 404);
-        assert_eq!(handle(&hive, request("/phone/bootstrap/..", "phone-test-key")).status, 400);
         let path = "/api/phone/bootstrap/00008110-001A2B3C00000000";
         assert_eq!(handle(&hive, request(path, "wrong")).status, 401);
+        assert_eq!(handle(&hive, request(path, "phone-test-key")).status, 401);
         assert_eq!(handle(&hive, request(path, &device)).status, 404);
+        assert_eq!(handle(&hive, request("/api/phone/bootstrap/..", &device)).status, 400);
         // The dashboard offers to add the iPhone the Mac asked about to Hive's iPhone build.
         assert_eq!(std::fs::read_to_string(state.join("iphones")).unwrap(), "00008110-001A2B3C00000000\n");
         std::fs::remove_dir_all(state).unwrap();

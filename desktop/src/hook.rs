@@ -56,6 +56,11 @@ fn request(event: &Value) -> Value {
         "agent": format!("claude:{}", event["session_id"].as_str().unwrap_or("")), "context": context })
 }
 
+/// What of the session goes with a prompt: its newest messages, up to CONTEXT_CHARS in all, each cut to MESSAGE_CHARS (a
+/// big tool result), so a long session never outgrows what the orchestrator can read (about a million characters).
+const CONTEXT_CHARS: usize = 200_000;
+const MESSAGE_CHARS: usize = 20_000;
+
 fn conversation(raw: &str) -> Value {
     let mut messages = Vec::new();
     for line in raw.lines() {
@@ -66,7 +71,21 @@ fn conversation(raw: &str) -> Value {
             messages.push(row["message"].clone());
         }
     }
-    json!(messages)
+    let (mut kept, mut used) = (Vec::new(), 0);
+    for m in messages.iter().rev() {
+        let text = m.to_string();
+        let m = if text.len() <= MESSAGE_CHARS { m.clone() } else {
+            let mut end = MESSAGE_CHARS;
+            while !text.is_char_boundary(end) { end -= 1; }
+            json!({ "role": m["role"], "content": format!("{}… (cut)", &text[..end]) })
+        };
+        used += text.len().min(MESSAGE_CHARS);
+        if used > CONTEXT_CHARS { break; }
+        kept.push(m);
+    }
+    if kept.len() < messages.len() { kept.push(json!({ "role": "user", "content": format!("({} earlier messages left out)", messages.len() - kept.len()) })); }
+    kept.reverse();
+    json!(kept)
 }
 
 #[cfg(test)]
@@ -90,5 +109,17 @@ mod tests {
         assert_eq!(r["agent"], "claude:source");
         assert_eq!(r["text"], "help me cancel it");
         assert_eq!(r["context"]["conversation_unavailable"], true);
+    }
+    #[test]
+    fn a_long_session_sends_only_its_newest_messages() {
+        let row = |i: usize, n: usize| json!({"type":"user","message":{"role":"user","content":format!("{i} {}", "é".repeat(n))}}).to_string();
+        let raw: Vec<String> = (0..100).map(|i| row(i, 4_000)).chain([row(100, 60_000)]).collect();
+        let m = conversation(&raw.join("\n"));
+        let text = m.to_string();
+        assert!(text.len() < CONTEXT_CHARS + 2_000, "{}", text.len());
+        let m = m.as_array().unwrap();
+        assert!(m[0]["content"].as_str().unwrap().ends_with("earlier messages left out)"));
+        assert!(m.last().unwrap()["content"].as_str().unwrap().ends_with("… (cut)"));
+        assert!(m[m.len() - 2]["content"].as_str().unwrap().starts_with("99 "));
     }
 }

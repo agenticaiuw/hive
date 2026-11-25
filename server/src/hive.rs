@@ -59,6 +59,8 @@ const CLAUDE_PLANNER: (&str, &str) = ("claude-sonnet-5-5", "low");
 /// Hive's own Claude Code agents; 'claude' is the owner's own sessions outside Hive (Claude Code, Codex, any agent with `hive mcp`),
 /// named after their request's `agent`.
 const CLAUDE_AGENT: &str = "claude-agent";
+/// The iPhone's node (phone/, run by this server); its tools share the lock "<id> touch".
+const PHONE_ID: &str = "phone-iphone";
 
 fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
 fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
@@ -98,7 +100,7 @@ impl Hive {
             let token = crate::api::random(24);
             self.db.run("delete from tokens where node='phone:iPhone'", &[]);
             self.db.run("insert into tokens(hash, node, at) values(?,?,?)", args!(crate::api::hash(&token), "phone:iPhone", now()));
-            hive_phone::start(self.state.clone(), hive_protocol::Conf { server: self.local.clone(), token, id: "phone-iphone".into() })
+            hive_phone::start(self.state.clone(), hive_protocol::Conf { server: self.local.clone(), token, id: PHONE_ID.into() })
         });
     }
 
@@ -149,7 +151,13 @@ impl Hive {
         let me = self.clone();
         std::thread::spawn(move || me.resume_working());
         let me = self.clone();
-        std::thread::spawn(move || loop { me.tick(); me.wait_until(3000, || None::<()>); });
+        // The scheduler: a new request or task starts within a moment of being saved (every save bumps), else every 3 s.
+        std::thread::spawn(move || loop {
+            me.tick();
+            let seen = *me.changed.0.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            me.wait_until(3000, || (*me.changed.0.lock().unwrap() != seen).then_some(()));
+        });
         for ev in rx {
             match ev {
                 Event::Tool(id, params) => {
@@ -1089,8 +1097,8 @@ impl Hive {
             devices.into_iter().filter(|n| selected.is_none_or(|id| n["id"] == id))
                 .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == name).map(|t| (n, t)))
         } else { self.device_for(name) }.ok_or(format!("Hive has no tool called {name}"))?;
-        // Mobile Safari and native touch share the same phone, even with two agents.
-        if node["name"] == "Safari on iPhone" { self.take_lock("iPhone touch", agent)?; }
+        // Mobile Safari and native touch share the same phone, even with two agents: Safari takes the phone node's touch lock.
+        if node["name"] == "Safari on iPhone" { self.take_lock(&format!("{PHONE_ID} touch"), agent)?; }
         // Screenshots change the Mac driver's shared target; takeover changes its
         // permission state. They must own the same lock as keyboard and mouse,
         // including when a connected device advertises an older tool list.
@@ -1235,7 +1243,7 @@ mod tests {
             Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
         hive.db.run("insert into nodes(id,kind,name,tools,seen) values('mac-t','mac','Mac','[]',?)", args!(now()));
         hive.locks.lock().unwrap().insert("mac-t input".into(), (1, now() - 1000));
-        hive.locks.lock().unwrap().insert("iPhone touch".into(), (1, now() - 1000));
+        hive.locks.lock().unwrap().insert(format!("{PHONE_ID} touch"), (1, now() - 1000));
         hive.release_all(1);
         assert_eq!(hive.locks().as_array().unwrap().iter().map(|l| l["lock"].clone()).collect::<Vec<_>>(), vec![json!("mac-t input")]);
         // The Mac answers the hand-back; then its lock goes too.
@@ -1310,7 +1318,7 @@ mod tests {
         assert_eq!(hive.db.get("select count(*) as n from calls", &[]).unwrap()["n"], 0);
         hive.tool_inner("browser_tabs", &json!({"browser":"phone-browser"}), 1, 0).unwrap_err();
         assert_eq!(hive.db.get("select node from calls", &[]).unwrap()["node"], "phone-browser");
-        assert_eq!(hive.locks()[0]["lock"], "iPhone touch");
+        assert_eq!(hive.locks()[0]["lock"], format!("{PHONE_ID} touch"));
         let kinds = hive.task_kinds(&json!({"nodes":["phone"]}));
         let tools = hive.tools_for(&kinds);
         assert!(tools.iter().any(|t| t["name"] == "browser_devices"));

@@ -2,7 +2,7 @@
 // scrubbed and its history rewritten three times (files, commit messages, then commit authors); this stops the same
 // kinds of values creeping back into any of them.
 // It checks shapes, never the values themselves, so the test holds no personal data either:
-//   - Workers are named with the placeholder subdomain (hiveCloud.mjs fills in the real one at build)
+//   - workers.dev hosts use only a placeholder subdomain, never a real one
 //   - no personal mail addresses (gmail, iCloud, a university's) beyond the public ones listed here
 //   - no real home folders in paths, and no Xcode "Created by <name>" headers
 //   - Apple private-relay addresses only as numbered fixtures

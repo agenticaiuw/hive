@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// The helper's latest word: {"login": url}, {"https": "off", "admin": url}, {"address": url} or {"error": text}.
+/// The helper's latest word: {"login": url} until the owner signs in, {"address": url} once serving, or {"error": text}.
 pub fn status(state: &Path) -> Value {
     std::fs::read(state.join("tailnet.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}))
 }
