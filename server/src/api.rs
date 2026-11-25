@@ -318,6 +318,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         ("GET", ["api", "inbox"]) => {
             let agent = hive.db.get("select id from agents where kind='claude' and name=?", args!(format!("claude:{}", req.q("session")))).and_then(|r| r["id"].as_i64()).unwrap_or(0);
+            hive.external_check_in(agent);
             let rows = hive.db.all("select * from inbox where agent_id=? and seen=0 order by id", args!(agent));
             hive.db.run("update inbox set seen=1 where agent_id=?", args!(agent));
             let tasks = hive.db.all("select id, title, status from tasks where agent_id=? and status in ('working','needs')", args!(agent));

@@ -443,7 +443,7 @@ function usageLabel(u) {
 }
 function updateTasks() {
   const board = $('#task-board'); if (!board) return;
-  const sections = taskFilter === 'Done' ? [['Done', ['done','dropped']]] : [['Needs me', ['needs']], ['Working', ['working']], ['Queued', ['open','queued']]];
+  const sections = taskFilter === 'Done' ? [['Done', ['done','dropped']]] : [['Needs me', ['needs']], ['Working', ['working']], ['Queued', ['open','queued']], ['Idle', ['idle']]];
   const html = `<div class="row task-filters">${['Active','Done'].map(f => `<button class="${f === taskFilter ? '' : 'plain'}" onclick="taskFilter='${f}';updateTasks()">${f}</button>`).join('')}</div>` + sections.map(([label, statuses]) => {
     const tasks = state.tasks.filter(t => statuses.includes(t.status));
     return `<section><h2>${label} <span class="muted">${tasks.length}</span></h2>${tasks.map(t => `<div class="card task-row"><button class="task-open" onclick="openTask(${t.id})">${esc(t.title)}<span class="muted">#${t.id}${t.agent_id ? ' · Agent #' + t.agent_id : ''}</span></button>${t.status === 'needs' ? `<div class="task-need">${esc(t.why)}<br><b>${esc(t.need)}</b></div><button class="plain" onclick="resumeTask(${t.id},this)">Resume</button>` : ''}${statuses.includes('done') ? '' : `<button class="plain" onclick="dropTask(${t.id})">Drop task</button>`}</div>`).join('') || '<p class="muted">No tasks.</p>'}</section>`;

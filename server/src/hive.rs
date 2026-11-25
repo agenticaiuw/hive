@@ -170,7 +170,20 @@ impl Hive {
         }
     }
 
+    // External sessions have no provider process here. Their hook check-ins are the
+    // only evidence of activity; keep unfinished work, but expire its running state.
+    fn expire_external_sessions(&self) {
+        self.db.run("update tasks set status='idle', updated=? where status='working' and agent_id in (select id from agents where kind='claude' and coalesce(updated,at,0)<?)", args!(now(), now()-900_000));
+        self.db.run("update agents set status='idle' where kind='claude' and status='working' and coalesce(updated,at,0)<?", args!(now()-900_000));
+    }
+
+    pub fn external_check_in(&self, agent: i64) {
+        self.db.run("update agents set status='working', updated=? where id=? and kind='claude'", args!(now(), agent));
+        self.db.run("update tasks set status='working', updated=? where agent_id=? and status='idle'", args!(now(), agent));
+    }
+
     fn tick(self: &Arc<Self>) {
+        self.expire_external_sessions();
         for r in self.db.all("select id from requests where status='new' order by id", &[]) {
             let id = r["id"].as_i64().unwrap_or(0);
             self.db.run("update requests set status='planning' where id=?", args!(id));
@@ -268,7 +281,7 @@ impl Hive {
         if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
         t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
         t += "\nOpen tasks:\n";
-        for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','queued','working','needs') order by id", &[]) {
+        for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','queued','working','needs','idle') order by id", &[]) {
             t += &format!("#{} [{}] {} (nodes {}, project {})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
         }
         t += "\nThe owner's rules:\n";
@@ -550,14 +563,15 @@ impl Hive {
         let task = self.db.get("select * from tasks where id=?", args!(task_id)).ok_or(format!("there's no task #{task_id}"))?;
         let agent = task["agent_id"].as_i64().ok_or("that task has no agent yet")?;
         self.log(agent, task_id, request, from, text);
-        if matches!(s(&task["status"]).as_str(), "needs" | "done" | "dropped") {
-            self.db.run("update tasks set status='working', why=null, need=null, updated=? where id=?", args!(now(), task_id));
-        }
         let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
         if s(&a["kind"]) == "claude" {
+            self.db.run("update tasks set status='idle', why=null, need=null, updated=? where id=? and status in ('needs','done','dropped')", args!(now(), task_id));
             self.db.run("insert into inbox(agent_id, text, at) values(?,?,?)", args!(agent, format!("From {from} about task #{task_id}: {text}"), now()));
             self.bump();
             return Ok(());
+        }
+        if matches!(s(&task["status"]).as_str(), "needs" | "done" | "dropped") {
+            self.db.run("update tasks set status='working', why=null, need=null, updated=? where id=?", args!(now(), task_id));
         }
         if a["task_id"] != task["id"] {
             self.db.run("update tasks set status='queued', updated=? where id=?", args!(now(), task_id));
@@ -584,7 +598,7 @@ impl Hive {
 
     pub fn drop_task(self: &Arc<Self>, task_id: i64) {
         let Some(task) = self.db.get("select status from tasks where id=?", args!(task_id)) else { return };
-        if !matches!(s(&task["status"]).as_str(), "open" | "queued" | "working" | "needs") { return; }
+        if !matches!(s(&task["status"]).as_str(), "open" | "queued" | "working" | "needs" | "idle") { return; }
         self.db.run("update tasks set status='dropped', updated=? where id=?", args!(now(), task_id));
         if let Some(a) = self.db.get("select a.* from agents a join tasks t on t.agent_id=a.id where t.id=? and a.task_id=t.id", args!(task_id)) {
             let thread = s(&a["thread"]);
@@ -687,11 +701,11 @@ impl Hive {
     fn finish(&self, agent: i64, task: i64, e: &Value) -> bool {
         if e["done"] == true {
             self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&e["outcome"]), now(), task));
-            self.db.run("update agents set status=case when kind='claude' then status else 'done' end, updated=? where id=?", args!(now(), agent));
+            self.db.run("update agents set status='done', updated=? where id=?", args!(now(), agent));
             self.log(agent, task, 0, "done", &s(&e["outcome"]));
         } else if !s(&e["why"]).trim().is_empty() && !s(&e["need"]).trim().is_empty() {
             self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&e["why"]), s(&e["need"]), now(), task));
-            self.db.run("update agents set status=case when kind='claude' then status else 'idle' end, updated=? where id=?", args!(now(), agent));
+            self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
             self.log(agent, task, 0, "needs you", &format!("{} Needs: {}", s(&e["why"]), s(&e["need"])));
         } else {
             return false;
@@ -1315,6 +1329,25 @@ mod tests {
             hive.start_agent(next);
             assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], next);
         }
+    }
+
+    #[test]
+    fn external_activity_expires_and_check_in_restores_unfinished_work() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let a = hive.agent_for_session("claude:old", 1);
+        hive.db.run("insert into tasks(id,agent_id,status) values(1,?,'working'),(2,?,'needs'),(3,?,'done')", args!(a,a,a));
+        hive.db.run("update agents set updated=? where id=?", args!(now()-900_001,a));
+        hive.expire_external_sessions();
+        assert_eq!(hive.db.get("select status from tasks where id=1", &[]).unwrap()["status"], "idle");
+        hive.external_check_in(a);
+        for (id,status) in [(1,"working"),(2,"needs"),(3,"done")] {
+            assert_eq!(hive.db.get("select status from tasks where id=?", args!(id)).unwrap()["status"],status);
+        }
+        hive.expire_external_sessions();
+        assert_eq!(hive.db.get("select status from tasks where id=1", &[]).unwrap()["status"], "working");
+        hive.end_task(1, &json!({"done":true,"outcome":"verified"})).unwrap();
+        assert_eq!(hive.db.get("select status from agents where id=?", args!(a)).unwrap()["status"], "done");
     }
 
     #[test]
