@@ -173,13 +173,13 @@ impl Hive {
     // External sessions have no provider process here. Their hook check-ins are the
     // only evidence of activity; keep unfinished work, but expire its running state.
     fn expire_external_sessions(&self) {
-        self.db.run("update tasks set status='idle', updated=? where status='working' and agent_id in (select id from agents where kind='claude' and coalesce(updated,at,0)<?)", args!(now(), now()-900_000));
+        self.db.run("update tasks set status='idle', updated=? where status='working' and coalesce(updated,at,0)<? and agent_id in (select id from agents where kind='claude')", args!(now(), now()-900_000));
         self.db.run("update agents set status='idle' where kind='claude' and status='working' and coalesce(updated,at,0)<?", args!(now()-900_000));
     }
 
     pub fn external_check_in(&self, agent: i64) {
         self.db.run("update agents set status='working', updated=? where id=? and kind='claude'", args!(now(), agent));
-        self.db.run("update tasks set status='working', updated=? where agent_id=? and status='idle'", args!(now(), agent));
+        self.db.run("update tasks set status='working', updated=? where agent_id=? and id=(select task_id from agents where id=?) and status in ('idle','working')", args!(now(), agent, agent));
     }
 
     fn tick(self: &Arc<Self>) {
