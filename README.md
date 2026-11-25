@@ -14,7 +14,7 @@ The club's one project: agents that use your computer, phone and browser the way
 - **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
 - **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive and pushes to GitHub, which builds and signs what every device downloads and updates to.
 
-The desktop app streams Claude Code and Codex session messages and tool activity into separate dashboard chats automatically. It reads local session transcripts, imports recent context (up to 1 MiB per existing transcript), then follows new records every two seconds while connected. Restarting resumes from acknowledged offsets. Completion records clear the running indicator; silent sessions expire after two minutes. Provider-private reasoning is not imported.
+The desktop app streams Claude Code and Codex session messages and tool activity into separate dashboard chats for sessions that explicitly created Hive tasks. Transcript imports do not create tasks. It reads local session transcripts, imports recent context (up to 1 MiB per existing transcript), then follows new records every two seconds while connected. Restarting resumes from acknowledged offsets. Completion records clear the running indicator; silent sessions expire after two minutes. Provider-private reasoning is not imported.
 
 ## Adding Hive to your agents
 

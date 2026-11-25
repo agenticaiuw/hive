@@ -157,9 +157,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
-            "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t order by id desc", &[]),
+            "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t where coalesce(t.quote,'')!='Imported session' order by id desc", &[]),
             "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
-            "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued') order by a.id desc", &[]),
+            "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where (a.kind!='claude' or exists (select 1 from tasks real where real.agent_id=a.id and coalesce(real.quote,'')!='Imported session')) and (a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued')) order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),
             "requests": hive.db.all("select * from requests order by id desc limit 30", &[]),
             "locks": hive.locks(),
@@ -378,6 +378,10 @@ mod tests {
         for status in ["working", "needs", "done", "dropped"] {
             hive.db.run("insert into tasks(title,status) values('Session',?)", args!(status));
         }
+        hive.db.run("insert into agents(id,kind,name,status) values(90,'claude','claude:imported','idle')", &[]);
+        hive.db.run("insert into tasks(title,quote,agent_id,status) values('Claude Code · app','Imported session',90,'idle')", &[]);
+        hive.db.run("insert into agents(id,kind,name,status) values(91,'claude','codex:real','idle')", &[]);
+        hive.db.run("update tasks set agent_id=91,quote='Fix the build' where id=1", &[]);
         hive.log(0, 0, 1, "owner", "Request");
         hive.log(0, 1, 1, "agent", "Session message");
         hive.log(0, 0, 1, "hive", "Routed");
@@ -397,6 +401,9 @@ mod tests {
             serde_json::from_slice::<Value>(&res.body).unwrap()
         };
         assert_eq!(get("/api/state", 0)["tasks"].as_array().unwrap().len(), 4);
+        let agents = get("/api/state",0)["agents"].as_array().unwrap().clone();
+        assert_eq!(agents.len(),1);
+        assert_eq!(agents[0]["name"],"codex:real");
         let log = get("/api/orchestrator", 0);
         assert_eq!(log.as_array().unwrap().len(), 2);
         assert_eq!(log[0]["text"], "Request");

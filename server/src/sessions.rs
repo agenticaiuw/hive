@@ -12,13 +12,10 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
     if events.len()>500 { return Err("Too many events".into()) }
     let agent=h.db.get("select * from agents where kind='claude' and name=?",args!(name));
     let aid=agent.as_ref().and_then(|a|a["id"].as_i64()).unwrap_or_else(|| h.db.run("insert into agents(kind,name,status,at,updated) values('claude',?,'idle',?,0)",args!(name,now())));
-    let task=agent.as_ref().and_then(|a|a["task_id"].as_i64()).filter(|x|*x>0).unwrap_or_else(|| {
-        let provider=if name.starts_with("codex:") {"Codex"} else {"Claude Code"};
-        let folder=b["folder"].as_str().unwrap_or("");
-        let title=format!("{} · {}",provider,folder.rsplit('/').find(|s|!s.is_empty()).unwrap_or(name));
-        let tid=h.db.run("insert into tasks(title,project,quote,status,agent_id,at,updated) values(?,?,?,'idle',?,?,0)",args!(title,folder,"Imported session",aid,now()));
-        h.db.run("update agents set task_id=? where id=?",args!(tid,aid)); tid
-    });
+    // Transcripts are session activity, not owner-created work. Keep their history,
+    // but attach it to a task only after the session explicitly saves one in Hive.
+    let task=h.db.get("select t.id from tasks t where t.agent_id=? and coalesce(t.quote,'')!='Imported session' order by t.id desc limit 1",args!(aid))
+        .and_then(|t|t["id"].as_i64()).unwrap_or(0);
     let mut writes = Vec::new();
     for e in events {
         let key=e["key"].as_u64().ok_or("Missing event offset")?;
@@ -49,8 +46,15 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
         assert_eq!(h.db.all("select * from log",&[]).len(),1);
         assert_eq!(h.db.get("select status from agents where id=?",args!(a["agent"])).unwrap()["status"],"idle");
         let mut second=b.clone();second["session"]=json!("codex:session-two");
-        let other=ingest(&h,&second).unwrap(); assert_ne!(a["task"],other["task"]);
-        assert_eq!(h.db.all("select * from log where task_id=?",args!(a["task"])).len(),1);
+        let other=ingest(&h,&second).unwrap(); assert_ne!(a["agent"],other["agent"]);
+        assert_eq!(a["task"],0);
+        assert!(h.db.all("select * from tasks",&[]).is_empty());
+        assert_eq!(h.db.all("select * from log where agent_id=?",args!(a["agent"])).len(),1);
+        let tid=h.db.run("insert into tasks(title,quote,agent_id,status) values('Repair build','fix the build',?,'done')",args!(a["agent"]));
+        let mut next=b.clone(); next["events"][0]["key"]=json!(1);
+        assert_eq!(ingest(&h,&next).unwrap()["task"],tid);
+        assert_eq!(h.db.all("select * from log where task_id=?",args!(tid)).len(),1);
+        assert_eq!(h.db.get("select status from tasks where id=?",args!(tid)).unwrap()["status"],"done");
         std::fs::remove_dir_all(state).unwrap();
     }
 }
