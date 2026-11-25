@@ -82,7 +82,7 @@ import WebKit
             self.shown = nil
             self.refresh()
             if !Tailnet.shared.running || Link.shared.pairing == nil {
-                self.showNotice("Dashboard unavailable", Link.shared.summary)
+                self.status.text = "Dashboard unavailable. \(Link.shared.summary)"
             }
         }, for: .touchUpInside)
         install.setTitle("Update Hive", for: .normal)
@@ -177,6 +177,6 @@ import WebKit
         shown = nil
         page = "failed: \(error.localizedDescription)"
         reload.setTitle("Reload", for: .normal)
-        showNotice("Couldn't load the dashboard", error.localizedDescription)
+        status.text = "Couldn't load the dashboard: \(error.localizedDescription)"
     }
 }
