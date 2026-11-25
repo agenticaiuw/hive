@@ -19,6 +19,26 @@ final class HivePhone: XCTestCase {
 
     func testRun() throws {
         try XCTSkipIf(HivePhone.smoke, "the smoke test runs instead")
+        // Starting XCTest does not authorize UI automation. Ask on every app
+        // launch, before publishing calls or touching another app. If the owner
+        // cancels Apple's sheet, returning to Hive retries without a prompt loop.
+        var retryAuthorization = true
+        let activation = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                                                object: nil, queue: .main) { _ in
+            retryAuthorization = true
+        }
+        while true {
+            if retryAuthorization {
+                retryAuthorization = false
+                Link.shared.control = "Allow phone control in Apple’s authorization prompt."
+                let authorized = HiveEnableAutomation()
+                retryAuthorization = false
+                if authorized { break }
+                Link.shared.control = "Phone control wasn’t authorized. Return to Hive to try again."
+            }
+            _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.5))
+        }
+        NotificationCenter.default.removeObserver(activation)
         // UI-test initialization can background its runner. Opening Hive ends
         // with its dashboard in front, before the server starts sending calls.
         if UIApplication.shared.applicationState != .active {
