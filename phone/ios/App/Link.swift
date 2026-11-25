@@ -201,7 +201,7 @@ import Foundation
         // XCTest pumps the run loop while waiting for input to finish. It must
         // not hold receive's main-queue block: UIKit/WebKit callbacks may need
         // that same serial queue to finish the action (including taps in Hive).
-        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, work)
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), RunLoop.Mode.common.rawValue as CFString, work)
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 
