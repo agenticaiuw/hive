@@ -50,9 +50,11 @@ pub fn device(mut conn: TcpStream, version: String, build: u64) {
         let mut told = None;
         while ours() {
             let link = crate::update(&version, build);
-            if link != told {
+            // A reconnect must also clear an update retained by the app, even
+            // when this connection has never offered one.
+            if told.as_ref() != Some(&link) {
                 tell.send(json!({ "update": link }).to_string()).ok();
-                told = link;
+                told = Some(link);
             }
             std::thread::sleep(Duration::from_secs(60));
         }
@@ -133,12 +135,17 @@ mod tests {
         let addr = l.local_addr().unwrap();
         std::thread::spawn(move || { device(l.accept().unwrap().0, "dev".into(), 0) });
         let mut phone = TcpStream::connect(addr).unwrap();
+        phone.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         while !connected() { std::thread::sleep(Duration::from_millis(10)); }
-        let caller = std::thread::spawn(|| call("GET", "/status", "", 5));
         let read = |p: &mut TcpStream| { let mut b = Vec::new(); let mut c = [0u8; 4096];
             loop { let n = p.read(&mut c).unwrap(); b.extend_from_slice(&c[..n]); if let Some(f) = parse(&b).unwrap() { return f } } };
         let send = |p: &mut TcpStream, op: u8, data: &[u8]| { let m = [9u8, 8, 7, 6]; let mut f = vec![0x80 | op, 0x80 | 126];
             f.extend((data.len() as u16).to_be_bytes()); f.extend(m); f.extend(data.iter().enumerate().map(|(k, x)| x ^ m[k % 4])); p.write_all(&f).unwrap() };
+        // Even with no update, a new connection clears the app's old offer.
+        let (_, op, update, _) = read(&mut phone);
+        assert_eq!(op, 1);
+        assert_eq!(serde_json::from_slice::<Value>(&update).unwrap(), json!({"update": null}));
+        let caller = std::thread::spawn(|| call("GET", "/status", "", 5));
         let (_, op, asked, _) = read(&mut phone);
         let asked: Value = serde_json::from_slice(&asked).unwrap();
         assert_eq!((op, asked["path"].as_str()), (1, Some("/status")));
