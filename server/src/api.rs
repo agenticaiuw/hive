@@ -156,7 +156,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
-            "tasks": hive.db.all("select t.*, (select max(id) from log where agent_id=t.agent_id and who in ('agent','done','needs you')) as latest_message from tasks t order by id desc", &[]),
+            "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t order by id desc", &[]),
             "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued') order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),

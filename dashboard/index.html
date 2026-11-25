@@ -266,7 +266,7 @@ if (['Agents', 'Past'].includes(tab)) tab = 'Sessions';
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 let boardSelection = null;
 addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' && boardSelection !== null ? sessionId(boardSelection) : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
-function openTask(id) { boardSelection = id; location.hash = 'Sessions'; }
+function openTask(id) { if (tab === 'Sessions') { openChat(id); return; } boardSelection = id; location.hash = 'Sessions'; }
 
 // Adapted from OpenAI Codex's Apache-2.0 terminal history renderer; see codex-rendering.README.md.
 function toolEntry(item) {
@@ -329,12 +329,18 @@ const badge = s => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 // Session identity stays stable as the same agent takes on more tasks.
 function agentSessions() {
   const priority = {needs: 0, working: 1, open: 1, queued: 2};
-  return [...state.tasks].sort((a,b) => (priority[a.status] ?? 3) - (priority[b.status] ?? 3) || b.id-a.id);
+  const sessions = new Map();
+  const current = new Map((state.agents || []).map(a => [a.id, a.task_id]));
+  for (const t of [...state.tasks].sort((a,b) => (priority[a.status] ?? 3) - (priority[b.status] ?? 3) || b.id-a.id)) {
+    const key = t.agent_id ? `agent-${t.agent_id}` : `task-${t.id}`;
+    if (!sessions.has(key) || current.get(t.agent_id) === t.id) sessions.set(key, t);
+  }
+  return [...sessions.values()].sort((a,b) => (priority[a.status] ?? 3) - (priority[b.status] ?? 3) || b.id-a.id);
 }
 function sessionTask(id) { return state.tasks.find(t => t.id === id); }
 function sessionId(id) { return id; }
 function taskCard(t, click = true) {
-  const unread = t.latest_message > (seen[t.agent_id || `task-${t.id}`] || 0) && chat !== t.id;
+  const unread = t.latest_message > (seen[`task-${t.id}`] || 0) && chat !== t.id;
   return `<div role="button" tabindex="0" data-session="${t.id}" title="${esc(t.title)}" aria-label="${esc(t.title)} · ${esc(t.status)}${unread ? ' · unread' : ''}" class="card item ${chat === t.id ? 'sel' : ''}" ${click ? `onclick="openChat(${t.id})"` : ''}>
     <span class="session-state ${esc(t.status)}" aria-label="${esc(t.status)}"></span><span class="session-title">${esc(t.title)}</span>${unread ? '<span class="unread" aria-label="Unread"></span>' : ''}<span class="muted">${t.agent_id ? '#' + t.agent_id : ''}</span></div>`;
 }
@@ -342,13 +348,17 @@ let seen = {};
 try { seen = JSON.parse(localStorage.getItem('hive-seen') || '{}'); } catch {}
 function markSeen() {
   const t = sessionTask(chat); if (!t) return;
-  seen[t.agent_id || `task-${t.id}`] = t.latest_message || 0;
+  seen[`task-${t.id}`] = t.latest_message || 0;
   try { localStorage.setItem('hive-seen', JSON.stringify(seen)); } catch {}
 }
 async function openChat(id) { if (id !== null) id = sessionId(id); $('.split')?.classList.remove('choosing'); if (chat === id) return; chat = id; markSeen(); chatAfter = 0; render(); }
+function chatTaskHeader() {
+  const t = sessionTask(chat); if (!t) return '';
+  return `<div class="row"><b style="flex:1;min-width:0;overflow-wrap:anywhere">Task #${t.id} · ${esc(t.title)}</b>${badge(t.status)}${['done','dropped'].includes(t.status) ? '' : `<button class="plain" onclick="dropTask(${t.id})">Drop task</button>`}</div>${t.status === 'needs' ? `<div class="task-need">${esc(t.why)}<br><b>${esc(t.need)}</b></div>` : ''}`;
+}
 function chatPane() {
   return `<div class="card"><div class="row"><b>${sessionTask(chat)?.agent_id ? `Agent #${sessionTask(chat).agent_id}` : `Task #${chat}`}</b><span class="muted usage" style="flex:1"></span><button class="plain" onclick="showContext(${chat})">Context</button></div>
-    <div id="chatlog" class="log chat-log"></div>
+    <div id="chat-task">${chatTaskHeader()}</div><div id="chatlog" class="log chat-log"></div>
     <div class="composer" data-composer="task-${chat}" style="margin-top:8px"><textarea id="msg" rows="2" placeholder="Message this agent">${esc(draft(`task-${chat}`).text)}</textarea><div class="attachments"></div><div class="row"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="msgTask(${chat})">Send</button><span class="muted" role="status"></span></div></div></div>`;
 }
 async function showContext(id) {
@@ -362,19 +372,29 @@ async function showContext(id) {
     panel.innerHTML = `<summary>Provider session context</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(context,null,2))}</pre>`;
   } catch (e) { alert(e.message || String(e)); }
 }
+function followLatest(box) {
+  box.dataset.follow = 'true';
+  box.addEventListener('scroll', () => { box.dataset.follow = String(box.scrollTop + box.clientHeight >= box.scrollHeight - 30); });
+  box.addEventListener('load', () => { if (box.dataset.follow !== 'false') box.scrollTop = box.scrollHeight; }, true);
+  document.fonts.ready.then(() => { if (box.dataset.follow !== 'false') box.scrollTop = box.scrollHeight; });
+}
 let chatLoading = false, orchestratorLoading = false, orchestratorAfter = 0;
 async function loadChat() {
   const selected = chat, box = $('#chatlog');
   if (!selected || !box || chatLoading) return;
   chatLoading = true;
   try {
+    let more;
+    do {
     const r = await api(`api/tasks/${selected}?session=1&after=${chatAfter}`);
     if (chat !== selected || box !== $('#chatlog')) return;
     const usage = $('.usage'); if (usage) usage.textContent = usageLabel(r.usage);
     markSeen();
-    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    const atEnd = box.dataset.follow !== 'false';
     for (const l of r.log) { appendLogEntry(box, l); chatAfter = l.id; }
     if (atEnd) box.scrollTop = box.scrollHeight;
+    more = r.log.length === 2000;
+    } while (more);
   } finally { chatLoading = false; }
 }
 async function loadOrchestrator() {
@@ -383,7 +403,7 @@ async function loadOrchestrator() {
   orchestratorLoading = true;
   try {
     const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
-    const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    const atEnd = box.dataset.follow !== 'false';
     for (const l of rows) {
       appendLogEntry(box, l.task_id > 0 && l.who !== 'image' ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
       orchestratorAfter = l.id;
@@ -393,18 +413,26 @@ async function loadOrchestrator() {
 }
 function updateSessions() {
   const list = $('#session-list'); if (!list) return;
+  const header = $('#chat-task'); if (header) header.innerHTML = chatTaskHeader();
   const pinned = list.firstElementChild;
   pinned.classList.toggle('sel', chat === null);
+  let needs = list.querySelector('details');
+  if (!needs) { needs = document.createElement('details'); needs.open = true; needs.innerHTML = '<summary>Needs me</summary><div class=needs-sessions></div>'; list.append(needs); }
+  const needsList = needs.lastElementChild;
   const existing = new Map(Array.from(list.querySelectorAll('[data-session]')).map(el => [Number(el.dataset.session), el]));
-  let previous = pinned;
-  for (const t of agentSessions()) {
+  let previous = needs, previousNeed = null;
+  const sessions = agentSessions();
+  needs.hidden = !sessions.some(t => t.status === 'needs');
+  for (const t of sessions) {
     let el = existing.get(t.id);
     const html = taskCard(t);
     if (!el) { const template = document.createElement('template'); template.innerHTML = html; el = template.content.firstElementChild; }
     else if (el.dataset.snapshot !== html) { const template = document.createElement('template'); template.innerHTML = html; el.replaceChildren(...template.content.firstElementChild.childNodes); el.classList.toggle('sel', chat === t.id); }
     el.dataset.snapshot = html;
-    if (previous.nextElementSibling !== el) previous.after(el);
-    previous = el; existing.delete(t.id);
+    if (t.status === 'needs') {
+      if (previousNeed) previousNeed.after(el); else needsList.prepend(el);
+      previousNeed = el;
+    } else { if (previous.nextElementSibling !== el) previous.after(el); previous = el; } existing.delete(t.id);
   }
   for (const el of existing.values()) el.remove();
 }
@@ -452,10 +480,10 @@ async function render() {
     updateSessions();
     if (chat === null) {
       $('.chat-panel').replaceChildren(orchestrator); orchestrator.classList.add('active');
-      const box = $('#orchestrator-log'); box.scrollTop = box.scrollHeight;
+      const box = $('#orchestrator-log'); if (!box.dataset.follow) followLatest(box); box.dataset.follow = 'true'; box.scrollTop = box.scrollHeight;
       loadOrchestrator();
     }
-    else { $('.chat-panel').innerHTML = chatPane(); chatAfter = 0; loadChat(); }
+    else { $('.chat-panel').innerHTML = chatPane(); chatAfter = 0; followLatest($('#chatlog')); loadChat(); }
     document.querySelectorAll('.composer').forEach(paintComposer);
   } else if (tab === 'Tasks') {
     v.innerHTML = '<div id="task-board" class="task-board"></div>';
