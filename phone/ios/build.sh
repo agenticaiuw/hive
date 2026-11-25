@@ -155,8 +155,8 @@ cp target/HivePhone/HiveLauncher $app/$executable
 ditto target/HivePhone/HiveLoopback.appex $app/PlugIns/HiveLoopback.appex
 ditto target/HivePhone/HiveSafari.appex $app/PlugIns/HiveSafari.appex
 plutil -replace UIFileSharingEnabled -bool true $app/Info.plist
-plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control." $app/Info.plist
-plutil -replace NSBonjourServices -json '["_remotepairing._tcp"]' $app/Info.plist
+plutil -replace NSLocalNetworkUsageDescription -string "Hive connects to this iPhone’s own developer services for phone control, and offers itself for pairing in Developer Mode settings." $app/Info.plist
+plutil -replace NSBonjourServices -json '["_remotepairing._tcp","_remotepairing-pairable-host._tcp"]' $app/Info.plist
 # The XCTest frameworks come from the phone's developer disk image, matched to its iOS; HiveApp runs from launch.
 rm -rf $app/Frameworks
 ditto $out/derived/Build/Products/Debug-iphoneos/HiveApp.framework $app/Frameworks/HiveApp.framework

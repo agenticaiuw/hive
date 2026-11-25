@@ -29,6 +29,11 @@ fn valid(hive: &Hive, t: &str) -> bool {
     !t.is_empty() && hive.db.get("select 1 from tokens where hash=?", args!(hash(t))).is_some()
 }
 fn authed(hive: &Hive, req: &Req) -> bool { valid(hive, &token(req)) }
+/// Whether a request carries Hive Phone's own key (phone_pairing).
+fn phones(hive: &Hive, req: &Req) -> bool {
+    let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
+    !key.is_empty() && token(req) == key
+}
 
 /// Whether a request is the owner's own: from one of their devices on their Tailscale account (the tailnet helper, on this
 /// computer, says so and drops any such header a device sends), or from a browser on this computer itself. Either way it
@@ -96,14 +101,22 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         }
         // Hive Phone's WebSocket (phone/), with the phone's own key.
         ("GET", ["phone", "device"]) => {
-            let key = std::fs::read_to_string(hive.state.join("phone-token")).unwrap_or_default();
-            if key.is_empty() || token(&req) != key { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
+            if !phones(hive, &req) { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
             let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
             let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
             let version = req.headers.get("x-hive-version").cloned().unwrap_or_default();
             let build = req.headers.get("x-hive-build").and_then(|v| v.parse().ok()).unwrap_or(0);
             res.upgrade = Some(Box::new(move |conn| hive_phone::device(conn, version, build)));
             return res;
+        }
+        // The pairing identity Hive Phone made with the iPhone itself (phone/ios/Launcher/src/pair.rs), kept here too as
+        // one a computer makes over USB is.
+        ("POST", ["phone", "bootstrap", device]) => {
+            if !phones(hive, &req) { return Res::err(401, "This isn't the iPhone's key: Hive on the iPhone joins again through Tailscale."); }
+            return match hive_phone::bootstrap::save(&hive.state, device, &req.body) {
+                Ok(()) => Res::json(&json!({ "ok": true })),
+                Err(e) => Res::err(409, e),
+            };
         }
         // A Claude Code agent's tools (claude.rs), over MCP: the secret in the path is the agent's own, so it signs it in.
         ("POST", ["mcp", t]) => return match hive.mcp(t, &req.json()) {
@@ -457,6 +470,12 @@ mod tests {
         assert_eq!(handle(&hive, request("/api/phone/bootstrap/..", &device)).status, 400);
         // The dashboard offers to add the iPhone the Mac asked about to Hive's iPhone build.
         assert_eq!(std::fs::read_to_string(state.join("iphones")).unwrap(), "00008110-001A2B3C00000000\n");
+        // Hive Phone keeps the identity it paired by itself here with its own key, and only with it.
+        let save = |key: &str| handle(&hive, Req { method: "POST".into(), path: "/phone/bootstrap/00008110-001A2B3C00000000".into(),
+            body: b"not a credential".to_vec(), ..request("", key) }).status;
+        assert_eq!(save("wrong"), 401);
+        assert_eq!(save(&device), 401);
+        assert_eq!(save("phone-test-key"), 409);
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]

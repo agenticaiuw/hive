@@ -1,6 +1,8 @@
 //! The launcher's Rust half, linked into Hive's first executable (Main.m and
 //! Mount.m) and its loopback packet tunnel (../Loopback).
 
+mod pair;
+
 // The mount API has no pairing setup, unmount, restart or identity replacement.
 use idevice::{
     RsdService,
@@ -222,6 +224,45 @@ pub unsafe extern "C" fn hive_mount_ddi(
     }
 }
 
+/// Phone control's pairing made on this iPhone itself (pair.rs, iOS 27 and later). Blocks until this iPhone has paired
+/// with Hive, then saves the identity at `identity` unless a file is already there, and writes the iPhone's UDID,
+/// NUL-terminated, into `device`. Returns zero once both are written.
+///
+/// # Safety
+/// `identity` must point to a valid NUL-terminated UTF-8 path and `device` to `capacity` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hive_pair_on_device(identity: *const c_char, device: *mut c_char, capacity: usize) -> i32 {
+    if identity.is_null() || device.is_null() {
+        return Failure::Arguments as i32;
+    }
+    let Ok(identity) = unsafe { CStr::from_ptr(identity) }.to_str().map(str::to_owned) else {
+        return Failure::Arguments as i32;
+    };
+    // The same desktop-sized stack as the mount's.
+    let pairing = std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| Failure::Runtime)?;
+        runtime.block_on(pair::pair_on_device())
+    });
+    let (bytes, udid) = match pairing.map(|t| t.join()) {
+        Ok(Ok(Ok(paired))) => paired,
+        Ok(Ok(Err(failure))) => return failure as i32,
+        _ => return Failure::Runtime as i32,
+    };
+    if udid.len() >= capacity || udid.contains('\0') {
+        return Failure::Verification as i32;
+    }
+    let temporary = format!("{identity}.partial");
+    if Path::new(&identity).exists() || std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, &identity)).is_err() {
+        std::fs::remove_file(&temporary).ok();
+        return Failure::Identity as i32;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(udid.as_ptr().cast::<c_char>(), device, udid.len());
+        *device.add(udid.len()) = 0;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +292,9 @@ mod tests {
             unsafe { hive_mount_ddi(1, std::ptr::null(), std::ptr::null(), false) },
             Failure::Arguments as i32
         );
+        let mut device = [0 as c_char; 8];
+        assert_eq!(unsafe { hive_pair_on_device(std::ptr::null(), device.as_mut_ptr(), 8) }, Failure::Arguments as i32);
+        assert_eq!(unsafe { hive_pair_on_device(c"x".as_ptr(), std::ptr::null_mut(), 8) }, Failure::Arguments as i32);
     }
 }
 

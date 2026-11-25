@@ -115,6 +115,30 @@ import Foundation
         retry = 0
         refused = false
         changed()
+        sendDeveloperIdentity()
+    }
+
+    /// The pairing identity this iPhone made with Hive by itself (Launcher/src/pair.rs), for the Hive Server to keep too,
+    /// as it keeps one a computer makes over USB (phone/src/bootstrap.rs). Sent once the link is up.
+    @objc public func saveDeveloperIdentity(_ device: String) {
+        UserDefaults.standard.set(device, forKey: "HiveIdentityToSend")
+        sendDeveloperIdentity()
+    }
+
+    private func sendDeveloperIdentity() {
+        guard connected, let device = UserDefaults.standard.string(forKey: "HiveIdentityToSend"), let p = pairing, let session,
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let identity = try? Data(contentsOf: documents.appendingPathComponent("developer-pairing.plist")) else { return }
+        var r = URLRequest(url: p.dashboard.appendingPathComponent("phone/bootstrap/\(device)"))
+        r.httpMethod = "POST"
+        r.setValue("Bearer \(p.token)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/x-plist", forHTTPHeaderField: "Content-Type")
+        r.httpBody = identity
+        session.dataTask(with: r) { _, response, _ in
+            // Kept (200), or the server already keeps an earlier identity this iPhone trusts (409): either way it's done.
+            guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 || status == 409 else { return }
+            UserDefaults.standard.removeObject(forKey: "HiveIdentityToSend")
+        }.resume()
     }
 
     /// The window (Dashboard.swift) follows the link and Tailscale through one notification.
