@@ -40,6 +40,7 @@ pub fn tools() -> Vec<Value> {
         let mut auth = tool("mac_authenticate", "Type the saved Mac login password into the focused authentication field, without revealing it. Requires an approved whole-Mac handover. Click the password field first, then inspect the result.", json!({}), &[]);
         auth["lock"] = json!("input");
         all.push(auth);
+        all.push(tool("mac_restore_phone_passcode", "Migrate the single phone passcode saved by older Hive versions in this Mac's Keychain to the current Hive Server, without exposing it. The iPhone must be connected; the server binds it to that iPhone. No passcode is typed.", json!({}), &[]));
         let mut t = tool("mac_take_over", "When working in one app's window can't do it (a menu shortcut, a system dialog, a page that won't \
             respond): ask the owner, in a floating window on their Mac, to hand over its own pointer and keyboard, saying why and about how \
             long. Waits for their answer; once they hand it over, it returns a screenshot of the whole screen, and its input works for that long \
@@ -80,6 +81,8 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         "take_over" => os::take_over(a),
         #[cfg(target_os = "macos")]
         "authenticate" => { os::authenticate()?; done("Typed the saved Mac password. Inspect the authentication result.") }
+        #[cfg(target_os = "macos")]
+        "restore_phone_passcode" => { os::restore_phone_passcode()?; done("Restored the saved phone passcode to Hive, bound to the connected iPhone.") }
         "shell" => shell(os::shell(a["command"].as_str().unwrap_or("")), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
         "get_file" => {
             let path = a["path"].as_str().unwrap_or("");
@@ -132,6 +135,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 10 + 2 * cfg!(target_os = "macos") as usize);
+        assert_eq!(tools().len(), 10 + 3 * cfg!(target_os = "macos") as usize);
     }
 }

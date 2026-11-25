@@ -224,6 +224,18 @@ pub fn type_text(text: &str) -> Result<(), String> {
 /// inside this process: never a tool argument/result, clipboard value or log.
 pub fn authenticate() -> Result<(), String> {
     if !matches!(target()?, Target::Mac) { return Err("Mac authentication needs a whole-Mac handover.".into()); }
+    let mut secret = read_device_credential("mac")?;
+    let result = std::str::from_utf8(&secret).map_err(|_| "Saved Mac credential isn't UTF-8.".to_string())
+        .and_then(|s| if s.is_empty() { Err("Saved Mac credential is empty.".into()) } else { type_text(s) });
+    erase(&mut secret);
+    result
+}
+
+fn erase(secret: &mut [u8]) {
+    for byte in secret { unsafe { std::ptr::write_volatile(byte, 0); } }
+}
+
+fn read_device_credential(account: &str) -> Result<Vec<u8>, String> {
     #[link(name = "Security", kind = "framework")]
     extern "C" {
         static kSecClass: Ref; static kSecClassGenericPassword: Ref;
@@ -239,8 +251,8 @@ pub fn authenticate() -> Result<(), String> {
         fn CFDataGetBytePtr(data: Ref) -> *const u8;
     }
     let service = NSString::from_str("local.personal-agent.authentication");
-    let account = NSString::from_str("mac");
-    let mut secret = unsafe {
+    let account = NSString::from_str(account);
+    unsafe {
         let keys = [kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData];
         let values = [kSecClassGenericPassword, Retained::as_ptr(&service).cast(), Retained::as_ptr(&account).cast(), kCFBooleanTrue];
         let q = CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 4, std::ptr::null(), std::ptr::null());
@@ -253,12 +265,64 @@ pub fn authenticate() -> Result<(), String> {
         if status != 0 || data.is_null() { return Err(format!("Saved Mac credential unavailable (Keychain status {status}).")); }
         let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize).to_vec();
         CFRelease(data);
-        bytes
-    };
-    let result = std::str::from_utf8(&secret).map_err(|_| "Saved Mac credential isn't UTF-8.".to_string())
-        .and_then(|s| if s.is_empty() { Err("Saved Mac credential is empty.".into()) } else { type_text(s) });
-    for byte in &mut secret { unsafe { std::ptr::write_volatile(byte, 0); } }
+        Ok(bytes)
+    }
+}
+
+/// One-time migration from the original Keychain store to the current server.
+/// Only the saved phone credential is sent, privately, to the authenticated Hive
+/// endpoint that binds it to the connected iPhone. Nothing is returned to agents.
+pub fn restore_phone_passcode() -> Result<(), String> {
+    let c = crate::tailnet::load().ok_or("This Mac isn't connected to Hive.")?;
+    let status = ureq::get(&format!("{}/api/phone", c.server)).set("Authorization", &format!("Bearer {}", c.token))
+        .timeout(std::time::Duration::from_secs(20)).call().map_err(|_| "Couldn't check Hive's phone credentials.")?
+        .into_string().map_err(|_| "Couldn't read Hive's phone status.")?;
+    let status: Value = serde_json::from_str(&status).map_err(|_| "Couldn't read Hive's phone status.")?;
+    if status["passcode"] == true || status["paused"] == true { return Err("Hive already has a phone credential or a paused unlock attempt; migration left it unchanged.".into()); }
+    if status["connected"] != true { return Err("The iPhone must be connected before its saved passcode can be migrated.".into()); }
+    let accounts = Command::new("/usr/bin/security").arg("dump-keychain").output().map_err(|_| "Couldn't inspect saved credential metadata.")?;
+    if !accounts.status.success() { return Err("Couldn't inspect saved credential metadata.".into()); }
+    let metadata = String::from_utf8_lossy(&accounts.stdout);
+    let account = legacy_phone_account(&metadata)?;
+    let mut secret = read_device_credential(&account)?;
+    let result = (|| {
+        let passcode = std::str::from_utf8(&secret).map_err(|_| "Saved phone credential isn't UTF-8.")?;
+        if !(4..=32).contains(&passcode.len()) || !passcode.bytes().all(|b| (b'!'..=b'~').contains(&b)) { return Err("Saved phone credential isn't a supported passcode.".into()); }
+        let response = ureq::post(&format!("{}/api/phone/passcode", c.server)).set("Authorization", &format!("Bearer {}", c.token))
+            .set("Content-Type", "application/json").timeout(std::time::Duration::from_secs(45))
+            .send_string(&json!({ "passcode": passcode }).to_string());
+        match response {
+            Ok(_) => Ok(()),
+            Err(_) => Err("Hive couldn't bind the saved passcode to the connected iPhone. No passcode was typed; inspect the phone connection.".into()),
+        }
+    })();
+    erase(&mut secret);
     result
+}
+
+fn legacy_phone_account(metadata: &str) -> Result<String, String> {
+    let mut phones = Vec::new();
+    for block in metadata.split("keychain:") {
+        if !block.contains("\"svce\"<blob>=\"local.personal-agent.authentication\"") { continue; }
+        for line in block.lines() {
+            if let Some(account) = line.trim().strip_prefix("\"acct\"<blob>=\"").and_then(|s| s.strip_suffix('"')) {
+                if account.starts_with("phone:") { phones.push(account.to_string()); }
+            }
+        }
+    }
+    phones.sort(); phones.dedup();
+    if phones.len() != 1 { return Err("Migration needs exactly one saved phone credential; none was transferred.".into()); }
+    Ok(phones.remove(0))
+}
+
+#[test]
+fn legacy_phone_migration_requires_one_unambiguous_saved_account() {
+    let entry = |service: &str, account: &str| format!("keychain: test\n\"svce\"<blob>=\"{service}\"\n\"acct\"<blob>=\"{account}\"\n");
+    let old = "local.personal-agent.authentication";
+    let one = entry(old, "phone:one");
+    assert_eq!(legacy_phone_account(&(entry("other", "phone:unrelated") + &entry(old, "mac") + &entry(old, "attempt:mac") + &one)).unwrap(), "phone:one");
+    assert!(legacy_phone_account("").is_err());
+    assert!(legacy_phone_account(&(one + &entry(old, "phone:two"))).is_err());
 }
 
 // CoreGraphics inherits the source's modifier state, including Command left by a
