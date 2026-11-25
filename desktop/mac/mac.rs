@@ -250,6 +250,7 @@ fn read_device_credential(account: &str) -> Result<Vec<u8>, String> {
         fn CFDataGetLength(data: Ref) -> isize;
         fn CFDataGetBytePtr(data: Ref) -> *const u8;
     }
+    let account_name = account;
     let service = NSString::from_str("local.personal-agent.authentication");
     let account = NSString::from_str(account);
     unsafe {
@@ -262,7 +263,16 @@ fn read_device_credential(account: &str) -> Result<Vec<u8>, String> {
         let status = SecItemCopyMatching(q, &mut data);
         SecKeychainSetUserInteractionAllowed(true);
         CFRelease(q);
-        if status != 0 || data.is_null() { return Err(format!("Saved Mac credential unavailable (Keychain status {status}).")); }
+        if status != 0 || data.is_null() {
+            // The original Agent may have trusted the system Keychain helper
+            // rather than this executable. Its output stays private here.
+            let saved = Command::new("/usr/bin/security").args(["find-generic-password", "-s", "local.personal-agent.authentication", "-a", account_name, "-w"]).output()
+                .map_err(|_| format!("Saved credential unavailable (Keychain status {status})."))?;
+            if !saved.status.success() { return Err(format!("Saved credential unavailable (Keychain status {status}).")); }
+            let mut bytes = saved.stdout;
+            if bytes.last() == Some(&b'\n') { bytes.pop(); }
+            return Ok(bytes);
+        }
         let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize).to_vec();
         CFRelease(data);
         Ok(bytes)
