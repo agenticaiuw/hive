@@ -150,6 +150,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let rules = rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]));
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
         }
+        ("GET", ["api", "orchestrator", "instructions"]) => Res::json(&json!({ "text": hive.orchestrator() })),
+        ("PUT", ["api", "orchestrator", "instructions"]) => match hive.set_orchestrator(&s(&b["text"])) {
+            Ok(()) => Res::json(&json!({ "ok": true })), Err(e) => Res::err(500, &e) },
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
             "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
             where l.id>? and l.agent_id=0 and (l.task_id=0 or l.who='hive')

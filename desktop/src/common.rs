@@ -41,15 +41,21 @@ pub fn tools() -> Vec<Value> {
         auth["lock"] = json!("input");
         all.push(auth);
         all.push(tool("mac_restore_phone_passcode", "Migrate the single phone passcode saved by older Hive versions in this Mac's Keychain to the current Hive Server, without exposing it. The iPhone must be connected; the server binds it to that iPhone. No passcode is typed.", json!({}), &[]));
-        let mut t = tool("mac_take_over", "When working in one app's window can't do it (a menu shortcut, a system dialog, a page that won't \
-            respond): ask the owner, in a floating window on their Mac, to hand over its own pointer and keyboard, saying why and about how \
-            long. Waits for their answer; once they hand it over, it returns a screenshot of the whole screen, and its input works for that long \
-            (or until the owner takes it back). Ask when your next steps are ready, and act at once: the owner is watching your log.",
+        let mut t = tool("mac_take_over", "Only when your next step needs the Mac's own pointer and keyboard because one app's window can't \
+            take it (a menu shortcut, the Dock or menu bar, a system dialog, a page that ignores background clicks); never for the shell, \
+            screenshots, or what an app's window or the browser tools can do. Asks the owner, in a floating window on their Mac, to hand them \
+            over, saying why and about how long. Waits for their answer; once they hand it over, it returns a screenshot of the whole screen, \
+            and its input works for that long (or until the owner takes it back). Use it at once (the owner is watching your log), and call \
+            mac_hand_back the moment you're done.",
             json!({ "why": s("What you're doing and why you need the whole Mac, in a sentence or two for the owner"), "minutes": n("About how many minutes you need") }),
             &["why", "minutes"]);
         t["lock"] = json!("input");
         t["timeout"] = json!(660);
         all.push(t);
+        let mut back = tool("mac_hand_back", "Give the owner back the Mac's own pointer and keyboard the moment you're done with them (Hive also \
+            does when your turn ends).", json!({}), &[]);
+        back["lock"] = json!("input");
+        all.push(back);
     }
     all.append(&mut input);
     all.extend([
@@ -79,6 +85,8 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         "key" => { os::key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
         #[cfg(target_os = "macos")]
         "take_over" => os::take_over(a),
+        #[cfg(target_os = "macos")]
+        "hand_back" => { os::give_back(); done("Handed the Mac's pointer and keyboard back to the owner.") }
         #[cfg(target_os = "macos")]
         "authenticate" => { os::authenticate()?; done("Typed the saved Mac password. Inspect the authentication result.") }
         #[cfg(target_os = "macos")]
@@ -135,6 +143,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 10 + 3 * cfg!(target_os = "macos") as usize);
+        assert_eq!(tools().len(), 10 + 4 * cfg!(target_os = "macos") as usize);
     }
 }

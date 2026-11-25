@@ -40,6 +40,10 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
             "js": s("JavaScript run on the page after it loads; may be empty.") }), &["rule", "css", "js"]));
     }
     if nodes.iter().any(|n| n == "hive") {
+        t.push(tool("lock", "Lock files in Hive's checkout before you change them: other agents work in the same checkout at the same \
+            time, and none can lock a file you hold. All or none: it fails, naming the task, when another agent holds one (then wait and \
+            lock again, or message that task). Your locks go when your turn ends.", json!({ "files": { "type": "array",
+            "items": { "type": "string" }, "description": "Paths in the checkout, e.g. server/src/hive.rs" } }), &["files"]));
         t.push(tool("reinstall", "After you've committed a change to Hive's code: rebuild and restart this Hive from its checkout, \
             keeping the change here (devices stay on GitHub's build). Returns the build output if it fails.", json!({}), &[]));
     }

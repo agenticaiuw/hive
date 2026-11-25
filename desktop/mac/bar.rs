@@ -177,9 +177,9 @@ pub fn hand_over(who: &str, why: &str, minutes: u64) -> Result<(), String> {
 
 thread_local! { static FOLLOW: RefCell<Option<(Retained<NSPanel>, Retained<NSTextView>, String)>> = const { RefCell::new(None) }; }
 
-/// While a task's agent has the Mac: a floating window in the screen's corner with the task's log as it happens, until `until`.
-/// Closing it gives the Mac back.
-pub fn follow(task: i64, title: &str, until: Instant) {
+/// While a task's agent has the Mac: a floating window in the screen's corner with the task's log as it happens, until the agent hands
+/// the Mac back or its time is up. Closing it gives the Mac back.
+pub fn follow(task: i64, title: &str) {
     let title = format!("#{task} {title} has your Mac: close this to take it back");
     DispatchQueue::main().exec_async(move || {
         let mtm = MainThreadMarker::new().expect("main thread");
@@ -222,7 +222,8 @@ pub fn follow(task: i64, title: &str, until: Instant) {
             DispatchQueue::main().exec_async(move || FOLLOW.with(|f| {
                 let mut f = f.borrow_mut();
                 let on = f.as_mut().is_some_and(|(panel, text, all)| {
-                    if !panel.isVisible() || Instant::now() > until { panel.close(); return false; }
+                    // Closed by the owner, handed back by the agent, or its time is up.
+                    if !panel.isVisible() || !crate::os::handed() { panel.close(); return false; }
                     if !lines.is_empty() {
                         all.push_str(&lines);
                         text.setString(&NSString::from_str(all));

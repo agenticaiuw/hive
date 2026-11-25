@@ -308,16 +308,28 @@ impl Hive {
     /// The orchestrator reads (never writes) Hive's own code, so it works in the checkout when this Hive has one.
     fn planner_cwd(&self) -> &std::path::Path { self.repo.as_deref().unwrap_or(&self.state) }
 
+    /// The orchestrator's instructions: the owner's own, edited on the dashboard's Rules tab, else Hive's (server/orchestrator.md).
+    pub fn orchestrator(&self) -> String {
+        std::fs::read_to_string(self.state.join("orchestrator.md")).ok().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| PLANNER.into())
+    }
+
+    /// Save the owner's own orchestrator instructions; empty, or Hive's own, goes back to Hive's.
+    pub fn set_orchestrator(&self, text: &str) -> Result<(), String> {
+        let path = self.state.join("orchestrator.md");
+        if text.trim().is_empty() || text.trim() == PLANNER.trim() { std::fs::remove_file(&path).ok(); return Ok(()); }
+        std::fs::write(&path, text).map_err(|e| format!("Couldn't save them: {e}"))
+    }
+
     fn plan_inner(self: &Arc<Self>, req: &Value) -> Result<String, String> {
         let id = req["id"].as_i64().unwrap_or(0);
         if let Engine::Claude { cmd, env } = &self.engine {
-            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, PLANNER, &plan_schema(&self.kinds()), &self.planner_input(req))?;
+            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, &self.orchestrator(), &plan_schema(&self.kinds()), &self.planner_input(req))?;
             return Ok(self.apply_plan(id, req, &plan));
         }
         let codex = self.codex()?;
         let started = codex.request("thread/start", json!({
             "model": PLANNER_MODEL.0, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
-            "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": PLANNER,
+            "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": self.orchestrator(),
         }), 60)?;
         let thread = s(&started["thread"]["id"]);
         let (tx, rx) = mpsc::channel();
@@ -433,8 +445,9 @@ impl Hive {
         match &self.repo {
             Some(repo) => {
                 t += VM_NOTES;
-                t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Keep it lean. Commit with a clear \
-                    message, then call reinstall. When a change makes sense for everyone who uses Hive, also push it to GitHub (git push \
+                t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Other agents work in it at the same time: \
+                    lock the files you'll change (lock) before you edit them, never edit one another agent holds, and commit only your own \
+                    (git commit -m <message> -- <files>). Keep it lean. Commit with a clear message, then call reinstall. When a change makes sense for everyone who uses Hive, also push it to GitHub (git push \
                     origin HEAD:main), which is how it reaches the owner's devices; one that's only for the owner or a small group stays here.", repo.display());
             }
             None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
@@ -762,14 +775,50 @@ impl Hive {
         });
         got.ok_or_else(|| {
             let holder = self.locks.lock().unwrap().get(name).map(|x| x.0).unwrap_or(0);
-            let title = self.db.get("select t.id, t.title from agents a join tasks t on t.id=a.task_id where a.id=?", args!(holder))
-                .map(|r| format!("#{} {}", r["id"], s(&r["title"]))).unwrap_or_default();
-            format!("The {name} is in use by task {title}; it frees up when that agent's turn ends. Try again, or message that task.")
+            format!("The {name} is in use by task {}; it frees up when that agent's turn ends. Try again, or message that task.", self.holder(holder))
         })
     }
 
-    fn release_all(&self, agent: i64) {
-        self.locks.lock().unwrap().retain(|_, v| v.0 != agent);
+    /// "#12 Its title": the task an agent is on, for lock messages.
+    fn holder(&self, agent: i64) -> String {
+        self.db.get("select t.id, t.title from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent))
+            .map(|r| format!("#{} {}", r["id"], s(&r["title"]))).unwrap_or_default()
+    }
+
+    /// Lock files in Hive's checkout for an agent, all or none: agents share the checkout, and none edits a file another holds.
+    fn lock_files(&self, files: &[String], agent: i64) -> Result<Value, String> {
+        let root = self.repo.as_ref().map(|r| format!("{}/", r.display())).unwrap_or_default();
+        let files: Vec<String> = files.iter().map(|f| f.trim().strip_prefix(root.as_str()).unwrap_or(f.trim()).trim_start_matches("./").to_string())
+            .filter(|f| !f.is_empty()).collect();
+        if files.is_empty() { return Err("Name the files to lock.".into()); }
+        let mut locks = self.locks.lock().unwrap();
+        if let Some((file, holder)) = files.iter().find_map(|f| locks.get(&format!("file {f}")).filter(|h| h.0 != agent).map(|h| (f.clone(), h.0))) {
+            drop(locks);
+            return Err(format!("{file} is locked by task {}; it frees up when that agent's turn ends. Wait and lock it again, or message that task.", self.holder(holder)));
+        }
+        for f in &files { locks.insert(format!("file {f}"), (agent, now())); }
+        drop(locks);
+        self.bump();
+        Ok(json!(format!("Locked {}. No other agent can lock them until your turn ends.", files.join(", "))))
+    }
+
+    /// An agent's turn ended: its locks go. A Mac whose own pointer and keyboard it may have had goes back to the owner first, and
+    /// its lock with it (unless the agent's next turn has used the Mac since).
+    fn release_all(self: &Arc<Self>, agent: i64) {
+        let (t0, mut macs) = (now(), vec![]);
+        self.locks.lock().unwrap().retain(|lock, v| {
+            if v.0 != agent { return true; }
+            let mac = lock.strip_suffix(" input").and_then(|id| self.db.get("select * from nodes where id=? and kind='mac'", args!(id)));
+            mac.map(|node| macs.push((lock.clone(), node))).is_some()
+        });
+        for (lock, node) in macs {
+            let me = self.clone();
+            std::thread::spawn(move || {
+                me.call_node(&node, "mac_hand_back", &json!({}), agent, 30).ok();
+                me.locks.lock().unwrap().retain(|l, v| !(*l == lock && v.0 == agent && v.1 <= t0));
+                me.bump();
+            });
+        }
         self.bump();
     }
 
@@ -1013,6 +1062,7 @@ impl Hive {
                 let r = self.tool_inner(target, &args, agent, task)?;
                 return Ok(if r["error"].is_null() { json!(format!("Typed the saved password for {site} with {tool}.")) } else { r });
             }
+            "lock" => return self.lock_files(&list(&a["files"]), agent),
             "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
             "rule" => return self.add_rule(&s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
             "task" => {
@@ -1058,6 +1108,11 @@ impl Hive {
         }
         let secs = a["timeout"].as_u64().map(|t| t.clamp(1, 1800) + 15).or(decl["timeout"].as_u64()).unwrap_or(120);
         let mut r = self.call_node(&node, name, &args, agent, secs)?;
+        if name == "mac_hand_back" {
+            let lock = format!("{} input", s(&node["id"]));
+            self.locks.lock().unwrap().retain(|l, v| !(*l == lock && v.0 == agent));
+            self.bump();
+        }
         if let (Some(data), Some(fname)) = (r["data"].as_str(), r["name"].as_str()) {
             let bytes = b64::decode(data).ok_or("the device sent a broken file")?;
             let path = self.save_file(fname, &bytes, &s(&node["kind"]));
@@ -1108,26 +1163,8 @@ fn plan_schema(kinds: &[String]) -> Value {
     })
 }
 
-const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
-Claude Code session) comes to you first. You hold the whole picture (the open tasks and which agent is on each, the owner's rules, \
-their earlier requests) and the most control over Hive: you coordinate the work yourself and answer what you can yourself. Your \
-working folder is Hive's code and files (you read, never write): look there whenever an answer or a decision depends on them, \
-rather than guessing or handing the question to an agent.
-- Use the earlier requests to resolve references such as it, this problem, and also, including recently completed work. The current request and explicit rules take precedence over historical context.
-- Source-session requests (a nonempty agent) stay with that session: return empty tasks, messages, start and drop. Its conversation context resolves references; unrelated Hive history must never replace missing source context. If conversation_unavailable is true, leave interpretation to the source session. Explicit hand_off requests have no agent and are routed normally.
-- reply: answer the owner's question first, from the evidence and code you have, then briefly say what happens next. Say only what your plan below does.
-- tasks: new work that needs an agent (changing code, using a device, research that needs new evidence). Split a request into \
-separate tasks when its parts are independent, so they run at the same time. title = short imperative; quote = the owner's exact \
-words; nodes = where the work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level \
-= easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. A new task starts at once on a \
-free agent, never behind a busy one. None for a request from a Claude Code session (claude:…): that session writes its own. A \
-problem report such as why did this fail, this should work, or fix this requests a repair: assign implementation and verification, \
-not just investigation. Preserve the full intended outcome in the task title and quote. Never make a task whose work is \
-coordinating other tasks: that's yours, with messages, start and drop.
-- messages: when the request is about an open task (a correction, an answer, more detail), send it to that task's agent: task = its id, text = the owner's words.
-- start: queued tasks (waiting behind another task's agent) to start now, each on its own agent, when the owner wants them going.
-- drop: tasks to drop, when the owner asks to drop, cancel or stop them.
-- For an answer requiring no work, return empty tasks, messages, start and drop.";
+/// The orchestrator's instructions, Hive's own: the owner edits theirs on the dashboard's Rules tab (Hive::orchestrator).
+pub const PLANNER: &str = include_str!("../orchestrator.md");
 
 /// What an agent that's about to stop for the owner hears first.
 const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
@@ -1148,7 +1185,7 @@ its verification yourself on the owner's iPhone (the phone tools: a Duo push, a 
 solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and keyboard) is your extra pair of hands, and when it's \
 Hive itself that falls short, improve Hive's own code. When one app's window can't do it (a menu shortcut, a system dialog, a page \
 that won't respond), don't end with a blocker: ask for the whole Mac with mac_take_over (why, and about how many minutes), and once \
-the owner hands it over, use its own pointer and keyboard. Never take over their screen any other way, like bringing an app to the \
+the owner hands it over, use its own pointer and keyboard at once, and hand them back with mac_hand_back the moment you're done. Never take over their screen any other way, like bringing an app to the \
 front. When you discover or use confirmed personal details belonging to the owner (for example their name, email or phone), \
 save them with info during the task so later sessions can retrieve them. Check existing entries first; reuse their keys and save \
 only new or corrected facts. Save facts from the owner or a verified personal source; never guesses, unrelated people, passwords, \
@@ -1201,6 +1238,41 @@ mod tests {
         hive.take_lock("mac input", 2).unwrap();
         hive.release_all(2);
         assert_eq!(hive.locks(), json!([]));
+    }
+
+    #[test]
+    fn a_turn_end_hands_the_mac_back_before_its_lock_goes() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('mac-t','mac','Mac','[]',?)", args!(now()));
+        hive.locks.lock().unwrap().insert("mac-t input".into(), (1, now() - 1000));
+        hive.locks.lock().unwrap().insert("iPhone touch".into(), (1, now() - 1000));
+        hive.release_all(1);
+        assert_eq!(hive.locks().as_array().unwrap().iter().map(|l| l["lock"].clone()).collect::<Vec<_>>(), vec![json!("mac-t input")]);
+        // The Mac answers the hand-back; then its lock goes too.
+        let call = hive.wait_until(5000, || hive.db.get("select id from calls where tool='mac_hand_back' and node='mac-t' and agent_id=1", &[])).unwrap();
+        hive.db.run("update calls set status='done', result='{}' where id=?", args!(call["id"].clone()));
+        hive.bump();
+        assert!(hive.wait_until(5000, || hive.locks().as_array().unwrap().is_empty().then_some(())).is_some());
+    }
+
+    #[test]
+    fn agents_lock_the_files_they_edit_and_the_owner_edits_the_orchestrator() {
+        let state = std::env::temp_dir().join(format!("hive-orchestrator-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(Db::open(":memory:"), state.clone(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.tool_inner("lock", &json!({"files": ["server/src/hive.rs", "./README.md"]}), 1, 0).unwrap();
+        assert!(hive.tool_inner("lock", &json!({"files": ["server/src/api.rs", "README.md"]}), 2, 0).unwrap_err().contains("README.md is locked"));
+        hive.tool_inner("lock", &json!({"files": ["server/src/api.rs"]}), 2, 0).unwrap();
+        hive.release_all(1);
+        hive.tool_inner("lock", &json!({"files": ["README.md"]}), 2, 0).unwrap();
+        assert_eq!(hive.orchestrator(), PLANNER);
+        hive.set_orchestrator("Do it all yourself.").unwrap();
+        assert_eq!(hive.orchestrator(), "Do it all yourself.");
+        hive.set_orchestrator("").unwrap();
+        assert_eq!(hive.orchestrator(), PLANNER);
+        std::fs::remove_dir_all(&state).ok();
     }
 
     #[test]

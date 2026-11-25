@@ -97,11 +97,11 @@ pub fn take_over(a: &Value) -> Result<Value, String> {
     crate::bar::hand_over(&format!("#{task} {title}"), a["why"].as_str().unwrap_or(""), minutes)?;
     let until = Instant::now() + std::time::Duration::from_secs(minutes * 60);
     *HANDED.lock().unwrap() = Some(until);
-    crate::bar::follow(task, &title, until);
+    crate::bar::follow(task, &title);
     let mut shot = screenshot("")?;
     shot["text"] = json!(format!("The owner handed the Mac over for {minutes} minutes, and sees your log as you go. This is the whole \
         screen now: clicks, keys and typing use the Mac's own pointer and keyboard, which reach everything (menus, the Dock, system dialogs). \
-        {}", shot["text"].as_str().unwrap_or("")));
+        Use them now, and call mac_hand_back as soon as you're done. {}", shot["text"].as_str().unwrap_or("")));
     Ok(shot)
 }
 
@@ -116,6 +116,9 @@ fn away() -> bool {
 }
 
 pub fn give_back() { *HANDED.lock().unwrap() = None; }
+
+/// Whether the agents have the Mac's own pointer and keyboard now.
+pub fn handed() -> bool { HANDED.lock().unwrap().is_some_and(|end| Instant::now() <= end) }
 
 /// (x, y) in the last screenshot as a point on the screen.
 fn point(t: Target, x: f64, y: f64) -> Result<Point, String> {
