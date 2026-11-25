@@ -76,7 +76,15 @@ import WebKit
         signIn.setTitle("Sign in with Tailscale", for: .normal)
         signIn.addAction(UIAction { _ in if let u = Tailnet.shared.loginURL { UIApplication.shared.open(u) } }, for: .touchUpInside)
         reload.setTitle("Reload", for: .normal)
-        reload.addAction(UIAction { [weak self] _ in Dashboard.taps += 1; self?.shown = nil; self?.refresh() }, for: .touchUpInside)
+        reload.addAction(UIAction { [weak self] _ in
+            Dashboard.taps += 1
+            guard let self else { return }
+            self.shown = nil
+            self.refresh()
+            if !Tailnet.shared.running || Link.shared.pairing == nil {
+                self.showNotice("Dashboard unavailable", Link.shared.summary)
+            }
+        }, for: .touchUpInside)
         install.setTitle("Update Hive", for: .normal)
         install.addAction(UIAction { [weak self] _ in self?.updateHive() }, for: .touchUpInside)
         for b in [install, signIn, reload] {
@@ -119,7 +127,10 @@ import WebKit
     }
 
     private func updateHive() {
-        guard let url = Link.shared.update else { return }
+        guard let url = Link.shared.update else {
+            showNotice("Hive is up to date", "No newer published build is available.")
+            return
+        }
         install.isEnabled = false
         install.setTitle("Opening installer…", for: .normal)
         UIApplication.shared.open(url, options: [:]) { [weak self] opened in
@@ -133,6 +144,13 @@ import WebKit
         }
     }
 
+    private func showNotice(_ title: String, _ message: String) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
     private func refresh() {
         status.text = Link.shared.summary
         signIn.isHidden = Tailnet.shared.loginURL == nil || Tailnet.shared.running
@@ -144,11 +162,21 @@ import WebKit
         web.configuration.websiteDataStore.proxyConfigurations = Tailnet.shared.proxy.map { [$0] } ?? []
         shown = p.dashboard
         page = "loading \(p.host)"
-        web.load(URLRequest(url: p.dashboard))
+        reload.setTitle("Loading…", for: .normal)
+        web.load(URLRequest(url: p.dashboard, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
     }
 
-    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { page = "loaded \(webView.url?.host ?? "the probe's page")" }
+    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        reload.setTitle("Reload", for: .normal)
+        page = "loaded \(webView.url?.host ?? "the probe's page")"
+    }
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
-    private func failed(_ error: Error) { shown = nil; page = "failed: \(error.localizedDescription)" }
+    private func failed(_ error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        shown = nil
+        page = "failed: \(error.localizedDescription)"
+        reload.setTitle("Reload", for: .normal)
+        showNotice("Couldn't load the dashboard", error.localizedDescription)
+    }
 }
