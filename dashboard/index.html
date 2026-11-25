@@ -24,7 +24,7 @@ main.sessions { display: flex; flex-direction: column; overflow: hidden; }
 .session-list { overflow: auto; min-height: 0; overscroll-behavior: contain; padding: 2px; }
 .chat-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .chat-panel > .card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; }
-.chat-panel .log { flex: 1; min-height: 0; max-height: none; overflow: auto; overscroll-behavior: contain; }
+.chat-panel .log { flex: 1; min-height: 0; max-height: none; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; }
 .chat-panel .composer { flex-shrink: 0; padding-top: 8px; }
 #orchestrator { display: none; }
 #orchestrator.active { display: flex; }
@@ -321,7 +321,19 @@ function appendLogEntry(box, l) {
     try {
       const item = JSON.parse(l.text);
       const old = [...box.querySelectorAll('[data-tool-id]')].find(el => el.dataset.toolId === item.id);
-      if (old) { const open = old.querySelector('details')?.open; old.outerHTML = logEntry(l); if (open) [...box.querySelectorAll('[data-tool-id]')].find(el => el.dataset.toolId === item.id)?.querySelector('details')?.setAttribute('open', ''); return; }
+      if (old) {
+        const html = logEntry(l);
+        if (old.dataset.snapshot === html) return;
+        const open = old.querySelector('details')?.open;
+        const template = document.createElement('template'); template.innerHTML = html;
+        const next = template.content.firstElementChild;
+        old.className = next.className;
+        old.setAttribute('aria-busy', next.getAttribute('aria-busy'));
+        old.replaceChildren(...next.childNodes);
+        if (open) old.querySelector('details')?.setAttribute('open', '');
+        old.dataset.snapshot = html;
+        return;
+      }
     } catch {}
   }
   box.insertAdjacentHTML('beforeend', logEntry(l));
@@ -377,11 +389,10 @@ function updateLog(box, rows, render) {
   if (!rows.length) return;
   const following = box.dataset.follow !== 'false';
   const anchor = following ? null : [...box.children].find(el => el.getBoundingClientRect().bottom > box.getBoundingClientRect().top);
-  const index = anchor ? [...box.children].indexOf(anchor) : -1;
   const offset = anchor?.getBoundingClientRect().top;
   for (const row of rows) render(row);
   if (following) box.scrollTop = box.scrollHeight;
-  else if (index >= 0 && box.children[index]) box.scrollTop += box.children[index].getBoundingClientRect().top - offset;
+  else if (anchor?.isConnected) { const delta = anchor.getBoundingClientRect().top - offset; box.scrollTop += delta; }
 }
 function followLatest(box) {
   box.dataset.follow = 'true';
@@ -420,7 +431,8 @@ async function loadOrchestrator() {
 }
 function updateSessions() {
   const list = $('#session-list'); if (!list) return;
-  const header = $('#chat-task'); if (header) header.innerHTML = chatTaskHeader();
+  const header = $('#chat-task');
+  if (header) { const html = chatTaskHeader(); if (header.innerHTML !== html) header.innerHTML = html; }
   const pinned = list.firstElementChild;
   pinned.classList.toggle('sel', chat === null);
   let needs = list.querySelector('details');
@@ -437,7 +449,8 @@ function updateSessions() {
     else if (el.dataset.snapshot !== html) { const template = document.createElement('template'); template.innerHTML = html; el.replaceChildren(...template.content.firstElementChild.childNodes); el.classList.toggle('sel', chat === t.id); }
     el.dataset.snapshot = html;
     if (t.status === 'needs') {
-      if (previousNeed) previousNeed.after(el); else needsList.prepend(el);
+      if (previousNeed) { if (previousNeed.nextElementSibling !== el) previousNeed.after(el); }
+      else if (needsList.firstElementChild !== el) needsList.prepend(el);
       previousNeed = el;
     } else { if (previous.nextElementSibling !== el) previous.after(el); previous = el; } existing.delete(t.id);
   }

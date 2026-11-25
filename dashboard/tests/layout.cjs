@@ -42,6 +42,33 @@ await p.evaluate(()=>{const box=document.querySelector('#chatlog');const row={wh
 const after=await p.evaluate(()=>{const box=document.querySelector('#chatlog');const el=[...box.children].find(e=>e.getBoundingClientRect().bottom>box.getBoundingClientRect().top);return {text:el.textContent,top:el.getBoundingClientRect().top};});
 assert.equal(after.text,before.text);assert(Math.abs(after.top-before.top)<1);
 
+// Let browser scroll events run between growing and shrinking updates above the
+// viewport: synchronous-only checks miss feedback between anchoring and polling.
+for (const width of [390,1440]) {
+  await p.setViewportSize({width,height:850});
+  await p.evaluate(()=>{
+    const box=document.querySelector('#chatlog');
+    box.scrollTop=box.scrollHeight/2;
+    window.stableTool=box.querySelector('[data-tool-id="stream"]');
+    window.stableHeader=document.querySelector('#chat-task').firstElementChild;
+  });
+  await p.waitForTimeout(50);
+  const position=await p.locator('#chatlog').evaluate(box=>box.scrollTop);
+  for (let i=0;i<12;i++) {
+    await p.evaluate(i=>{
+      const box=document.querySelector('#chatlog');
+      updateSessions();
+      updateLog(box,[{who:'tool-item',text:JSON.stringify({id:'stream',type:'mcpToolCall',status:'inProgress',tool:'test',output:'line\n'.repeat(i%2 ? 5 : 1)})}],l=>appendLogEntry(box,l));
+    },i);
+    await p.waitForTimeout(25);
+    assert.equal(await p.evaluate(()=>document.querySelector('[data-tool-id="stream"]')===window.stableTool),true);
+    assert.equal(await p.evaluate(()=>document.querySelector('#chat-task').firstElementChild===window.stableHeader),true);
+    assert.equal(await p.locator('#chatlog').evaluate(box=>box.dataset.follow),'false');
+  }
+  // Returning to the original height returns to the original reading position.
+  assert(Math.abs(await p.locator('#chatlog').evaluate(box=>box.scrollTop)-position)<1);
+}
+
 for(const width of [320,390,768,1440]){await p.setViewportSize({width,height:850});assert.equal(await p.evaluate(()=>document.body.scrollWidth>innerWidth),false);assert((await p.locator('.screenshot img').boundingBox()).height<=260);assert((await p.locator('.composer').last().boundingBox()).y<850);await p.screenshot({path:`/tmp/hive-layout-chat-${width}.png`});}
 assert.equal(await p.locator('[data-session]').first().getAttribute('data-session'),'26');assert((await p.locator('[data-session]').first().boundingBox()).height<=44);
 await p.locator('.composer input[type=file]').last().setInputFiles({name:'notes.txt',mimeType:'text/plain',buffer:Buffer.from('test')});assert.equal(await p.locator('.attachment').last().innerText(),'notes.txt\nRemove');await p.evaluate(()=>{tab='Tasks';return render()});assert.equal(await p.locator('.task-board section h2').first().innerText(),'Needs me 1');assert.equal(await p.locator('.task-row').count(),8);assert.equal(await p.locator('.task-description').count(),8);assert.equal(await p.locator('.task-description safely').count(),0);for(const width of [320,1440]){await p.setViewportSize({width,height:850});assert.equal(await p.evaluate(()=>document.body.scrollWidth>innerWidth),false);}await p.getByRole('button',{name:'Done',exact:true}).click();assert.equal(await p.locator('.task-row').count(),23);await p.screenshot({path:'/tmp/hive-layout-tasks.png'});assert.deepEqual(errors,[]);console.log('Desktop/mobile bounds, compact priority, timestamps, document attachments and task filtering passed');await b.close();})();
