@@ -188,6 +188,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Err(e) => Res::err(400, &e),
         },
         ("POST", ["api", "tasks", _, "drop"]) => { hive.drop_task(id(2)); Res::json(&json!({ "ok": true })) }
+        ("POST", ["api", "tasks", _, "start"]) => match hive.start_now(id(2)) {
+            Ok(()) => Res::json(&json!({ "ok": true })),
+            Err(e) => Res::err(409, &e),
+        },
         ("GET", ["api", "log"]) => Res::json(&json!(hive.db.all(
             "select * from log where id > ? and (?=0 or request_id=?) order by id desc limit ?",
             args!(req.q("after").parse::<i64>().unwrap_or(0), id_q(&req, "request"), id_q(&req, "request"), req.q("limit").parse::<i64>().unwrap_or(300))))),

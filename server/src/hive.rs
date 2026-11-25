@@ -124,7 +124,7 @@ impl Hive {
 
     pub fn log(&self, agent: i64, task: i64, request: i64, who: &str, text: &str) {
         self.db.run("insert into log(at, agent_id, task_id, request_id, who, text) values(?,?,?,?,?,?)",
-            args!(now(), agent, task, request, who, if who == "tool-item" { text.to_string() } else { short(text, 20000) }));
+            args!(now(), agent, task, request, who, if matches!(who, "tool-item" | "orchestrator input") { text.to_string() } else { short(text, 20000) }));
         self.bump();
     }
 
@@ -275,16 +275,10 @@ impl Hive {
         text
     }
 
+    /// What the orchestrator reads for each request. What changes least comes first (rules, then devices, then tasks), so
+    /// each call reuses the provider's cache of the last one's start; the request itself comes last.
     fn planner_input(&self, req: &Value) -> String {
-        let mut t = format!("Request #{} from {} ({}):\n{}\n", req["id"], s(&req["node"]), s(&req["agent"]), s(&req["text"]));
-        let ctx = s(&req["context"]);
-        if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
-        t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
-        t += "\nOpen tasks:\n";
-        for task in self.db.all("select id, title, status, nodes, project from tasks where status in ('open','queued','working','needs','idle') order by id", &[]) {
-            t += &format!("#{} [{}] {} (nodes {}, project {})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
-        }
-        t += "\nThe owner's rules:\n";
+        let mut t = String::from("The owner's rules:\n");
         for r in self.db.all("select id, text, scope from rules where active=1 order by id", &[]) {
             t += &format!("R{} [{}] {}\n", r["id"], s(&r["scope"]), s(&r["text"]));
         }
@@ -294,19 +288,36 @@ impl Hive {
             let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline now" };
             t += &format!(", {} ({}, {on}: {})", s(&n["kind"]), s(&n["name"]), s(&n["notes"]));
         }
+        t += "\n\nOpen tasks:\n";
+        for task in self.db.all("select t.id, t.title, t.status, t.nodes, t.project, t.agent_id, a.task_id as on_task from tasks t
+            left join agents a on a.id=t.agent_id where t.status in ('open','queued','working','needs','idle') order by t.id", &[]) {
+            let who = match (task["agent_id"].as_i64(), task["on_task"].as_i64()) {
+                (Some(a), Some(on)) if on != task["id"].as_i64().unwrap_or(0) => format!(", agent {a}, which is on #{on} now"),
+                (Some(a), _) => format!(", agent {a}"),
+                _ => String::new(),
+            };
+            t += &format!("#{} [{}] {} (nodes {}, project {}{who})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
+        }
+        t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
+        t += &format!("\nRequest #{} from {} ({}):\n{}\n", req["id"], s(&req["node"]), s(&req["agent"]), s(&req["text"]));
+        let ctx = s(&req["context"]);
+        if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
         t
     }
+
+    /// The orchestrator reads (never writes) Hive's own code, so it works in the checkout when this Hive has one.
+    fn planner_cwd(&self) -> &std::path::Path { self.repo.as_deref().unwrap_or(&self.state) }
 
     fn plan_inner(self: &Arc<Self>, req: &Value) -> Result<String, String> {
         let id = req["id"].as_i64().unwrap_or(0);
         if let Engine::Claude { cmd, env } = &self.engine {
-            let plan = crate::claude::plan(cmd, env, &self.state, CLAUDE_PLANNER, PLANNER, &plan_schema(&self.kinds()), &self.planner_input(req))?;
+            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, PLANNER, &plan_schema(&self.kinds()), &self.planner_input(req))?;
             return Ok(self.apply_plan(id, req, &plan));
         }
         let codex = self.codex()?;
         let started = codex.request("thread/start", json!({
             "model": PLANNER_MODEL.0, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
-            "cwd": self.state.to_string_lossy(), "developerInstructions": PLANNER,
+            "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": PLANNER,
         }), 60)?;
         let thread = s(&started["thread"]["id"]);
         let (tx, rx) = mpsc::channel();
@@ -337,6 +348,10 @@ impl Hive {
         if s(&req["agent"]).is_empty() {
             for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
         }
+        for t in plan["start"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
+            if let Err(e) = self.start_now(t) { self.log(0, t, id, "hive", &format!("Couldn't start task #{t}: {e}")); }
+        }
+        for t in plan["drop"].as_array().into_iter().flatten().filter_map(Value::as_i64) { self.drop_task(t); }
         for m in plan["messages"].as_array().into_iter().flatten() {
             let tid = m["task"].as_i64().unwrap_or(0);
             if let Err(e) = self.message_task(tid, id, &s(&m["text"]), "owner") {
@@ -455,10 +470,12 @@ impl Hive {
         let effort = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]).2;
         let on_claude = matches!(self.engine, Engine::Claude { .. });
         let kind = if on_claude { CLAUDE_AGENT } else { "codex" };
+        // A task an agent claimed waits for it; any other goes to a free agent that knows its project, else a new one.
         let owner = task["agent_id"].as_i64().or_else(|| {
             let project = s(&task["project"]);
             if project.is_empty() { return None; }
-            self.db.get("select a.id from agents a join tasks t on t.agent_id=a.id where a.kind=? and t.project=? order by a.id desc limit 1", args!(kind, project)).and_then(|a| a["id"].as_i64())
+            self.db.all("select distinct a.id from agents a join tasks t on t.agent_id=a.id where a.kind=? and t.project=? order by a.id desc", args!(kind, project))
+                .iter().filter_map(|a| a["id"].as_i64()).find(|&a| self.ready_for_task(a))
         });
         let agent = if let Some(agent) = owner {
             self.db.run("update tasks set agent_id=?, status='queued' where id=?", args!(agent, task_id));
@@ -594,6 +611,16 @@ impl Hive {
         }
         self.nudges.lock().unwrap().remove(&agent);
         self.start_turn(agent, &text)
+    }
+
+    /// A task waiting behind another agent's work starts now: Hive's loop gives it a free agent, or a new one.
+    pub fn start_now(&self, task_id: i64) -> Result<(), String> {
+        let _assignment = self.assignments.lock().unwrap();
+        let t = self.db.get("select status from tasks where id=?", args!(task_id)).ok_or("there's no such task")?;
+        if s(&t["status"]) != "queued" { return Err(format!("it's {}, not waiting", s(&t["status"]))); }
+        self.db.run("update tasks set agent_id=null, status='open', updated=? where id=?", args!(now(), task_id));
+        self.bump();
+        Ok(())
     }
 
     pub fn drop_task(self: &Arc<Self>, task_id: i64) {
@@ -1064,7 +1091,7 @@ fn ended(text: &str) -> Option<Value> {
 fn plan_schema(kinds: &[String]) -> Value {
     let st = json!({ "type": "string" });
     json!({
-        "type": "object", "additionalProperties": false, "required": ["reply", "tasks", "messages"],
+        "type": "object", "additionalProperties": false, "required": ["reply", "tasks", "messages", "start", "drop"],
         "properties": {
             "reply": st,
             "tasks": { "type": "array", "items": { "type": "object", "additionalProperties": false,
@@ -1074,21 +1101,31 @@ fn plan_schema(kinds: &[String]) -> Value {
                     "level": { "type": "string", "enum": ["easy", "normal", "hard", "hardest"] } } } },
             "messages": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["task", "text"],
                 "properties": { "task": { "type": "integer" }, "text": st } } },
+            "start": { "type": "array", "items": { "type": "integer" } },
+            "drop": { "type": "array", "items": { "type": "integer" } },
         }
     })
 }
 
 const PLANNER: &str = "You are Hive's orchestrator. Every request from the owner (from any of their devices, the dashboard, or a \
-Claude Code session) comes to you first, and you route it. You don't write rules or break work down: the agent that takes the \
-request does, since it has the context.
+Claude Code session) comes to you first. You hold the whole picture (the open tasks and which agent is on each, the owner's rules, \
+their earlier requests) and the most control over Hive: you coordinate the work yourself and answer what you can yourself. Your \
+working folder is Hive's code and files (you read, never write): look there whenever an answer or a decision depends on them, \
+rather than guessing or handing the question to an agent.
 - Use the earlier requests to resolve references such as it, this problem, and also, including recently completed work. The current request and explicit rules take precedence over historical context.
-- messages: when the request is about an open task (a correction, an answer, more detail, stop), send it to that task's agent: \
-task = its id, text = the owner's words.
-- tasks: otherwise one new task (an existing agent for the same project can queue it): title = short imperative; quote = the owner's exact words; nodes = where the \
-work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level = \
-easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. None for a request from a \
-Claude Code session (claude:…): that session writes its own. Answer questions yourself using the supplied conversation, outcomes and rules; do not create a task merely to restate an answer already available. Create a research task only when answering requires new evidence or device actions. When a question accompanies requested work, answer it in reply immediately and route the work. A problem report such as why did this fail, this should work, or fix this requests a repair: assign implementation and verification, not just investigation. Preserve the full intended outcome in the task title and quote.
-- reply: answer the owner's question first when the evidence is available, then briefly say what work happens next. For an answer requiring no work, return empty tasks and messages.";
+- reply: answer the owner's question first, from the evidence and code you have, then briefly say what happens next. Say only what your plan below does.
+- tasks: new work that needs an agent (changing code, using a device, research that needs new evidence). Split a request into \
+separate tasks when its parts are independent, so they run at the same time. title = short imperative; quote = the owner's exact \
+words; nodes = where the work happens (the nodes listed below; a request about what a site's pages show or do needs browser); level \
+= easy|normal|hard|hardest; project = a short project name, the same as an open task's when related. A new task starts at once on a \
+free agent, never behind a busy one. None for a request from a Claude Code session (claude:…): that session writes its own. A \
+problem report such as why did this fail, this should work, or fix this requests a repair: assign implementation and verification, \
+not just investigation. Preserve the full intended outcome in the task title and quote. Never make a task whose work is \
+coordinating other tasks: that's yours, with messages, start and drop.
+- messages: when the request is about an open task (a correction, an answer, more detail), send it to that task's agent: task = its id, text = the owner's words.
+- start: queued tasks (waiting behind another task's agent) to start now, each on its own agent, when the owner wants them going.
+- drop: tasks to drop, when the owner asks to drop, cancel or stop them.
+- For an answer requiring no work, return empty tasks, messages, start and drop.";
 
 /// What an agent that's about to stop for the owner hears first.
 const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
@@ -1302,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_requires_completed_task_and_ended_turn() {
+    fn new_work_never_waits_behind_a_busy_agent() {
         for kind in ["codex", CLAUDE_AGENT] {
             let engine = if kind == "codex" { Engine::Codex { cmd: String::new(), env: vec![] } }
                 else { Engine::Claude { cmd: String::new(), env: vec![] } };
@@ -1311,24 +1348,48 @@ mod tests {
             let current = hive.add_task(0, &json!({"title":"Current", "project":"handoff"}));
             let agent = hive.db.run("insert into agents(task_id, kind, status, thread) values(?, ?, 'idle', 'thread')", args!(current, kind));
             hive.db.run("update tasks set agent_id=? where id=?", args!(agent, current));
-            let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
             for status in ["working", "needs", "dropped", "open"] {
                 hive.db.run("update tasks set status=? where id=?", args!(status, current));
+                let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
                 hive.start_agent(next);
                 assert!(!hive.ready_for_task(agent));
                 assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], current);
-                assert_eq!(hive.db.get("select status from tasks where id=?", args!(next)).unwrap()["status"], "queued");
-                assert!(hive.db.all("select * from log where who='session input'", &[]).is_empty());
+                let t = hive.db.get("select * from tasks where id=?", args!(next)).unwrap();
+                assert_ne!(t["agent_id"], agent, "a new agent takes it");
+                assert_ne!(t["status"], "queued");
             }
+            // A turn still running keeps the agent busy; once it ends, the free agent that knows the project takes new work.
             hive.db.run("update tasks set status='done' where id=?", args!(current));
             hive.turns.lock().unwrap().insert("thread".into(), "turn".into());
-            hive.start_agent(next);
             assert!(!hive.ready_for_task(agent));
             hive.turns.lock().unwrap().clear();
             assert!(hive.ready_for_task(agent));
+            let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
             hive.start_agent(next);
             assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], next);
         }
+    }
+
+    #[test]
+    fn the_orchestrator_sees_who_is_on_what_and_starts_and_drops_tasks() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into tasks(id, status, title) values(10, 'working', 'Long job')", &[]);
+        let busy = hive.db.run("insert into agents(task_id, kind, status) values(10, 'codex', 'working')", &[]);
+        hive.db.run("update tasks set agent_id=? where id=10", args!(busy));
+        hive.db.run("insert into tasks(id, agent_id, status, title) values(11, ?, 'queued', 'Waiting'), (12, null, 'idle', 'Unwanted')", args!(busy));
+        let input = hive.planner_input(&json!({ "id": 1, "text": "start the queued one" }));
+        assert!(input.contains(&format!("#11 [queued] Waiting (nodes [], project , agent {busy}, which is on #10 now)")), "{input}");
+        assert!(input.contains(&format!("#10 [working] Long job (nodes [], project , agent {busy})")), "{input}");
+        assert!(input.starts_with("The owner's rules:") && input.trim_end().ends_with("start the queued one"), "the request comes last: {input}");
+        hive.apply_plan(1, &json!({}), &json!({ "reply": "Starting #11 and dropping #12.", "tasks": [], "messages": [], "start": [11, 10], "drop": [12] }));
+        let t = hive.db.get("select * from tasks where id=11", &[]).unwrap();
+        assert_eq!((t["status"].clone(), t["agent_id"].clone()), (json!("open"), Value::Null), "Hive's loop gives it its own agent");
+        assert_eq!(hive.db.get("select status from tasks where id=12", &[]).unwrap()["status"], "dropped");
+        assert_eq!(hive.db.get("select status from tasks where id=10", &[]).unwrap()["status"], "working", "a working task isn't restarted");
+        assert!(hive.db.get("select * from log where text=\"Couldn't start task #10: it's working, not waiting\"", &[]).is_some());
+        assert!(PLANNER.contains("Never make a task whose work is coordinating other tasks"));
+        assert_eq!(plan_schema(&[])["required"], json!(["reply", "tasks", "messages", "start", "drop"]));
     }
 
     #[test]
