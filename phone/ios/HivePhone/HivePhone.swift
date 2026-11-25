@@ -63,6 +63,22 @@ final class HivePhone: XCTestCase {
     /// Every call the server makes, on a simulator, and what iOS says about Hive's window meanwhile (Probe.swift).
     func testSmoke() throws {
         try XCTSkipUnless(HivePhone.smoke, "only for build.sh test")
+        // Reproduce the WebSocket callback: a control action must allow main-queue
+        // UI work to finish while it pumps the run loop, without deadlocking.
+        let dispatched = expectation(description: "control releases the main queue")
+        DispatchQueue.main.async {
+            Link.performControl {
+                var delivered = false
+                DispatchQueue.main.async { delivered = true }
+                let deadline = Date(timeIntervalSinceNow: 2)
+                while !delivered && Date() < deadline {
+                    _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+                }
+                XCTAssertTrue(delivered)
+                dispatched.fulfill()
+            }
+        }
+        wait(for: [dispatched], timeout: 4)
         func call(_ m: String, _ p: String, _ b: [String: Any]? = nil, _ want: Int = 200) -> [String: Any] {
             var out: (Int, String)?
             let body = b.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) } ?? ""

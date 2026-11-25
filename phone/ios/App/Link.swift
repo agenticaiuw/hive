@@ -192,7 +192,17 @@ import Foundation
             let text = (try? JSONSerialization.data(withJSONObject: off)).map { String(decoding: $0, as: UTF8.self) } ?? ""
             return reply(id, 503, text, ws)
         }
-        calls(method, path, body) { [weak self] status, text in self?.reply(id, status, text, ws) }
+        Link.performControl { [weak self] in
+            calls(method, path, body) { [weak self] status, text in self?.reply(id, status, text, ws) }
+        }
+    }
+
+    static func performControl(_ work: @escaping () -> Void) {
+        // XCTest pumps the run loop while waiting for input to finish. It must
+        // not hold receive's main-queue block: UIKit/WebKit callbacks may need
+        // that same serial queue to finish the action (including taps in Hive).
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, work)
+        CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 
     private func reply(_ id: String, _ status: Int, _ text: String, _ ws: URLSessionWebSocketTask) {
