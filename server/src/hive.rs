@@ -308,28 +308,31 @@ impl Hive {
     /// The orchestrator reads (never writes) Hive's own code, so it works in the checkout when this Hive has one.
     fn planner_cwd(&self) -> &std::path::Path { self.repo.as_deref().unwrap_or(&self.state) }
 
-    /// The orchestrator's instructions: the owner's own, edited on the dashboard's Rules tab, else Hive's (server/orchestrator.md).
-    pub fn orchestrator(&self) -> String {
-        std::fs::read_to_string(self.state.join("orchestrator.md")).ok().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| PLANNER.into())
+    /// The orchestrator's or every agent's instructions (PROMPTS): the owner's own, edited on the dashboard's Instructions tab,
+    /// else Hive's (server/orchestrator.md, server/agent.md). None for a name that isn't one.
+    pub fn prompt(&self, name: &str) -> Option<String> {
+        let own = PROMPTS.iter().find(|p| p.0 == name)?.1;
+        Some(std::fs::read_to_string(self.state.join(format!("{name}.md"))).ok().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| own.into()))
     }
 
-    /// Save the owner's own orchestrator instructions; empty, or Hive's own, goes back to Hive's.
-    pub fn set_orchestrator(&self, text: &str) -> Result<(), String> {
-        let path = self.state.join("orchestrator.md");
-        if text.trim().is_empty() || text.trim() == PLANNER.trim() { std::fs::remove_file(&path).ok(); return Ok(()); }
+    /// Save the owner's own instructions; empty, or Hive's own, goes back to Hive's.
+    pub fn set_prompt(&self, name: &str, text: &str) -> Result<(), String> {
+        let own = PROMPTS.iter().find(|p| p.0 == name).ok_or("There are no such instructions.")?.1;
+        let path = self.state.join(format!("{name}.md"));
+        if text.trim().is_empty() || text.trim() == own.trim() { std::fs::remove_file(&path).ok(); return Ok(()); }
         std::fs::write(&path, text).map_err(|e| format!("Couldn't save them: {e}"))
     }
 
     fn plan_inner(self: &Arc<Self>, req: &Value) -> Result<String, String> {
         let id = req["id"].as_i64().unwrap_or(0);
         if let Engine::Claude { cmd, env } = &self.engine {
-            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, &self.orchestrator(), &plan_schema(&self.kinds()), &self.planner_input(req))?;
+            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, &self.prompt("orchestrator").unwrap_or_default(), &plan_schema(&self.kinds()), &self.planner_input(req))?;
             return Ok(self.apply_plan(id, req, &plan));
         }
         let codex = self.codex()?;
         let started = codex.request("thread/start", json!({
             "model": PLANNER_MODEL.0, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
-            "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": self.orchestrator(),
+            "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": self.prompt("orchestrator").unwrap_or_default(),
         }), 60)?;
         let thread = s(&started["thread"]["id"]);
         let (tx, rx) = mpsc::channel();
@@ -421,8 +424,8 @@ impl Hive {
         let nodes = self.task_kinds(task);
         let req = self.db.get("select * from requests where id=?", args!(task["request_id"].clone())).unwrap_or(json!({}));
         let ctx: Value = serde_json::from_str(&s(&req["context"])).unwrap_or(json!({}));
-        let mut t = format!("{AGENT}\n\nYour task: #{} {}\nThe owner's words: \"{}\"\nThe whole request (from {}): {}\n",
-            task["id"], s(&task["title"]), s(&task["quote"]), s(&req["node"]), s(&req["text"]));
+        let mut t = format!("{}\n\nYour task: #{} {}\nThe owner's words: \"{}\"\nThe whole request (from {}): {}\n",
+            self.prompt("agent").unwrap_or_default(), task["id"], s(&task["title"]), s(&task["quote"]), s(&req["node"]), s(&req["text"]));
         for entry in self.db.all("select who, text from log where task_id=? and who='owner' order by id", args!(task["id"].clone())) {
             t += &format!("\nOwner follow-up: {}\n", s(&entry["text"]));
         }
@@ -1163,7 +1166,7 @@ fn plan_schema(kinds: &[String]) -> Value {
     })
 }
 
-/// The orchestrator's instructions, Hive's own: the owner edits theirs on the dashboard's Rules tab (Hive::orchestrator).
+/// The orchestrator's instructions, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
 pub const PLANNER: &str = include_str!("../orchestrator.md");
 
 /// What an agent that's about to stop for the owner hears first.
@@ -1172,25 +1175,11 @@ sending as them, deleting or paying, or their finger or face)? A tool falling sh
 and the Mac's window tools see the same page differently. Ask for the whole Mac with mac_take_over, approve a sign-in's verification \
 on their iPhone, or fix Hive's own code. Then keep going. If it truly is theirs, end the same way again.";
 
-const AGENT: &str = "You are one of Hive's agents, working for the owner on one task. Hive is the owner's own agent system: its \
-server runs on the computer you run on and reaches the owner's devices. Your first message tells the owner what you'll do and \
-about how long it will take. Work until the task is done. Your turn's final message says how it ended: done with the outcome, or not done with the exact reason you stopped and exactly \
-what you need from the owner. Done means every part of what the owner asked for is done; if any part isn't, it's not done. There is no \"stuck\": when something fails, try another way; ending a turn without either means you \
-keep going. You heard the owner in context, so you write what follows from their words: a standing instruction \
-(always, never, from now on, a preference) becomes a rule (the rule tool), scoped as far as they meant it and no further; work \
-that's truly separate from yours becomes a task (the task tool). Never send a message \
-as the owner, delete their things or pay unless their own words say to; anything you send uses their words verbatim or says an agent \
-sends it on their behalf. Signing in never needs the owner: sign in yourself with their saved logins (type_password), and approve \
-its verification yourself on the owner's iPhone (the phone tools: a Duo push, a code in Messages). A technical problem is yours to \
-solve, not the owner's: the owner's Mac (its Hive app's shell, screen, mouse and keyboard) is your extra pair of hands, and when it's \
-Hive itself that falls short, improve Hive's own code. When one app's window can't do it (a menu shortcut, a system dialog, a page \
-that won't respond), don't end with a blocker: ask for the whole Mac with mac_take_over (why, and about how many minutes), and once \
-the owner hands it over, use its own pointer and keyboard at once, and hand them back with mac_hand_back the moment you're done. Never take over their screen any other way, like bringing an app to the \
-front. When you discover or use confirmed personal details belonging to the owner (for example their name, email or phone), \
-save them with info during the task so later sessions can retrieve them. Check existing entries first; reuse their keys and save \
-only new or corrected facts. Save facts from the owner or a verified personal source; never guesses, unrelated people, passwords, \
-verification codes or tokens. Personal facts belong in info; only explicit standing instructions belong in rules. A request to fix \
-a problem includes implementing and testing the repair; investigation alone does not complete it. Never print passwords or keys. Messages from the owner or other agents can arrive while you work; follow them.";
+/// What every agent hears first, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
+pub const AGENT: &str = include_str!("../agent.md");
+
+/// Hive's own instructions by name, which the owner can replace with theirs: the orchestrator's and every agent's.
+pub const PROMPTS: [(&str, &str); 2] = [("orchestrator", PLANNER), ("agent", AGENT)];
 
 /// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
 const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \
@@ -1257,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_lock_the_files_they_edit_and_the_owner_edits_the_orchestrator() {
+    fn agents_lock_the_files_they_edit_and_the_owner_edits_the_instructions() {
         let state = std::env::temp_dir().join(format!("hive-orchestrator-{}", std::process::id()));
         std::fs::create_dir_all(&state).unwrap();
         let hive = Hive::new(Db::open(":memory:"), state.clone(), None,
@@ -1267,11 +1256,16 @@ mod tests {
         hive.tool_inner("lock", &json!({"files": ["server/src/api.rs"]}), 2, 0).unwrap();
         hive.release_all(1);
         hive.tool_inner("lock", &json!({"files": ["README.md"]}), 2, 0).unwrap();
-        assert_eq!(hive.orchestrator(), PLANNER);
-        hive.set_orchestrator("Do it all yourself.").unwrap();
-        assert_eq!(hive.orchestrator(), "Do it all yourself.");
-        hive.set_orchestrator("").unwrap();
-        assert_eq!(hive.orchestrator(), PLANNER);
+        for (name, own) in PROMPTS {
+            assert_eq!(hive.prompt(name).unwrap(), own);
+            hive.set_prompt(name, "Do it all yourself.").unwrap();
+            assert_eq!(hive.prompt(name).unwrap(), "Do it all yourself.");
+            hive.set_prompt(name, "").unwrap();
+            assert_eq!(hive.prompt(name).unwrap(), own);
+        }
+        hive.set_prompt("agent", "Be brief.").unwrap();
+        assert!(hive.instructions(&json!({"id": 1, "title": "t"})).starts_with("Be brief.\n\nYour task: #1 t"));
+        assert!(hive.prompt("../hive.db").is_none() && hive.set_prompt("../hive.db", "x").is_err());
         std::fs::remove_dir_all(&state).ok();
     }
 

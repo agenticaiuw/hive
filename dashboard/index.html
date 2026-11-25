@@ -261,7 +261,7 @@ async function sendComposer(key, path) {
 async function send() { await sendComposer('main', 'api/requests?wait=1'); refresh(); }
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
-const TABS = ['Sessions', 'Tasks', 'Rules', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
+const TABS = ['Sessions', 'Tasks', 'Rules', 'Instructions', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
 let tab = location.hash.slice(1) || 'Sessions', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
 if (['Agents', 'Past'].includes(tab)) tab = 'Sessions';
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
@@ -509,11 +509,14 @@ async function render() {
     v.innerHTML = '<div id="task-board" class="task-board"></div>';
     updateTasks();
   } else if (tab === 'Rules') {
-    const [rules, orchestrator] = await Promise.all([api('api/rules'), api('api/orchestrator/instructions')]);
-    v.innerHTML = `<div class="card"><b>Orchestrator instructions</b> <span class="muted">what the orchestrator hears before your rules, with every request</span>
-      <textarea id="otext" rows="16">${esc(orchestrator.text)}</textarea><div class="row"><button onclick="saveOrchestrator()">Save</button></div></div>
-      <div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
+    const rules = await api('api/rules');
+    v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
       ${rules.map(r => `<div class="card row"><b>R${r.id}</b>${r.scope ? `<span class="badge">${esc(r.scope)}</span>` : ''}<span style="flex:1">${esc(r.text)}${r.code ? ' <span class="muted">(page change)</span>' : ''}${r.quote ? `<br><span class="muted">"${esc(r.quote)}"</span>` : ''}</span><button class="plain" onclick="delRule(${r.id})">Remove</button></div>`).join('')}`;
+  } else if (tab === 'Instructions') {
+    const prompts = [['orchestrator', 'The orchestrator', 'what it hears with every request, before your rules'], ['agent', 'Every agent', 'what each agent hears first, before its task']];
+    const texts = await Promise.all(prompts.map(([name]) => api(`api/instructions/${name}`)));
+    v.innerHTML = prompts.map(([name, title, hint], i) => `<div class="card"><b>${title}</b> <span class="muted">${hint}. Save empty to go back to Hive's.</span>
+      <textarea id="prompt-${name}" rows="16">${esc(texts[i].text)}</textarea><div class="row"><button onclick="savePrompt('${name}')">Save</button></div></div>`).join('');
   } else if (tab === 'Info') {
     const info = await api('api/info');
     v.innerHTML = `<div class="card row"><input id="ikey" placeholder="Key" style="flex:1"><input id="ival" placeholder="Value" style="flex:3"><button onclick="addInfo()">Save</button></div>${table(info)}`;
@@ -557,7 +560,7 @@ async function render() {
 }
 async function showTable(t) { $('#rows').innerHTML = table(await api(`api/db/${t}?limit=200`)); }
 async function addRule() { await api('api/rules', { method: 'POST', body: { text: $('#rtext').value, scope: $('#rscope').value, quote: $('#rtext').value } }); render(); }
-async function saveOrchestrator() { await api('api/orchestrator/instructions', { method: 'PUT', body: { text: $('#otext').value } }); render(); }
+async function savePrompt(name) { await api(`api/instructions/${name}`, { method: 'PUT', body: { text: $(`#prompt-${name}`).value } }); render(); }
 async function delRule(id) { await api(`api/rules/${id}`, { method: 'DELETE' }); render(); }
 async function addInfo() { await api('api/info', { method: 'POST', body: { key: $('#ikey').value, value: $('#ival').value } }); render(); }
 async function upload() { for (const f of $('#up').files) await api(`api/files?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f }); render(); }
