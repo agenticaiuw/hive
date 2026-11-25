@@ -122,7 +122,14 @@ static uint16_t pairingPort(void) {
     }
     [session finishTasksAndInvalidate];
     if (!downloaded) { dispatch_async(dispatch_get_main_queue(), ^{ progress(@"Hive couldn’t download its phone control files. Check the connection and reopen Hive."); completion(NO); }); return; }
-    int result = hive_mount_ddi(pairingPort(), identity.path.fileSystemRepresentation, directory.path.fileSystemRepresentation, cryptex);
+    int result = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        result = hive_mount_ddi(pairingPort(), identity.path.fileSystemRepresentation, directory.path.fileSystemRepresentation, cryptex);
+        // A freshly reopened app can reach the local tunnel before its services
+        // recover. Rediscover and retry transport failures, never identity errors.
+        if (result != 3 && result != 5 && result != 6 && result != 8 && result != 9) break;
+        if (attempt < 2) [NSThread sleepForTimeInterval:attempt + 1];
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (result) progress(@"Hive couldn’t prepare phone control. Reopen Hive to try again.");
         completion(result == 0);

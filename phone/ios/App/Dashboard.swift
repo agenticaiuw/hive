@@ -170,6 +170,17 @@ import WebKit
         reload.setTitle("Reload", for: .normal)
         page = "loaded \(webView.url?.host ?? "the probe's page")"
     }
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url, url.scheme == "itms-services" else {
+            decisionHandler(.allow)
+            return
+        }
+        decisionHandler(.cancel)
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            if !opened { self?.showNotice("Couldn't open the installer", "iOS couldn't open the Hive install link.") }
+        }
+    }
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
     private func failed(_ error: Error) {
