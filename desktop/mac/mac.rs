@@ -46,6 +46,7 @@ extern "C" {
     fn CGEventCreateScrollWheelEvent2(source: Ref, units: u32, count: u32, w1: i32, w2: i32, w3: i32) -> Ref;
     fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     fn CGEventSetFlags(event: Ref, flags: u64);
+    #[cfg(test)] fn CGEventGetFlags(event: Ref) -> u64;
     fn CGEventSetLocation(event: Ref, at: Point);
     fn CGEventKeyboardSetUnicodeString(event: Ref, len: usize, text: *const u16);
     fn CGEventPostToPid(pid: i32, event: Ref);
@@ -141,7 +142,7 @@ fn post(t: Target, make: impl FnOnce(Ref) -> Ref) -> Result<(), String> {
 }
 
 fn mouse(t: Target, kind: u32, at: Point, button: u32, clicks: i64) -> Result<(), String> {
-    post(t, |s| unsafe { let e = CGEventCreateMouseEvent(s, kind, at, button); if !e.is_null() { CGEventSetIntegerValueField(e, 1, clicks); } e })
+    post(t, |s| unsafe { let e = CGEventCreateMouseEvent(s, kind, at, button); if !e.is_null() { CGEventSetFlags(e, 0); CGEventSetIntegerValueField(e, 1, clicks); } e })
 }
 
 const MOVED: u32 = 5;
@@ -183,7 +184,7 @@ pub fn scroll(x: f64, y: f64, dx: i64, dy: i64) -> Result<(), String> {
     // A notch at a time; wheel lines are positive up and left, the tool's are positive down and right.
     for i in 0..dy.abs().max(dx.abs()) {
         let (wy, wx) = (if i < dy.abs() { -dy.signum() } else { 0 }, if i < dx.abs() { -dx.signum() } else { 0 });
-        post(t, |s| unsafe { let e = CGEventCreateScrollWheelEvent2(s, 1, 2, wy as i32, wx as i32, 0); if !e.is_null() { CGEventSetLocation(e, at); } e })?;
+        post(t, |s| unsafe { let e = CGEventCreateScrollWheelEvent2(s, 1, 2, wy as i32, wx as i32, 0); if !e.is_null() { CGEventSetFlags(e, 0); CGEventSetLocation(e, at); } e })?;
         pause(20);
     }
     Ok(())
@@ -212,11 +213,21 @@ pub fn type_text(text: &str) -> Result<(), String> {
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         for down in [true, false] {
-            post(t, |s| unsafe { let e = CGEventCreateKeyboardEvent(s, 0, down); if !e.is_null() { CGEventKeyboardSetUnicodeString(e, units.len(), units.as_ptr()); } e })?;
+            post(t, |s| unsafe { unicode_event(CGEventCreateKeyboardEvent(s, 0, down), units) })?;
         }
         pause(4);
     }
     Ok(())
+}
+
+// CoreGraphics inherits the source's modifier state, including Command left by a
+// shortcut. Every text event must explicitly clear it, on both down and up.
+unsafe fn unicode_event(e: Ref, units: &[u16]) -> Ref {
+    if !e.is_null() {
+        CGEventSetFlags(e, 0);
+        CGEventKeyboardSetUnicodeString(e, units.len(), units.as_ptr());
+    }
+    e
 }
 
 /// "shift+cmd+t": the key's code and the modifiers' flags.
@@ -339,6 +350,20 @@ pub fn screenshot(app: &str) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_clears_inherited_shortcut_modifiers() {
+        unsafe {
+            for down in [true, false] {
+                let e = super::CGEventCreateKeyboardEvent(std::ptr::null(), 0, down);
+                assert!(!e.is_null());
+                super::CGEventSetFlags(e, 0x1e0000);
+                let e = super::unicode_event(e, &[0x61]);
+                assert_eq!(super::CGEventGetFlags(e), 0);
+                super::CFRelease(e);
+            }
+        }
+    }
+
     #[test]
     fn keys() {
         assert_eq!(super::keycode("a"), Some(0));

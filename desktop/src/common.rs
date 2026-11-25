@@ -24,7 +24,7 @@ pub fn tools() -> Vec<Value> {
         tool(&format!("{k}_key"), &format!("Press keys on the {on}, e.g. {}.", os::KEYS), json!({ "keys": s("Keys joined with +") }), &["keys"]),
     ];
     for t in &mut input { t["lock"] = json!("input"); }
-    let shot = if cfg!(target_os = "macos") {
+    let mut shot = if cfg!(target_os = "macos") {
         tool("mac_screenshot", "See the owner's Mac: the whole screen, or with app (e.g. \"Safari\") only that app's front window, even under \
             other windows. The other mac tools then act in what it showed, x/y being its pixels: in an app's window they go to that app alone, \
             in the background, and the owner keeps their pointer and keyboard (clicks, scrolling, typing and keys like return work there; \
@@ -34,6 +34,7 @@ pub fn tools() -> Vec<Value> {
     } else {
         tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in the other {k} tools are pixels in this image."), json!({}), &[])
     };
+    shot["lock"] = json!("input");
     let mut all = vec![shot];
     if cfg!(target_os = "macos") {
         let mut t = tool("mac_take_over", "When working in one app's window can't do it (a menu shortcut, a system dialog, a page that won't \
@@ -42,6 +43,7 @@ pub fn tools() -> Vec<Value> {
             (or until the owner takes it back). Ask when your next steps are ready, and act at once: the owner is watching your log.",
             json!({ "why": s("What you're doing and why you need the whole Mac, in a sentence or two for the owner"), "minutes": n("About how many minutes you need") }),
             &["why", "minutes"]);
+        t["lock"] = json!("input");
         t["timeout"] = json!(660);
         all.push(t);
     }

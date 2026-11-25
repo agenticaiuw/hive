@@ -714,7 +714,7 @@ impl Hive {
         let got = self.wait_until(120_000, || {
             let mut l = self.locks.lock().unwrap();
             match l.get(name) {
-                Some((holder, last)) if *holder != agent && now() - last < 60_000 => None,
+                Some((holder, _)) if *holder != agent => None,
                 _ => { l.insert(name.to_string(), (agent, now())); Some(()) }
             }
         });
@@ -996,7 +996,15 @@ impl Hive {
         } else { self.device_for(name) }.ok_or(format!("Hive has no tool called {name}"))?;
         // Mobile Safari and native touch share the same phone, even with two agents.
         if node["name"] == "Safari on iPhone" { self.take_lock("iPhone touch", agent)?; }
-        if let Some(lock) = decl["lock"].as_str() { self.take_lock(&format!("{} {lock}", s(&node["name"])), agent)?; }
+        // Screenshots change the Mac driver's shared target; takeover changes its
+        // permission state. They must own the same lock as keyboard and mouse,
+        // including when a connected device advertises an older tool list.
+        let mac_input = node["kind"] == "mac" && matches!(name,
+            "mac_screenshot" | "mac_take_over" | "mac_click" | "mac_drag" |
+            "mac_scroll" | "mac_key" | "mac_type" | "mac_type_password");
+        if let Some(lock) = if mac_input { Some("input") } else { decl["lock"].as_str() } {
+            self.take_lock(&format!("{} {lock}", s(&node["id"])), agent)?;
+        }
         // Files cross with the call: vm_path's bytes go to the device, and a file the device sends back lands in Hive's files.
         let mut args = if matches!(name, "browser_type_password" | "mac_type_password" | "windows_type_password") {
             let mut safe = json!({ "site": s(&a["site"]), "username": s(&a["username"]) });
@@ -1107,6 +1115,38 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_lock_waits_for_release_even_after_a_minute() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.locks.lock().unwrap().insert("mac input".into(), (1, now() - 600_000));
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| hive.take_lock("mac input", 2));
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(hive.locks()[0]["agent"], 1);
+            hive.release_all(1);
+            waiter.join().unwrap().unwrap();
+        });
+        assert_eq!(hive.locks()[0]["agent"], 2);
+        hive.take_lock("mac input", 2).unwrap();
+        hive.release_all(2);
+        assert_eq!(hive.locks(), json!([]));
+    }
+
+    #[test]
+    fn mac_screenshot_and_takeover_lock_even_older_devices() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let decl = json!([{"name":"mac_screenshot","timeout":0},{"name":"mac_take_over","timeout":0},{"name":"mac_key","lock":"input","timeout":0}]);
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('mac-test','mac','Mac',?,?)", args!(decl.to_string(),now()));
+        for name in ["mac_screenshot", "mac_take_over", "mac_key"] {
+            hive.tool_inner(name, &json!({}), 1, 0).unwrap_err();
+            assert_eq!(hive.locks()[0]["lock"], "mac-test input");
+            assert_eq!(hive.locks()[0]["agent"], 1);
+        }
+        assert_eq!(hive.locks().as_array().unwrap().len(), 1);
+    }
+
     #[test]
     fn session_usage_replaces_cumulative_totals_without_double_counting() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
