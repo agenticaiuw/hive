@@ -16,6 +16,7 @@ create table if not exists agents(id integer primary key, task_id integer, kind 
   status text default 'working', at integer, updated integer, tools text default '');
 create table if not exists log(id integer primary key, at integer, agent_id integer, task_id integer, request_id integer,
   who text, text text);
+create table if not exists session_events(agent integer, source text, offset integer, primary key(agent,source,offset));
 create table if not exists usage(thread text primary key, agent_id integer, total integer, input integer, output integer, cached integer);
 create table if not exists inbox(id integer primary key, agent_id integer, text text, at integer, seen integer default 0);
 create table if not exists nodes(id text primary key, kind text, name text, notes text default '', tools text default '[]', seen integer,

@@ -3,6 +3,7 @@
 //! sign-in the first time, then `start` serves the dashboard and API on this computer and, through Tailscale (tailnet.rs),
 //! to the owner's own devices.
 mod api;
+mod sessions;
 mod claude;
 mod codex;
 pub mod cred;

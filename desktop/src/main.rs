@@ -11,6 +11,7 @@ mod common;
 #[cfg(target_os = "macos")]
 mod phone_setup;
 mod hook;
+mod sessions;
 mod mcp;
 mod tailnet;
 #[cfg(target_os = "macos")]
@@ -43,6 +44,7 @@ fn open(url: &str) {
 }
 
 fn serve(c: hive_protocol::Conf) {
+    sessions::start(hive_protocol::Conf { server: c.server.clone(), token: c.token.clone(), id: c.id.clone() });
     #[cfg(target_os = "macos")]
     phone_setup::start(&c);
     hive_protocol::run(c, hive_protocol::Node { kind: os::KIND, name: os::host(), package: "hive", tools: common::tools(),
@@ -56,6 +58,7 @@ fn main() {
     let fail = |e: String| -> ! { eprintln!("{e}"); std::process::exit(1) };
     match args.first().map(|s| s.as_str()) {
         Some("hook") => hook::run(),
+        Some("sessions") => sessions::run(tailnet::load().unwrap_or_else(|| fail("Open Hive first".into()))),
         Some("mcp") => mcp::serve(),
         Some("--version") => println!("{}", hive_protocol::DEVICES),
         None => {
