@@ -301,7 +301,7 @@ impl Hive {
         t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
         t += &format!("\nRequest #{} from {} ({}):\n{}\n", req["id"], s(&req["node"]), s(&req["agent"]), s(&req["text"]));
         let ctx = s(&req["context"]);
-        if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", short(&ctx, 4000)); }
+        if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", ctx); }
         t
     }
 
@@ -348,6 +348,7 @@ impl Hive {
         if s(&req["agent"]).is_empty() {
             for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
         }
+        if !s(&req["agent"]).is_empty() { self.bump(); return s(&plan["reply"]); }
         for t in plan["start"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
             if let Err(e) = self.start_now(t) { self.log(0, t, id, "hive", &format!("Couldn't start task #{t}: {e}")); }
         }
@@ -1113,6 +1114,7 @@ their earlier requests) and the most control over Hive: you coordinate the work 
 working folder is Hive's code and files (you read, never write): look there whenever an answer or a decision depends on them, \
 rather than guessing or handing the question to an agent.
 - Use the earlier requests to resolve references such as it, this problem, and also, including recently completed work. The current request and explicit rules take precedence over historical context.
+- Source-session requests (a nonempty agent) stay with that session: return empty tasks, messages, start and drop. Its conversation context resolves references; unrelated Hive history must never replace missing source context. If conversation_unavailable is true, leave interpretation to the source session. Explicit hand_off requests have no agent and are routed normally.
 - reply: answer the owner's question first, from the evidence and code you have, then briefly say what happens next. Say only what your plan below does.
 - tasks: new work that needs an agent (changing code, using a device, research that needs new evidence). Split a request into \
 separate tasks when its parts are independent, so they run at the same time. title = short imperative; quote = the owner's exact \
@@ -1166,6 +1168,23 @@ view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn external_prompt_keeps_source_context_and_cannot_mutate_other_sessions() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into tasks(id,title,status) values(991,'Other session','open')", &[]);
+        let context = json!({"folder":"/club", "conversation": [
+            {"role":"assistant","content": "x".repeat(6000)},
+            {"role":"user","content":"cancel Workspace for the club"}]}).to_string();
+        let req = json!({"id":1,"agent":"claude:source","text":"help me cancel it","context":context});
+        let input = hive.planner_input(&req);
+        assert!(input.contains("cancel Workspace for the club"));
+        hive.apply_plan(1, &req, &json!({"reply":"Continue in Claude", "tasks":[],
+            "drop":[991], "start":[], "messages":[{"task":991,"text":"help me cancel it"}]}));
+        assert_eq!(hive.db.get("select status from tasks where id=991", &[]).unwrap()["status"], "open");
+        assert!(hive.db.all("select * from log where task_id=991", &[]).is_empty());
+    }
+
     #[test]
     fn device_lock_waits_for_release_even_after_a_minute() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
