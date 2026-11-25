@@ -19,6 +19,7 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
         let tid=h.db.run("insert into tasks(title,project,quote,status,agent_id,at,updated) values(?,?,?,'idle',?,?,0)",args!(title,folder,"Imported session",aid,now()));
         h.db.run("update agents set task_id=? where id=?",args!(tid,aid)); tid
     });
+    let mut writes = Vec::new();
     for e in events {
         let key=e["key"].as_u64().ok_or("Missing event offset")?;
         if h.db.get("select 1 from session_events where agent=? and source=? and offset=?",args!(aid,source,key)).is_some() { continue }
@@ -26,13 +27,14 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
         let who=e["who"].as_str().unwrap_or("");
         let text=e["text"].as_str().unwrap_or("");
         if matches!(who,"owner"|"agent"|"tool"|"tool result") && !text.is_empty() {
-            h.db.run("insert into log(at,agent_id,task_id,request_id,who,text) values(?,?,?,0,?,?)",args!(at,aid,task,who,text));
+            writes.push(("insert into log(at,agent_id,task_id,request_id,who,text) values(?,?,?,0,?,?)",args!(at,aid,task,who,text).to_vec()));
         }
         let status=if e["status"]=="working" && at>now()-120_000 {"working"} else {"idle"};
-        h.db.run("update agents set status=?,updated=? where id=? and coalesce(updated,0)<=?",args!(status,at,aid,at));
-        h.db.run("update tasks set status=?,updated=? where id=? and status in ('idle','working') and coalesce(updated,0)<=?",args!(status,at,task,at));
-        h.db.run("insert into session_events(agent,source,offset) values(?,?,?)",args!(aid,source,key));
+        writes.push(("update agents set status=?,updated=? where id=? and coalesce(updated,0)<=?",args!(status,at,aid,at).to_vec()));
+        writes.push(("update tasks set status=?,updated=? where id=? and status in ('idle','working') and coalesce(updated,0)<=?",args!(status,at,task,at).to_vec()));
+        writes.push(("insert into session_events(agent,source,offset) values(?,?,?)",args!(aid,source,key).to_vec()));
     }
+    h.db.batch(&writes)?;
     h.bump(); Ok(json!({"ok":true,"agent":aid,"task":task}))
 }
 

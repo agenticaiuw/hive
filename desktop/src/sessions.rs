@@ -9,24 +9,50 @@ pub fn run(c: hive_protocol::Conf) {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     let roots = [("claude", PathBuf::from(&home).join(".claude/projects")),
         ("codex", std::env::var("CODEX_HOME").map(PathBuf::from).unwrap_or(PathBuf::from(&home).join(".codex")).join("sessions"))];
-    let mut cursors = HashMap::<PathBuf, (u64, String, String)>::new();
+    let saved = hive_protocol::conf_path("session-cursors");
+    let mut cursors: HashMap<PathBuf, (u64, String, String)> = fs::read(&saved).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     loop {
+        let mut files = Vec::new();
         for (provider, root) in &roots {
-            let mut files = Vec::new(); collect(root, &mut files);
-            // Live sessions first, then history.
-            files.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
-            for path in files {
+            let mut paths = Vec::new(); collect(root, &mut paths);
+            files.extend(paths.into_iter().map(|p| (*provider,p)));
+        }
+        files.sort_by_key(|(_,p)| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
+        for (provider,path) in files {
                 let state = cursors.entry(path.clone()).or_default();
                 let Ok(file) = fs::File::open(&path) else { continue };
                 if file.metadata().map(|m| m.len()<state.0).unwrap_or(false) { *state = Default::default(); }
-                let mut reader = BufReader::new(file); if reader.seek(SeekFrom::Start(state.0)).is_err() { continue }
+                let mut reader = BufReader::new(file);
+                // On first discovery read identity, then recent context. Huge historical logs must
+                // never put today's activity hours behind. Every subsequent byte is mirrored.
+                if state.0 == 0 {
+                    for _ in 0..30 {
+                        let mut line=String::new(); if reader.read_line(&mut line).unwrap_or(0)==0 { break }
+                        if let Ok(v)=serde_json::from_str::<Value>(&line) {
+                            if provider=="claude" {
+                                if let Some(id)=v["sessionId"].as_str() { state.1=format!("claude:{id}"); }
+                                if let Some(cwd)=v["cwd"].as_str() {state.2=cwd.into();}
+                            } else if v["type"]=="session_meta" {
+                                state.1=format!("codex:{}",v["payload"]["id"].as_str().unwrap_or(""));
+                                state.2=v["payload"]["cwd"].as_str().unwrap_or("").into();
+                            }
+                        }
+                    }
+                    let len=reader.get_ref().metadata().map(|m|m.len()).unwrap_or(0);
+                    if len>1_048_576 {
+                        reader.seek(SeekFrom::Start(len-1_048_576)).ok();
+                        let mut partial=String::new(); reader.read_line(&mut partial).ok();
+                        state.0=reader.stream_position().unwrap_or(0);
+                    }
+                }
+                if reader.seek(SeekFrom::Start(state.0)).is_err() { continue }
                 let mut offset = state.0; let mut events = Vec::new();
                 for _ in 0..500 {
                     let mut line = String::new(); let Ok(n) = reader.read_line(&mut line) else { break };
                     if n == 0 || !line.ends_with('\n') { break }
                     let key = offset; offset += n as u64;
                     let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-                    if *provider == "claude" {
+                    if provider == "claude" {
                         if let Some(id) = v["sessionId"].as_str() { state.1 = format!("claude:{id}"); }
                         if let Some(cwd) = v["cwd"].as_str() { state.2 = cwd.into(); }
                     } else if v["type"] == "session_meta" {
@@ -39,6 +65,9 @@ pub fn run(c: hive_protocol::Conf) {
                 let body = json!({"session":state.1,"folder":state.2,"source":path.to_string_lossy(),"events":events});
                 if matches!(hive_protocol::call(&c,"POST","/api/sessions/stream",Some(&body),30), Ok((200,_))) { state.0=offset; }
             }
+        if let Ok(data)=serde_json::to_vec(&cursors) {
+            let tmp=saved.with_extension("tmp");
+            if fs::write(&tmp,data).is_ok() { fs::rename(&tmp,&saved).ok(); }
         }
         std::thread::sleep(Duration::from_secs(2));
     }

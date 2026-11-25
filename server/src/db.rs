@@ -98,6 +98,13 @@ impl Db {
         }
     }
 
+    pub fn batch(&self, statements: &[(&str, Vec<Value>)]) -> Result<(), String> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction().map_err(|e| e.to_string())?;
+        for (sql, values) in statements { tx.execute(sql, params_from_iter(values.iter().map(to_sql))).map_err(|e| e.to_string())?; }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     pub fn tables(&self) -> Vec<String> {
         self.all("select name from sqlite_master where type='table' order by name", &[])
             .into_iter().filter_map(|r| r["name"].as_str().map(String::from)).collect()

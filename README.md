@@ -14,6 +14,8 @@ The club's one project: agents that use your computer, phone and browser the way
 - **Everything is kept** in one database the dashboard shows: requests, tasks, rules, every agent's log and tool calls, files, and the owner's info catalogue.
 - **Hive changes itself.** An agent on a "hive" task edits this repo on the VM, rebuilds and restarts Hive and pushes to GitHub, which builds and signs what every device downloads and updates to.
 
+The desktop app streams Claude Code and Codex session messages and tool activity into separate dashboard chats automatically. It reads local session transcripts, imports recent context (up to 1 MiB per existing transcript), then follows new records every two seconds while connected. Restarting resumes from acknowledged offsets. Completion records clear the running indicator; silent sessions expire after two minutes. Provider-private reasoning is not imported.
+
 ## Adding Hive to your agents
 
 With the Hive app on your computer, any agent you use there (Claude Code, Codex, Cursor, Claude Desktop, …) saves the work you give it as your Hive tasks, and follows and adds to your rules, through `hive mcp`, an MCP server with six tools: `add_task`, `end_task`, `task_status`, `add_rule` and `get_rules`, and `hand_off` for work Hive's own agents should do (on your phone, say). On a Mac the program is `/Applications/Hive.app/Contents/MacOS/hive`; on Windows use the path of `hive-windows.exe` instead.
