@@ -107,7 +107,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let accept = hive_phone::accept(req.headers.get("sec-websocket-key").map(String::as_str).unwrap_or(""));
             let mut res = Res::new(101, "", "").header("Upgrade", "websocket").header("Connection", "Upgrade").header("Sec-WebSocket-Accept", &accept);
             let version = req.headers.get("x-hive-version").cloned().unwrap_or_default();
-            res.upgrade = Some(Box::new(move |conn| hive_phone::device(conn, version)));
+            let build = req.headers.get("x-hive-build").and_then(|v| v.parse().ok()).unwrap_or(0);
+            res.upgrade = Some(Box::new(move |conn| hive_phone::device(conn, version, build)));
             return res;
         }
         // A Claude Code agent's tools (claude.rs), over MCP: the secret in the path is the agent's own, so it signs it in.

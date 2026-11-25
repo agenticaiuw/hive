@@ -99,6 +99,7 @@ import Foundation
         r.setValue("Bearer \(p.token)", forHTTPHeaderField: "Authorization")
         r.setValue("phone:iphone", forHTTPHeaderField: "X-Hive-Node")
         r.setValue(Link.version, forHTTPHeaderField: "X-Hive-Version")
+        r.setValue(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String, forHTTPHeaderField: "X-Hive-Build")
         r.setValue("\(Link.protocolVersion)", forHTTPHeaderField: "X-Hive-Protocol")
         let ws = session!.webSocketTask(with: r)
         ws.maximumMessageSize = 2 << 20
@@ -165,9 +166,9 @@ import Foundation
                     @unknown default: data = nil
                     }
                     if let data, let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                        if let link = command["update"] as? String {
+                        if command.keys.contains("update") {
                             // Only iOS's own installer link: it installs the new build over this one, keeping its data.
-                            self.update = URL(string: link).flatMap { $0.scheme == "itms-services" ? $0 : nil }
+                            self.update = (command["update"] as? String).flatMap { URL(string: $0) }.flatMap { $0.scheme == "itms-services" ? $0 : nil }
                             self.changed()
                         } else {
                             self.forward(command, ws)

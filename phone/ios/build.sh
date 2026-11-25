@@ -184,8 +184,8 @@ if [ -n "$HIVE_IOS_IDENTITY" ]; then
 <key>metadata</key><dict><key>bundle-identifier</key><string>$id</string><key>bundle-version</key><string>$build</string><key>kind</key><string>software</string><key>title</key><string>Hive</string></dict>
 </dict></array></dict></plist>
 EOF
-  printf '{"version":"%s","install":"itms-services://?action=download-manifest&url=%s/manifest.plist","devices":%s}\n' \
-    $version $site "$(cat $out/profiles/devices.json)" > target/pages/phone.json
+  printf '{"version":"%s","build":%s,"install":"itms-services://?action=download-manifest&url=%s/manifest.plist","devices":%s}\n' \
+    $version $build $site "$(cat $out/profiles/devices.json)" > target/pages/phone.json
 fi
 echo "From the developer disk image:" $(missing $app) | tee $out/disk-image.txt
 (cd $out && rm -f ../Hive.ipa && zip -qry ../Hive.ipa Payload) && echo target/Hive.ipa

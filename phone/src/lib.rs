@@ -65,9 +65,14 @@ fn release() -> Value {
 }
 
 /// The install link for the newest build, if the phone's Hive (its X-Hive-Version) is older; never for a build of its own.
-pub fn update(version: &str) -> Option<String> {
+pub fn update(version: &str, build: u64) -> Option<String> {
     if version.len() < 7 { return None; }
-    let r = release();
+    published_update(&release(), version, build)
+}
+
+fn published_update(r: &Value, version: &str, build: u64) -> Option<String> {
+    if version.len() < 7 { return None; }
+    if build > 0 && r["build"].as_u64().unwrap_or(0) <= build { return None; }
     let (want, link) = (r["version"].as_str()?, r["install"].as_str()?);
     (want.len() >= 7 && !want.starts_with(version) && !version.starts_with(want)).then(|| link.to_string())
 }
@@ -106,6 +111,17 @@ pub fn save_passcode(state: &Path, passcode: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn updates_only_to_a_newer_published_build() {
+        let release = serde_json::json!({"version":"abcdef123456", "build":20, "install":"itms-services://install"});
+        assert!(super::published_update(&release, "123456abcdef", 19).is_some());
+        assert!(super::published_update(&release, "123456abcdef", 20).is_none());
+        assert!(super::published_update(&release, "123456abcdef", 21).is_none());
+        assert!(super::published_update(&release, "abcdef123456", 19).is_none());
+        let legacy = serde_json::json!({"version":"abcdef123456", "install":"itms-services://install"});
+        assert!(super::published_update(&legacy, "123456abcdef", 21).is_none());
+        assert!(super::published_update(&release, "123456abcdef", 0).is_some());
+    }
     #[test]
     fn lists_an_iphone_the_same_however_its_udid_is_written() {
         assert_eq!(super::listing("00008110-001a2b3c00000000"), super::listing("00008110001A2B3C00000000 "));
