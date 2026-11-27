@@ -343,7 +343,27 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let tasks = hive.db.all("select id, title, status from tasks where agent_id=? and status in ('working','needs')", args!(agent));
             Res::json(&json!({ "messages": rows, "tasks": tasks }))
         }
-        ("POST", ["api", "reinstall"]) => match hive.repo.as_ref().ok_or("Hive isn't on a VM here".to_string()).and_then(|r| crate::vm::reinstall(r)) { Ok(v) => Res::json(&v), Err(e) => Res::err(500, &e) },
+        ("GET", ["api", "sim"]) => {
+            let days = req.q("days").parse::<i64>().unwrap_or(7);
+            Res::json(&json!({
+                "sim": crate::sim::format(&hive.db, hive.repo.as_deref()),
+                "friction": crate::sim::friction(&hive.db, days),
+            }))
+        }
+        ("POST", ["api", "retrospective"]) => {
+            let every = b["every"].as_i64().unwrap_or(0).max(0);
+            Res::json(&json!({ "task": hive.start_retrospective(every) }))
+        }
+        ("POST", ["api", "reinstall"]) => match hive.repo.as_ref().ok_or((0, 0, String::new(), "Hive isn't on a VM here".to_string())).and_then(|r| crate::vm::reinstall(r)) {
+            Ok(v) => {
+                crate::sim::record_eval(&hive.db, b["sim_id"].as_i64().unwrap_or(0), true, v.passed, v.total, &v.commit);
+                Res::json(&json!({ "ok": true, "text": v.message, "passed": v.passed, "total": v.total, "commit": v.commit }))
+            }
+            Err((passed, total, commit, e)) => {
+                if total > 0 { crate::sim::record_eval(&hive.db, b["sim_id"].as_i64().unwrap_or(0), false, passed, total, &commit); }
+                Res::err(500, &e)
+            }
+        },
         ("GET", ["api", "sites", name, "data"]) => Res::new(200, "application/json",
             std::fs::read(hive.state.join("sites").join(clean(name)).join("data.json")).unwrap_or(b"{}".to_vec())),
         ("PUT", ["api", "sites", name, "data"]) => {

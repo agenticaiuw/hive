@@ -18,8 +18,10 @@ const NO_HOOKS: &str = r#"{"disableAllHooks": true}"#;
 pub enum Out {
     /// Its session, which `--resume` picks up after a restart.
     Session(String),
-    /// A line for the task's log: who (agent, command, files, search) and the text.
+    /// A line for the task's log: who (agent, files, search) and the text.
     Log(&'static str, String),
+    /// A Bash command and its output, plus whether the tool result reported an error.
+    Command { text: String, failed: bool },
     /// A turn ended, with the failure if it failed; `queued` turns are still to run (steers it hadn't taken yet).
     Ended { error: Option<String>, queued: u64 },
 }
@@ -120,7 +122,8 @@ impl Parser {
                 if b["type"] != "tool_result" { continue }
                 if let Some(cmd) = self.bash.remove(&text_of(&b["tool_use_id"])) {
                     let output = text_of(&b["content"]);
-                    out.push(Out::Log("command", format!("$ {cmd}\n{}", if output.chars().count() > 3000 { output.chars().take(3000).collect::<String>() + "…" } else { output })));
+                    let text = format!("$ {cmd}\n{}", if output.chars().count() > 3000 { output.chars().take(3000).collect::<String>() + "…" } else { output });
+                    out.push(Out::Command { text, failed: b["is_error"] == true });
                 }
             },
             ("result", sub) => {
@@ -196,9 +199,15 @@ mod tests {
         let out: Vec<Out> = lines.iter().flat_map(|l| p.read(l)).collect();
         assert_eq!(out, vec![
             Out::Session("s1".into()), Out::Log("agent", "I'll look.".into()), Out::Log("files", "/w/a.txt".into()),
-            Out::Log("search", "rust mcp".into()), Out::Log("command", "$ ls\na.txt\nb.txt".into()),
+            Out::Log("search", "rust mcp".into()), Out::Command { text: "$ ls\na.txt\nb.txt".into(), failed: false },
             Out::Ended { error: None, queued: 0 },
         ]);
+        let err_cmd = [
+            json!({ "type": "assistant", "parent_tool_use_id": null, "message": { "content": [{ "type": "tool_use", "id": "t5", "name": "Bash", "input": { "command": "false" } }] } }),
+            json!({ "type": "user", "parent_tool_use_id": null, "message": { "content": [{ "type": "tool_result", "tool_use_id": "t5", "content": "exit 1", "is_error": true }] } }),
+        ];
+        let err_out: Vec<Out> = err_cmd.iter().flat_map(|l| p.read(l)).collect();
+        assert_eq!(err_out, vec![Out::Command { text: "$ false\nexit 1".into(), failed: true }]);
         // As the CLI really ends a turn it couldn't run (signed out): subtype success, is_error true.
         let failed = json!({ "type": "result", "subtype": "success", "is_error": true, "result": "Not logged in · Please run /login", "queued_turn_count": 0 });
         assert_eq!(p.read(&failed), vec![Out::Ended { error: Some("Not logged in · Please run /login".into()), queued: 0 }]);

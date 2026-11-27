@@ -44,8 +44,19 @@ pub fn cloud(nodes: &[String]) -> Vec<Value> {
             time, and none can lock a file you hold. All or none: it fails, naming the task, when another agent holds one (then wait and \
             lock again, or message that task). Your locks go when your turn ends.", json!({ "files": { "type": "array",
             "items": { "type": "string" }, "description": "Paths in the checkout, e.g. server/src/hive.rs" } }), &["files"]));
-        t.push(tool("reinstall", "After you've committed a change to Hive's code: rebuild and restart this Hive from its checkout, \
-            keeping the change here (devices stay on GitHub's build). Returns the build output if it fails.", json!({}), &[]));
+        t.push(tool("sim", "Hive's Self-Improvement Memory (SIM) and recent friction summary, for editing Hive itself. \
+            mode='read' shows full SIM + friction; 'propose' logs a pre-edit root cause, edit, and prediction (returns id); \
+            'outcome' appends post-eval fixed/missed/status to an attempt id; 'export' formats an anonymized JSONL line for server/sim.jsonl.",
+            json!({ "mode": s("read | propose | outcome | export"), "id": n("Attempt id (for outcome/export; 0 otherwise)."),
+            "problem": s("Root-cause hypothesis (reuse existing exact name when it matches)."),
+            "what": s("Edit and rationale."), "files": s("Comma-separated files touched."),
+            "predicted": s("Concrete failure/test predicted to improve before evaluation."),
+            "fixed": s("Observed fixes after evaluation."), "missed": s("Unresolved predictions or regressions."),
+            "status": s("active | missed | reverted | pruned"), "days": n("Lookback days for read friction (default 7).") }),
+            &["mode"]));
+        t.push(tool("reinstall", "After you've committed a change to Hive's code: run cargo test, rebuild and restart this Hive from \
+            its checkout (aborts if tests or build fail). Links test pass/total and commit SHA onto sim_id (or latest proposed SIM entry).",
+            json!({ "sim_id": n("Optional SIM attempt id from sim(mode='propose'); 0 for latest proposed.") }), &[]));
     }
     t
 }

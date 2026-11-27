@@ -13,7 +13,7 @@ create table if not exists tasks(id integer primary key, request_id integer, pro
 create table if not exists rules(id integer primary key, text text, quote text, scope text default '', code text,
   at integer, active integer default 1);
 create table if not exists agents(id integer primary key, task_id integer, kind text default 'codex', name text, thread text,
-  status text default 'working', at integer, updated integer, tools text default '');
+  status text default 'working', at integer, updated integer, tools text default '', model text default '', effort text default '');
 create table if not exists log(id integer primary key, at integer, agent_id integer, task_id integer, request_id integer,
   who text, text text);
 create table if not exists session_events(agent integer, source text, offset integer, primary key(agent,source,offset));
@@ -27,6 +27,9 @@ create table if not exists tokens(hash text primary key, node text, at integer);
 create table if not exists node_tokens(node text primary key, hash text unique);
 create table if not exists info(key text primary key, value text, updated integer);
 create table if not exists files(id integer primary key, name text, size integer, node text, at integer);
+create table if not exists sim(id integer primary key, problem text, what text, files text default '', engine text default '',
+  model text default '', predicted text default '', fixed text default '', missed text default '', passed integer default 0,
+  total integer default 0, status text default 'proposed', commit_sha text default '', at integer);
 create index if not exists log_agent on log(agent_id, id);
 create index if not exists log_task on log(task_id, id);
 create index if not exists tasks_status on tasks(status);
@@ -71,6 +74,8 @@ impl Db {
         // Columns added since a database was made (fails harmlessly once it has them).
         c.execute_batch("alter table tasks add column every integer default 0").ok();
         c.execute_batch("alter table agents add column tools text default ''").ok();
+        c.execute_batch("alter table agents add column model text default ''").ok();
+        c.execute_batch("alter table agents add column effort text default ''").ok();
         Db(Mutex::new(c))
     }
 
@@ -154,10 +159,14 @@ mod tests {
     #[test]
     fn older_database_gains_repeats() {
         let path = std::env::temp_dir().join(format!("hive-old-{}.db", std::process::id()));
-        Connection::open(&path).unwrap().execute_batch("create table tasks(id integer primary key, title text, status text, updated integer)").unwrap();
+        Connection::open(&path).unwrap().execute_batch("create table tasks(id integer primary key, title text, status text, updated integer); \
+            create table agents(id integer primary key, task_id integer, kind text)").unwrap();
         let db = Db::open(path.to_str().unwrap());
         db.run("insert into tasks(title, status, updated, every) values('daily', 'done', 0, 24)", &[]);
         db.run("insert into tasks(title, status, updated) values('once', 'done', 0)", &[]);
+        db.run("insert into agents(task_id, kind, model, effort) values(1, 'codex', 'gpt-6.1-terra', 'low')", &[]);
+        assert_eq!(db.get("select model, effort from agents where task_id=1", &[]), Some(json!({ "model": "gpt-6.1-terra", "effort": "low" })));
+        assert!(db.tables().iter().any(|t| t == "sim"));
         let due = db.all("select title from tasks where every>0 and status='done' and updated<=?-every*3600000", args!(now()));
         assert_eq!(due, vec![json!({ "title": "daily" })]);
         drop(db);

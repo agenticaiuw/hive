@@ -1,5 +1,4 @@
 //! The VM's own things: its screen, typing a saved login (cred.rs keeps them), and rebuilding Hive from its git checkout.
-use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -22,24 +21,61 @@ pub fn type_password(site: &str, username: &str) -> Result<String, String> {
     Ok(format!("Typed the password for {} ({}) into the focused field.", login["url"].as_str().unwrap_or(site), login["username"].as_str().unwrap_or("")))
 }
 
-fn sh(cmd: &str, dir: &Path) -> (bool, String) {
-    match Command::new("bash").args(["-c", cmd]).current_dir(dir).output() {
+fn run_cmd(prog: &str, args: &[&str], dir: &Path, envs: &[(&str, &str)]) -> (bool, String) {
+    match Command::new(prog).args(args).envs(envs.iter().copied()).current_dir(dir).output() {
         Ok(o) => (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
         Err(e) => (false, e.to_string()),
     }
 }
 
-/// Take in GitHub's main (keeping this checkout's own commits on top), build, and restart Hive's server; the restart comes after this
-/// answer is sent. This checkout's commits stay here, the owner's own; devices keep GitHub's build.
-pub fn reinstall(repo: &Path) -> Result<Value, String> {
-    let (ok, out) = sh("(git pull -q --rebase --autostash origin main || git rebase --abort); CARGO_TARGET_DIR=target cargo build --release -p hive-server 2>&1 | tail -30", repo);
-    let tail: String = out.chars().rev().take(4000).collect::<String>().chars().rev().collect();
-    if !ok || tail.contains("error[") || tail.contains("error:") { return Err(format!("The build failed:\n{tail}")); }
+fn tail(out: &str, n: usize) -> String { out.chars().rev().take(n).collect::<String>().chars().rev().collect() }
+
+pub fn head_sha(repo: &Path) -> String {
+    let (ok, out) = run_cmd("git", &["rev-parse", "--short=12", "HEAD"], repo, &[]);
+    if ok { out.trim().to_string() } else { String::new() }
+}
+
+/// Sum `N passed; M failed` across all Cargo test binaries in a `cargo test` run.
+pub fn parse_test_counts(out: &str) -> (i64, i64) {
+    let (mut passed, mut failed) = (0i64, 0i64);
+    for line in out.lines().filter(|l| l.starts_with("test result:")) {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for w in toks.windows(2) {
+            if let Ok(n) = w[0].parse::<i64>() {
+                if w[1].starts_with("passed") { passed += n; }
+                else if w[1].starts_with("failed") { failed += n; }
+            }
+        }
+    }
+    (passed, passed + failed)
+}
+
+pub struct Reinstall {
+    pub passed: i64,
+    pub total: i64,
+    pub commit: String,
+    pub message: String,
+}
+
+/// Rebase onto GitHub's main (keeping local commits on top), verify with `cargo test`, build release, and restart.
+/// Aborts before restarting if tests or build fail, returning `(passed, total, commit, error)` so SIM records failed evals too.
+pub fn reinstall(repo: &Path) -> Result<Reinstall, (i64, i64, String, String)> {
+    let _ = run_cmd("bash", &["-c", "git pull -q --rebase --autostash origin main || git rebase --abort"], repo, &[]);
+    let commit = head_sha(repo);
+    let env = [("CARGO_TARGET_DIR", "target")];
+    let (ok, test_out) = run_cmd("cargo", &["test", "-p", "hive-server", "-p", "hive-protocol"], repo, &env);
+    let (passed, total) = parse_test_counts(&test_out);
+    if !ok { return Err((passed, total, commit, format!("Tests failed ({passed}/{total}):\n{}", tail(&test_out, 4000)))); }
+    let (ok, build_out) = run_cmd("cargo", &["build", "--release", "-p", "hive-server"], repo, &env);
+    if !ok { return Err((passed, total, commit, format!("The build failed:\n{}", tail(&build_out, 4000)))); }
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(2));
         Command::new("systemctl").args(["--no-block", "restart", "hive-server"]).status().ok();
     });
-    Ok(json!("Built. Hive's server restarts in a moment; your turn continues after it's back."))
+    Ok(Reinstall {
+        passed, total, commit: commit.clone(),
+        message: format!("Verified ({passed}/{total} tests passed at {commit}) and built. Hive's server restarts in a moment; your turn continues after it's back."),
+    })
 }
 
 /// Bridge the dashboard's authenticated WebSocket to the loopback-only VNC service.
@@ -124,5 +160,11 @@ mod control_tests {
         client.close(None).unwrap();
         worker.join().unwrap();
         assert_eq!(desktop.read(&mut bytes).unwrap(), 0);
+    }
+    #[test]
+    fn parses_cargo_test_counts() {
+        let out = "running 16 tests\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured\n\
+                   running 3 tests\ntest result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured\n";
+        assert_eq!(parse_test_counts(out), (18, 19));
     }
 }

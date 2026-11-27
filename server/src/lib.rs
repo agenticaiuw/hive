@@ -13,6 +13,7 @@ mod http;
 #[cfg(target_os = "macos")]
 pub mod menubar;
 pub mod tailnet;
+mod sim;
 mod tools;
 mod vm;
 pub mod setup;

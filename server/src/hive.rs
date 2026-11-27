@@ -5,6 +5,7 @@ use crate::args;
 use crate::claude::{Claude, Out};
 use crate::codex::{tool_result, Codex, Event};
 use crate::db::{now, Db};
+use crate::sim;
 use crate::tools;
 use hive_protocol::b64;
 use serde_json::{json, Value};
@@ -12,6 +13,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+#[derive(Default, Clone, Debug)]
+struct TurnEvidence {
+    last_failed: Option<String>,
+    edited: bool,
+    done_checks: u8,
+}
 
 pub struct Hive {
     pub db: Db,
@@ -30,6 +38,8 @@ pub struct Hive {
     nudges: Mutex<HashMap<i64, u32>>,
     /// Agents sent back once to check that what they'd stop for is truly the owner's.
     rechecked: Mutex<HashSet<i64>>,
+    /// Per-agent execution evidence for gating premature done=true claims.
+    evidence: Mutex<HashMap<i64, TurnEvidence>>,
     last: Mutex<HashMap<i64, String>>,
     locks: Mutex<HashMap<String, (i64, i64)>>,
     assignments: Mutex<()>,
@@ -86,10 +96,21 @@ impl Hive {
             db, state, repo, engine, version, local,
             assignments: Mutex::new(()),
             codex: Mutex::new(None), events: Mutex::new(None), loaded: Mutex::new(HashSet::new()),
-            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()), rechecked: Mutex::new(HashSet::new()), last: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashMap::new()), watchers: Mutex::new(HashMap::new()), nudges: Mutex::new(HashMap::new()),
+            rechecked: Mutex::new(HashSet::new()), evidence: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()), changed: (Mutex::new(0), Condvar::new()),
             claudes: Mutex::new(HashMap::new()), mcp: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn engine_name(&self) -> &'static str {
+        if matches!(self.engine, Engine::Claude { .. }) { "claude" } else { "codex" }
+    }
+
+    pub fn model_for(&self, level: &str) -> (&'static str, &'static str) {
+        let table = if matches!(self.engine, Engine::Claude { .. }) { &CLAUDE_LEVELS } else { &LEVELS };
+        let (_, m, e) = table.iter().find(|l| l.0 == level).copied().unwrap_or(table[1]);
+        (m, e)
     }
 
     /// Runs the iPhone's node here once the owner has connected one (phone/).
@@ -426,6 +447,18 @@ impl Hive {
         self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, 'claude', ?, 'working', ?, ?)", args!(task, name, now(), now()))
     }
 
+    /// Schedule a one-shot or repeating (`every_hours > 0`) harness retrospective task using Hive's existing task loop.
+    pub fn start_retrospective(self: &Arc<Self>, every_hours: i64) -> i64 {
+        let quote = "Run a harness retrospective: read recent friction and SIM, diagnose recurring harness failures, prefer simplifying or pruning obsolete code over adding lines, verify any change with tests, and ask for approval before pushing upstream.";
+        let rid = self.db.run("insert into requests(at, node, agent, text, context, status, reply) values(?, 'hive', '', ?, '{}', 'planned', 'Started harness retrospective.')",
+            args!(now(), quote));
+        let nodes = if self.repo.is_some() { json!(["hive", "vm"]) } else { json!(["hive"]) };
+        self.add_task(rid, &json!({
+            "title": "Harness retrospective", "quote": quote, "project": "hive",
+            "nodes": nodes, "level": "hard", "every": every_hours.max(0),
+        }))
+    }
+
     // ---- agents ----
 
     fn instructions(&self, task: &Value) -> String {
@@ -467,6 +500,9 @@ impl Hive {
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
             if nodes.contains(&s(&n["kind"])) && !s(&n["notes"]).is_empty() { t += &format!("\n- {}", s(&n["notes"])); }
         }
+        if list(&task["nodes"]).iter().any(|n| n == "hive") {
+            t += &format!("\n\n{}\n\nCurrent SIM:\n{}", sim::PROTOCOL, sim::format(&self.db, self.repo.as_deref()));
+        }
         t
     }
 
@@ -491,8 +527,7 @@ impl Hive {
         let _assignment = self.assignments.lock().unwrap();
         let Some(task) = self.db.get("select * from tasks where id=?", args!(task_id)) else { return };
         if !matches!(s(&task["status"]).as_str(), "open" | "working" | "queued") { return; }
-        let level = s(&task["level"]);
-        let effort = LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(LEVELS[1]).2;
+        let (model, effort) = self.model_for(&s(&task["level"]));
         let on_claude = matches!(self.engine, Engine::Claude { .. });
         let kind = if on_claude { CLAUDE_AGENT } else { "codex" };
         // A task an agent claimed waits for it; any other goes to a free agent that knows its project, else a new one.
@@ -506,11 +541,11 @@ impl Hive {
             self.db.run("update tasks set agent_id=?, status='queued' where id=?", args!(agent, task_id));
             if !self.ready_for_task(agent) { self.bump(); return; }
             if let Some(c) = self.claudes.lock().unwrap().remove(&agent) { c.close(); }
-            self.db.run("update agents set task_id=?, thread=null, tools='', status='working', updated=? where id=?", args!(task_id, now(), agent));
+            self.db.run("update agents set task_id=?, thread=null, tools='', status='working', updated=?, model=?, effort=? where id=?", args!(task_id, now(), model, effort, agent));
             agent
         } else {
-            self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, ?, ?, 'working', ?, ?)",
-                args!(task_id, kind, short(&s(&task["title"]), 60), now(), now()))
+            self.db.run("insert into agents(task_id, kind, name, status, at, updated, model, effort) values(?, ?, ?, 'working', ?, ?, ?, ?)",
+                args!(task_id, kind, short(&s(&task["title"]), 60), now(), now(), model, effort))
         };
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
         let result = if on_claude { self.claude_turn(agent, "Start on your task now.") }
@@ -551,13 +586,12 @@ impl Hive {
     fn start_turn(self: &Arc<Self>, agent: i64, text: &str) -> Result<(), String> {
         if self.db.get("select 1 from agents where id=? and kind=?", args!(agent, CLAUDE_AGENT)).is_some() { return self.claude_turn(agent, text); }
         let level = self.db.get("select t.level from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).map(|r| s(&r["level"])).unwrap_or_default();
-        let effort = LEVELS.iter().find(|l| l.0 == level).map(|l| l.2).unwrap_or("low");
-        self.start_turn_with(agent, text, effort)
+        self.start_turn_with(agent, text, self.model_for(&level).1)
     }
 
     /// A Codex thread for an agent, with the task's instructions and its devices' tools as they are now.
     fn new_thread(self: &Arc<Self>, agent: i64, task: &Value) -> Result<String, String> {
-        let model = LEVELS.iter().find(|l| l.0 == s(&task["level"])).copied().unwrap_or(LEVELS[1]).1;
+        let (model, _) = self.model_for(&s(&task["level"]));
         let tools = self.tools_for(&self.task_kinds(task));
         let instructions = self.instructions(task);
         let r = self.codex()?.request("thread/start", json!({
@@ -673,6 +707,15 @@ impl Hive {
         }
     }
 
+    fn record_evidence(&self, agent: i64, edited: bool, failed: Option<String>) {
+        if agent <= 0 { return; }
+        let mut map = self.evidence.lock().unwrap();
+        let ev = map.entry(agent).or_default();
+        if edited { ev.edited = true; }
+        else if let Some(err) = failed { ev.last_failed = Some(err); }
+        else { ev.last_failed = None; ev.edited = false; }
+    }
+
     fn note(self: &Arc<Self>, method: &str, params: Value) {
         let thread = s(&params["threadId"]);
         if let Some(tx) = self.watchers.lock().unwrap().get(&thread) { tx.send((method.to_string(), params)).ok(); return; }
@@ -683,7 +726,16 @@ impl Hive {
             "turn/started" => { self.turns.lock().unwrap().insert(thread, s(&params["turn"]["id"])); }
             "item/started" | "item/completed" => {
                 let item = &params["item"];
-                let line = match s(&item["type"]).as_str() {
+                let item_type = s(&item["type"]);
+                if method == "item/completed" {
+                    if item_type == "commandExecution" {
+                        let failed = item["exitCode"].as_i64().is_some_and(|c| c != 0) || s(&item["status"]) == "failed";
+                        self.record_evidence(agent, false, failed.then(|| short(&format!("$ {} {}", s(&item["command"]), s(&item["aggregatedOutput"])), 200)));
+                    } else if item_type == "fileChange" {
+                        self.record_evidence(agent, true, None);
+                    }
+                }
+                let line = match item_type.as_str() {
                     "agentMessage" if method == "item/completed" => {
                         let text = s(&item["text"]);
                         if ended(&text).is_some() { self.last.lock().unwrap().insert(agent, text); None } else { Some(("agent", text)) }
@@ -723,16 +775,31 @@ impl Hive {
             self.bump();
             return;
         }
-        match end {
+        let done_gate = end.as_ref().and_then(|e| {
+            let mut map = self.evidence.lock().unwrap();
+            let ev = map.entry(agent).or_default();
+            let hit = gate_completion(e, ev);
+            if hit.is_some() { ev.done_checks += 1; }
+            hit
+        });
+        match (end, done_gate) {
+            // Execution-verified completion gate: reject done=true once if the last action failed or edits went unverified.
+            (Some(_), Some((tag, msg))) => {
+                self.log(agent, task, 0, "gate", tag);
+                let me = self.clone();
+                std::thread::spawn(move || { me.start_turn(agent, &msg).ok(); });
+            }
             // Before a stop reaches the owner, the agent checks once that it's truly theirs and not a tool falling short.
-            Some(e) if e["done"] != true && self.rechecked.lock().unwrap().insert(agent) => {
+            (Some(e), None) if e["done"] != true && self.rechecked.lock().unwrap().insert(agent) => {
+                self.log(agent, task, 0, "gate", "done:false recheck");
                 let me = self.clone();
                 std::thread::spawn(move || { me.start_turn(agent, RECHECK).ok(); });
             }
-            Some(e) if self.finish(agent, task, &e) => {}
+            (Some(e), None) if self.finish(agent, task, &e) => {}
             _ => {
                 let n = { let mut m = self.nudges.lock().unwrap(); let e = m.entry(agent).or_insert(0); *e += 1; *e };
                 if n <= 2 {
+                    self.log(agent, task, 0, "gate", "missing structured end_turn");
                     let me = self.clone();
                     std::thread::spawn(move || {
                         me.start_turn(agent, "The task isn't finished and you didn't say exactly why you stopped and what you need from \
@@ -764,6 +831,7 @@ impl Hive {
         }
         self.nudges.lock().unwrap().remove(&agent);
         self.rechecked.lock().unwrap().remove(&agent);
+        self.evidence.lock().unwrap().remove(&agent);
         self.bump();
         true
     }
@@ -923,6 +991,7 @@ impl Hive {
         record("inProgress", "");
         match self.tool_inner(name, a, agent, task) {
             Ok(v) if v["error"].is_null() => {
+                if name != "sim" { self.record_evidence(agent, false, None); }
                 let images: Vec<String> = v["images"].as_array().map(|i| i.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
                 for image in &images {
                     if let Some((header, encoded)) = image.split_once(",") {
@@ -944,8 +1013,17 @@ impl Hive {
                 record("completed", &text);
                 (true, text, images)
             }
-            Ok(v) => { record("failed", &s(&v["error"])); (false, s(&v["error"]), vec![]) }
-            Err(e) => { record("failed", &e); (false, e, vec![]) }
+            Ok(v) => {
+                let err = s(&v["error"]);
+                if name != "sim" { self.record_evidence(agent, false, Some(format!("{name}: {}", short(&err, 200)))); }
+                record("failed", &err);
+                (false, err, vec![])
+            }
+            Err(e) => {
+                if name != "sim" { self.record_evidence(agent, false, Some(format!("{name}: {}", short(&e, 200)))); }
+                record("failed", &e);
+                (false, e, vec![])
+            }
         }
     }
 
@@ -966,8 +1044,7 @@ impl Hive {
         let Engine::Claude { cmd, env } = &self.engine else { return Err("this Hive runs on Codex, not Claude Code".into()) };
         let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
         let task = self.db.get("select * from tasks where id=?", args!(a["task_id"].clone())).ok_or("the agent has no task")?;
-        let level = s(&task["level"]);
-        let (_, model, effort) = CLAUDE_LEVELS.iter().find(|l| l.0 == level).copied().unwrap_or(CLAUDE_LEVELS[1]);
+        let (model, effort) = self.model_for(&s(&task["level"]));
         let token = crate::api::random(24);
         let mcp = json!({ "mcpServers": { "hive": { "type": "http", "url": format!("{}/mcp/{token}", self.local) } } });
         let mut args: Vec<String> = ["--model", model, "--effort", effort].map(String::from).into();
@@ -989,7 +1066,14 @@ impl Hive {
         let task = self.db.get("select task_id from agents where id=?", args!(agent)).and_then(|r| r["task_id"].as_i64()).unwrap_or(0);
         match out {
             Some(Out::Session(id)) => { self.db.run("update agents set thread=? where id=?", args!(id, agent)); }
-            Some(Out::Log(who, text)) => if !text.is_empty() { self.log(agent, task, 0, who, &text) },
+            Some(Out::Command { text, failed }) => {
+                self.record_evidence(agent, false, failed.then(|| short(&text, 200)));
+                if !text.is_empty() { self.log(agent, task, 0, "command", &text); }
+            }
+            Some(Out::Log(who, text)) => {
+                if who == "files" { self.record_evidence(agent, true, None); }
+                if !text.is_empty() { self.log(agent, task, 0, who, &text); }
+            }
             Some(Out::Ended { queued, .. }) if queued > 0 => {} // it goes straight on to the steers it hadn't taken
             Some(Out::Ended { error, .. }) => {
                 c.busy.store(false, SeqCst);
@@ -1074,7 +1158,42 @@ impl Hive {
                 return Ok(if r["error"].is_null() { json!(format!("Typed the saved password for {site} with {tool}.")) } else { r });
             }
             "lock" => return self.lock_files(&list(&a["files"]), agent),
-            "reinstall" => return crate::vm::reinstall(self.repo.as_ref().ok_or("Hive isn't on a VM here")?),
+            "sim" => {
+                let model = self.db.get("select model from agents where id=?", args!(agent)).map(|r| s(&r["model"])).unwrap_or_default();
+                let commit = self.repo.as_deref().map(crate::vm::head_sha).unwrap_or_default();
+                return match s(&a["mode"]).as_str() {
+                    "" | "read" => {
+                        let days = a["days"].as_i64().filter(|d| *d > 0).unwrap_or(7);
+                        Ok(json!(format!("{}\n\n{}", sim::format(&self.db, self.repo.as_deref()), sim::friction(&self.db, days))))
+                    }
+                    "propose" => {
+                        let id = sim::propose(&self.db, self.repo.as_deref(), self.engine_name(), &model, &commit, a)?;
+                        self.bump();
+                        Ok(json!(format!("Recorded SIM attempt #{id}. Pass sim_id={id} to reinstall, then record outcome.")))
+                    }
+                    "outcome" => {
+                        sim::outcome(&self.db, a["id"].as_i64().unwrap_or(0), &s(&a["fixed"]), &s(&a["missed"]), &s(&a["status"]))?;
+                        self.bump();
+                        Ok(json!("Updated SIM outcome."))
+                    }
+                    "export" => sim::export_line(&self.db, a["id"].as_i64().unwrap_or(0)).map(|l| json!(l)),
+                    other => Err(format!("unknown sim mode '{other}' (use read, propose, outcome, or export)")),
+                };
+            }
+            "reinstall" => {
+                let repo = self.repo.as_ref().ok_or("Hive isn't on a VM here")?;
+                let sim_id = a["sim_id"].as_i64().unwrap_or(0);
+                return match crate::vm::reinstall(repo) {
+                    Ok(r) => {
+                        sim::record_eval(&self.db, sim_id, true, r.passed, r.total, &r.commit);
+                        Ok(json!(r.message))
+                    }
+                    Err((passed, total, commit, e)) => {
+                        if total > 0 { sim::record_eval(&self.db, sim_id, false, passed, total, &commit); }
+                        Err(e)
+                    }
+                };
+            }
             "rule" => return self.add_rule(&s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
             "task" => {
                 let request = self.db.get("select request_id from tasks where id=?", args!(task)).map(|r| r["request_id"].clone()).unwrap_or(json!(0));
@@ -1198,6 +1317,22 @@ const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen 
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
 view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and type_password types one, here or in a device. Hive's files \
 (shared with the dashboard and nodes) are in /var/lib/hive/files.";
+
+/// Execution-verified completion check for done=true (bounded to one rejection per attempt so it never deadlocks).
+fn gate_completion(end: &Value, ev: &TurnEvidence) -> Option<(&'static str, String)> {
+    if end["done"] != true || ev.done_checks > 0 { return None; }
+    if let Some(err) = &ev.last_failed {
+        return Some(("done:true unrecovered failure", format!(
+            "Before marking this task done: your last action failed ({err}) and no successful command or tool call ran afterward to verify recovery. Verify the fix succeeded, then end again."
+        )));
+    }
+    if ev.edited {
+        return Some(("done:true unverified edit",
+            "Before marking this task done: you modified files without running a command or check afterward to verify the change works. Verify it, then end again.".into()
+        ));
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {
@@ -1517,6 +1652,40 @@ mod tests {
             assert_eq!((s(&t["status"]), s(&t["kind"]), s(&t["name"])), ("working".into(), "claude".into(), name.into()));
             hive.end_task(tid, &json!({ "done": true, "outcome": "fixed" })).unwrap();
         }
+        std::fs::remove_dir_all(&state).ok();
+    }
+
+    #[test]
+    fn completion_gate_checks_execution_evidence_without_deadlocking() {
+        let done = json!({ "done": true, "outcome": "fixed", "why": "", "need": "" });
+        let not_done = json!({ "done": false, "outcome": "", "why": "blocked", "need": "approval" });
+        // Pure conversational / 0-action tasks pass straight through.
+        assert!(gate_completion(&done, &TurnEvidence::default()).is_none());
+        assert!(gate_completion(&not_done, &TurnEvidence { last_failed: Some("err".into()), edited: true, done_checks: 0 }).is_none());
+        // Unrecovered failure blocks once, then allows completion on retry so it never deadlocks.
+        let mut ev = TurnEvidence { last_failed: Some("cargo test failed".into()), edited: false, done_checks: 0 };
+        assert_eq!(gate_completion(&done, &ev).unwrap().0, "done:true unrecovered failure");
+        ev.done_checks += 1;
+        assert!(gate_completion(&done, &ev).is_none());
+        // Unverified edit blocks once until a command/tool runs afterward.
+        let ev_edit = TurnEvidence { last_failed: None, edited: true, done_checks: 0 };
+        assert_eq!(gate_completion(&done, &ev_edit).unwrap().0, "done:true unverified edit");
+    }
+
+    #[test]
+    fn sim_only_injected_for_hive_tasks_and_retrospective_uses_repeating_tasks() {
+        let state = std::env::temp_dir().join(format!("hive-sim-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(Db::open(":memory:"), state.clone(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let normal = json!({ "id": 1, "request_id": 0, "title": "Check weather", "quote": "weather?", "nodes": "[\"vm\"]", "level": "easy" });
+        assert!(!hive.instructions(&normal).contains("Self-Improvement Memory (SIM)"));
+        let hive_task = json!({ "id": 2, "request_id": 0, "title": "Fix server", "quote": "fix server", "nodes": "[\"hive\",\"vm\"]", "level": "hard" });
+        let instr = hive.instructions(&hive_task);
+        assert!(instr.contains("Self-Improvement Memory (SIM)") && instr.contains("P1:"));
+        let tid = hive.start_retrospective(24);
+        let row = hive.db.get("select title, every, nodes from tasks where id=?", args!(tid)).unwrap();
+        assert_eq!((s(&row["title"]), row["every"].as_i64(), s(&row["nodes"])), ("Harness retrospective".into(), Some(24), "[\"hive\"]".into()));
         std::fs::remove_dir_all(&state).ok();
     }
 }
