@@ -18,12 +18,7 @@ pub fn why(state: &Path) -> Option<String> { status(state)["error"].as_str().map
 
 /// Hive's build of the helper for this computer, from Hive's release, fetched once.
 pub fn get(state: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<PathBuf, String> {
-    let name = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "hive-tailnet-macos-arm64".to_string(),
-        ("macos", _) => "hive-tailnet-macos-x86_64".to_string(),
-        ("windows", _) => "hive-tailnet-windows.exe".to_string(),
-        (_, arch) => format!("hive-tailnet-linux-{arch}"),
-    };
+    let name = hive_protocol::tailnet_asset();
     crate::setup::fetch(&state.join("bin"), "hive-tailnet", &format!("{}/{name}", hive_protocol::RELEASES), None, progress)
 }
 

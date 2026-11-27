@@ -69,6 +69,40 @@ pub fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> V
 pub fn s(d: &str) -> Value { json!({ "type": "string", "description": d }) }
 pub fn n(d: &str) -> Value { json!({ "type": "number", "description": d }) }
 
+/// Coerce any JSON value cleanly into a string (shared across server/client modules).
+pub fn str_val(v: &Value) -> String {
+    v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() })
+}
+
+/// Truncate UTF-8 text to at most `n` characters with an ellipsis.
+pub fn short(t: &str, n: usize) -> String {
+    if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" }
+}
+
+/// Persistent machine-scoped node ID (`<kind>-<hex>`), immune to macOS mDNS hostname renames (`Mac (4)` -> `(8)`).
+pub fn stable_id(kind: &str) -> String {
+    let path = conf_path(&format!("node-id-{kind}")).with_extension("txt");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let id = existing.trim();
+        if !id.is_empty() { return id.to_string(); }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let id = format!("{kind}-{:x}{:x}", nanos as u64, std::process::id());
+    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).ok(); }
+    std::fs::write(&path, &id).ok();
+    id
+}
+
+/// Release asset name for the built-in `hive-tailnet` helper on this OS/arch.
+pub fn tailnet_asset() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "hive-tailnet-macos-arm64".into(),
+        ("macos", _) => "hive-tailnet-macos-x86_64".into(),
+        ("windows", _) => "hive-tailnet-windows.exe".into(),
+        (_, arch) => format!("hive-tailnet-linux-{arch}"),
+    }
+}
+
 static UPDATING: AtomicBool = AtomicBool::new(false);
 
 /// Serve the device forever: hello, take calls, answer them (each call on its own thread).

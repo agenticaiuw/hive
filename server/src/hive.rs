@@ -73,8 +73,7 @@ const CLAUDE_AGENT: &str = "claude-agent";
 /// The iPhone's node (phone/, run by this server); its tools share the lock "<id> touch".
 const PHONE_ID: &str = "phone-iphone";
 
-fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
-fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
+use hive_protocol::{short, str_val as s};
 /// A tool list's names, which tell whether an agent's thread has today's tools.
 fn names(tools: &[Value]) -> String {
     let mut n: Vec<String> = tools.iter().map(|t| s(&t["name"])).collect();
@@ -201,10 +200,11 @@ impl Hive {
     }
 
     // External sessions have no provider process here. Their hook check-ins are the
-    // only evidence of activity; keep unfinished work, but expire its running state.
+    // only evidence of activity; keep unfinished work, expire running state after 2m, and archive stale idle tasks after 7d.
     fn expire_external_sessions(&self) {
         self.db.run("update tasks set status='idle', updated=? where status='working' and coalesce(updated,at,0)<? and agent_id in (select id from agents where kind='claude')", args!(now(), now()-120_000));
         self.db.run("update agents set status='idle' where kind='claude' and status='working' and coalesce(updated,at,0)<?", args!(now()-120_000));
+        self.db.run("update tasks set status='dropped', updated=? where status='idle' and coalesce(updated,at,0)<?", args!(now(), now() - 7 * 86_400_000));
     }
 
     pub fn external_check_in(&self, agent: i64) {
@@ -214,6 +214,7 @@ impl Hive {
 
     fn tick(self: &Arc<Self>) {
         self.expire_external_sessions();
+        self.maybe_retrospective();
         for r in self.db.all("select id from requests where status='new' order by id", &[]) {
             let id = r["id"].as_i64().unwrap_or(0);
             self.db.run("update requests set status='planning' where id=?", args!(id));
@@ -516,7 +517,15 @@ impl Hive {
 
     /// Schedule a one-shot or repeating (`every_hours > 0`) harness retrospective task using Hive's existing task loop.
     pub fn start_retrospective(self: &Arc<Self>, every_hours: i64) -> i64 {
-        let quote = "Run a harness retrospective: read recent friction and SIM, diagnose recurring harness failures, prefer simplifying or pruning obsolete code over adding lines, verify any change with tests, and ask for approval before pushing upstream.";
+        self.start_retrospective_mode(every_hours, false, "manual")
+    }
+
+    fn start_retrospective_mode(self: &Arc<Self>, every_hours: i64, subtract: bool, reason: &str) -> i64 {
+        let quote = if subtract {
+            format!("Run a Build-to-Delete harness retrospective ({reason}): call sim(mode=\"read\") to inspect dead/low-use tools, old-model SIM ablation candidates, rule scope bloat, and largest files. Target a net-negative LOC commit that deletes dead code, consolidates duplicates, or ablates obsolete workarounds without weakening tests, verify with reinstall, and record SIM outcome.")
+        } else {
+            format!("Run a harness retrospective ({reason}): call sim(mode=\"read\") to inspect recent friction, raw failure traces, and SIM; fix the highest-impact recurring harness failure (preferring simplification/deletion over adding code), verify with reinstall, and record SIM outcome.")
+        };
         let rid = self.db.run("insert into requests(at, node, agent, text, context, status, reply) values(?, 'hive', '', ?, '{}', 'planned', 'Started harness retrospective.')",
             args!(now(), quote));
         let nodes = if self.repo.is_some() { json!(["hive", "vm"]) } else { json!(["hive"]) };
@@ -524,6 +533,38 @@ impl Hive {
             "title": "Harness retrospective", "quote": quote, "project": "hive",
             "nodes": nodes, "level": "hard", "every": every_hours.max(0),
         }))
+    }
+
+    /// Actively trigger a Harness retrospective when Hive has a local repo checkout and either:
+    /// - Friction spike: >=12h since last retro AND (>=4 needs/dropped tasks or >=5 gate/timeout events in last 24h)
+    /// - Cadence: >=24h since last retro AND >=20 completed tasks since last retro
+    /// Alternates between friction-fix passes and explicit net-negative LOC subtraction/ablation passes.
+    fn maybe_retrospective(self: &Arc<Self>) -> Option<i64> {
+        if self.repo.is_none() { return None; }
+        let active = self.db.get("select 1 from tasks where title='Harness retrospective' and status in ('open','queued','working','needs') limit 1", &[]).is_some();
+        if active { return None; }
+        let last_at = self.db.get("select coalesce(max(updated),0) as at from tasks where title='Harness retrospective'", &[])
+            .and_then(|r| r["at"].as_i64()).unwrap_or(0);
+        let since_last = now().saturating_sub(last_at);
+        let since_24h = now() - 86_400_000;
+        let bad_24h = self.db.get("select count(*) as n from tasks where status in ('needs','dropped') and coalesce(quote,'')!='Imported session' and updated>=?", args!(since_24h))
+            .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+        let gate_24h = self.db.get("select count(*) as n from log where who='gate' and at>=?", args!(since_24h))
+            .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+        let timeout_24h = self.db.get("select count(*) as n from calls where status='timeout' and at>=?", args!(since_24h))
+            .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+        let done_since = self.db.get("select count(*) as n from tasks where status='done' and title!='Harness retrospective' and updated>?", args!(last_at))
+            .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+        let reason = if since_last >= 12 * 3_600_000 && (bad_24h >= 4 || gate_24h + timeout_24h >= 5) {
+            format!("auto friction spike: {bad_24h} needs/dropped, {gate_24h} gates, {timeout_24h} timeouts in 24h")
+        } else if since_last >= 24 * 3_600_000 && done_since >= 20 {
+            format!("auto cadence: {done_since} tasks completed since last retrospective")
+        } else {
+            return None;
+        };
+        let past_retros = self.db.get("select count(*) as n from tasks where title='Harness retrospective'", &[])
+            .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+        Some(self.start_retrospective_mode(0, past_retros % 2 == 1, &reason))
     }
 
     // ---- agents ----
@@ -1014,15 +1055,18 @@ impl Hive {
 
     /// Tools a worker on these granted node kinds gets: core worker tools + strictly those devices' tools.
     fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
+        const HIDDEN: &[&str] = &["browser_type_password", "mac_type_password", "windows_type_password", "mac_hand_back", "mac_restore_phone_passcode"];
         let mut out: Vec<Value> = tools::worker(kinds);
         let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
         for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
             if !kinds.contains(&s(&n["kind"])) { continue; }
             for mut t in list_values(&n["tools"]) {
+                let name = s(&t["name"]);
+                if HIDDEN.contains(&name.as_str()) { continue; }
                 if n["kind"] == "browser" {
-                    t["inputSchema"]["properties"]["browser"] = json!({"type":"string", "description":"Browser device ID from browser_devices. Required when several browsers are registered; use the same ID for every call involving its tabs."});
+                    t["inputSchema"]["properties"]["browser"] = json!({"type":"string", "description":"Browser device ID from browser_devices. Required when several browsers are online; use the same ID for every call involving its tabs."});
                 }
-                if names.insert(s(&t["name"])) { out.push(t); }
+                if names.insert(name) { out.push(t); }
             }
         }
         out
@@ -1091,6 +1135,15 @@ impl Hive {
         tool_result(ok, &text, &images)
     }
 
+    /// Cap large inline tool outputs (Context Rot prevention): spill >6,000 chars to files/ and return preview + path.
+    fn cap_tool_output(&self, name: &str, text: String) -> String {
+        let chars = text.chars().count();
+        if chars <= 6_000 { return text; }
+        let path = self.save_file(&format!("{name}-output.txt"), text.as_bytes(), "tool");
+        let preview: String = text.chars().take(5_000).collect();
+        format!("{preview}\n\n[Output truncated: full {chars} chars saved at {}. Inspect with shell/grep/head/tail if needed.]", path.display())
+    }
+
     /// A tool call, logged, as either engine answers it: whether it worked, its text, and its images (data URLs).
     fn run_tool(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> (bool, String, Vec<String>) {
         let id = crate::api::random(12);
@@ -1119,7 +1172,8 @@ impl Hive {
                         }
                     }
                 }
-                let text = if v.is_string() { s(&v) } else { s(&v["text"]) };
+                let raw = if v.is_string() { s(&v) } else { s(&v["text"]) };
+                let text = self.cap_tool_output(name, raw);
                 record("completed", &text);
                 (true, text, images)
             }
@@ -1268,9 +1322,10 @@ impl Hive {
                 let (site, user, tool) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]));
                 if tool.is_empty() { return crate::vm::type_password(&site, &user).map(|m| json!(m)); }
                 let target = match tool.as_str() {
-                    "browser_type" => "browser_type_password", "mac_type" => "mac_type_password",
-                    "windows_type" => "windows_type_password",
-                    _ => return Err("tool must be browser_type, mac_type, or windows_type".into()),
+                    "browser_type" => "browser_type_password",
+                    "mac_type" | "mac_input" => "mac_type_password",
+                    "windows_type" | "windows_input" => "windows_type_password",
+                    _ => return Err("tool must be browser_type, mac_type/mac_input, or windows_type/windows_input".into()),
                 };
                 let mut args = serde_json::from_str::<Value>(&s(&a["args"])).ok().filter(Value::is_object).unwrap_or(json!({}));
                 args["site"] = json!(site); args["username"] = json!(user);
@@ -1299,11 +1354,32 @@ impl Hive {
             return Err(format!("Orchestrator agent cannot invoke execution tool '{name}'; dispatch a worker instead."));
         }
         let selected = a["browser"].as_str().filter(|id| !id.is_empty());
+        let internal_kind = match name {
+            "browser_type_password" => Some("browser"),
+            "mac_type_password" | "mac_hand_back" => Some("mac"),
+            "windows_type_password" => Some("windows"),
+            _ => None,
+        };
         let (node, decl) = if name.starts_with("browser_") {
             let devices = self.db.all("select id, kind, name, seen, tools from nodes where kind='browser' order by seen desc", &[]);
-            if selected.is_none() && devices.len() > 1 { return Err("Choose a browser device ID with browser_devices and pass browser on every call; tab IDs belong to that browser.".into()); }
-            devices.into_iter().filter(|n| selected.is_none_or(|id| n["id"] == id))
-                .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == name).map(|t| (n, t)))
+            let cutoff = now() - 90_000;
+            let online: Vec<Value> = devices.iter().filter(|n| n["seen"].as_i64().unwrap_or(0) > cutoff).cloned().collect();
+            if selected.is_none() && online.len() > 1 {
+                return Err("Choose a browser device ID with browser_devices and pass browser on every call; tab IDs belong to that browser.".into());
+            }
+            let pool = if selected.is_some() || online.is_empty() { devices } else { online };
+            pool.into_iter().filter(|n| selected.is_none_or(|id| n["id"] == id))
+                .find_map(|n| {
+                    list_values(&n["tools"]).into_iter().find(|t| t["name"] == name)
+                        .or_else(|| internal_kind.map(|_| json!({})))
+                        .map(|t| (n, t))
+                })
+        } else if let Some(kind) = internal_kind {
+            self.db.get("select id, kind, name, seen, tools from nodes where kind=? order by seen desc limit 1", args!(kind))
+                .map(|n| {
+                    let decl = list_values(&n["tools"]).into_iter().find(|t| t["name"] == name).unwrap_or(json!({}));
+                    (n, decl)
+                })
         } else { self.device_for(name) }.ok_or(format!("Hive has no tool called {name}"))?;
         // Enforce capability boundary at runtime: a worker can only call devices granted to its task.
         self.require_node(task, &s(&node["kind"]))?;
@@ -1313,7 +1389,7 @@ impl Hive {
         // permission state. They must own the same lock as keyboard and mouse,
         // including when a connected device advertises an older tool list.
         let mac_input = node["kind"] == "mac" && matches!(name,
-            "mac_screenshot" | "mac_take_over" | "mac_click" | "mac_drag" |
+            "mac_screenshot" | "mac_take_over" | "mac_input" | "mac_click" | "mac_drag" |
             "mac_scroll" | "mac_key" | "mac_type" | "mac_type_password" | "mac_authenticate");
         if let Some(lock) = if mac_input { Some("input") } else { decl["lock"].as_str() } {
             self.take_lock(&format!("{} {lock}", s(&node["id"])), agent)?;
@@ -1329,7 +1405,7 @@ impl Hive {
         }
         let secs = a["timeout"].as_u64().map(|t| t.clamp(1, 1800) + 15).or(decl["timeout"].as_u64()).unwrap_or(120);
         let mut r = self.call_node(&node, name, &args, agent, secs)?;
-        if name == "mac_hand_back" {
+        if name == "mac_hand_back" || (name == "mac_input" && a["action"] == "hand_back") {
             let lock = format!("{} input", s(&node["id"]));
             self.locks.lock().unwrap().retain(|l, v| !(*l == lock && v.0 == agent));
             self.bump();
@@ -1851,6 +1927,79 @@ mod tests {
         let tid = hive.start_retrospective(24);
         let row = hive.db.get("select title, every, nodes from tasks where id=?", args!(tid)).unwrap();
         assert_eq!((s(&row["title"]), row["every"].as_i64(), s(&row["nodes"])), ("Harness retrospective".into(), Some(24), "[\"hive\"]".into()));
+        std::fs::remove_dir_all(&state).ok();
+    }
+
+    #[test]
+    fn hidden_tools_filtered_and_online_browser_routing_ignores_stale_duplicates() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let old_mac_tools = json!([
+            {"name":"mac_input","lock":"input","timeout":0},
+            {"name":"mac_type_password","timeout":0},
+            {"name":"mac_hand_back","timeout":0},
+            {"name":"mac_restore_phone_passcode","timeout":0}
+        ]);
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('m1','mac','Mac',?,?)", args!(old_mac_tools.to_string(), now()));
+        let mac_tools = hive.tools_for(&["mac".into()]);
+        assert!(mac_tools.iter().any(|t| t["name"] == "mac_input"));
+        for hidden in ["mac_type_password", "mac_hand_back", "mac_restore_phone_passcode"] {
+            assert!(!mac_tools.iter().any(|t| t["name"] == hidden), "{hidden} should be hidden");
+        }
+        // Offline duplicate browser does not force manual browser_devices selection when only 1 browser is online.
+        let bdecl = json!([{"name":"browser_tabs","timeout":0}]);
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('b-old','browser','Safari',?,?)", args!(bdecl.to_string(), now() - 600_000));
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('b-live','browser','Safari',?,?)", args!(bdecl.to_string(), now()));
+        let err = hive.tool_inner("browser_tabs", &json!({}), 1, 0).unwrap_err();
+        assert!(!err.contains("Choose"), "unexpected ambiguity error: {err}");
+        assert_eq!(hive.db.get("select node from calls order by id desc limit 1", &[]).unwrap()["node"], "b-live");
+        // Internal browser_type_password still dispatches to b-live even when absent from advertised tools[].
+        std::thread::scope(|s| {
+            let h = s.spawn(|| hive.tool_inner("browser_type_password", &json!({"site":"example.com","username":"u","tab":1,"i":2}), 1, 0));
+            let call = hive.wait_until(2000, || hive.db.get("select id, node from calls where tool='browser_type_password'", &[])).unwrap();
+            assert_eq!(call["node"], "b-live");
+            hive.db.run("update calls set status='done', result='{\"text\":\"Filled.\"}' where id=?", args!(call["id"].clone()));
+            hive.bump();
+            assert_eq!(h.join().unwrap().unwrap()["text"], "Filled.");
+        });
+    }
+
+    #[test]
+    fn large_tool_outputs_spill_to_disk() {
+        let state = std::env::temp_dir().join(format!("hive-spill-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(Db::open(":memory:"), state.clone(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let small = "hello world".to_string();
+        assert_eq!(hive.cap_tool_output("browser_read", small.clone()), small);
+        let huge = "a".repeat(8_000);
+        let capped = hive.cap_tool_output("browser_read", huge.clone());
+        assert!(capped.len() < 5_400 && capped.contains("Output truncated: full 8000 chars saved at"));
+        let files = hive.db.all("select name, size from files", &[]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["size"], 8000);
+        std::fs::remove_dir_all(&state).ok();
+    }
+
+    #[test]
+    fn auto_retrospective_triggers_on_friction_spike_and_alternates_subtraction() {
+        let state = std::env::temp_dir().join(format!("hive-auto-retro-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(Db::open(":memory:"), state.clone(), Some(state.clone()),
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        // Quiet DB: no retrospective triggered.
+        assert!(hive.maybe_retrospective().is_none());
+        // 5 recent gates trigger a friction-spike retrospective.
+        for _ in 0..5 {
+            hive.db.run("insert into log(at, agent_id, task_id, request_id, who, text) values(?, 1, 1, 0, 'gate', 'done:true unrecovered')", args!(now()));
+        }
+        let first = hive.maybe_retrospective().expect("first retro should fire");
+        assert!(hive.maybe_retrospective().is_none(), "active retro prevents duplicate");
+        // Mark first retro done >13h ago: next trigger alternates to Build-to-Delete subtraction pass.
+        hive.db.run("update tasks set status='done', updated=? where id=?", args!(now() - 13 * 3_600_000, first));
+        let second = hive.maybe_retrospective().expect("second retro should fire");
+        let quote = s(&hive.db.get("select quote from tasks where id=?", args!(second)).unwrap()["quote"]);
+        assert!(quote.contains("Build-to-Delete") && quote.contains("net-negative LOC"), "{quote}");
         std::fs::remove_dir_all(&state).ok();
     }
 }

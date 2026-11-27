@@ -21,16 +21,14 @@ pub const SITE: &str = "https://agenticaiuw.github.io/hive";
 pub const REGISTER: &str = "https://github.com/agenticaiuw/hive/actions/workflows/phone.yml";
 
 fn tools() -> Vec<Value> {
-    let xy = || json!({ "x": n("x in the latest screenshot"), "y": n("y in the latest screenshot") });
     let mut t = vec![
         tool("phone_unlock", "Unlock the iPhone with its saved passcode (Hive types it; you never see it). If it fails, stop using \
             the phone and say why.", json!({}), &[]),
-        tool("phone_screenshot", "See the iPhone's screen. x/y in other phone tools are pixels in this image.", json!({}), &[]),
-        tool("phone_tap", "Tap the iPhone at (x, y).", xy(), &["x", "y"]),
-        tool("phone_swipe", "Swipe on the iPhone from (x, y) to (to_x, to_y).",
-            { let mut p = xy(); p["to_x"] = n("end x"); p["to_y"] = n("end y"); p }, &["x", "y", "to_x", "to_y"]),
-        tool("phone_type", "Type into the focused field on the iPhone ('\\n' = Return).", json!({ "text": s("Text") }), &["text"]),
-        tool("phone_home", "Go to the iPhone's home screen (unlocked phones only).", json!({}), &[]),
+        tool("phone_screenshot", "See the iPhone's screen. x/y in phone_input are pixels in this image.", json!({}), &[]),
+        tool("phone_input", "Interact with the iPhone screen: action=tap(x,y), swipe(x,y,to_x,to_y), type(text; '\\n'=Return), or home (unlocked only). Returns a fresh screenshot.",
+            json!({ "action": s("tap, swipe, type, or home"), "x": n("x in the latest screenshot (tap/swipe)"),
+                "y": n("y in the latest screenshot (tap/swipe)"), "to_x": n("end x (swipe)"), "to_y": n("end y (swipe)"),
+                "text": s("Text to type (type)") }), &["action"]),
         tool("phone_open_app", "Open an iPhone app by bundle id (e.g. com.apple.mobilesafari).", json!({ "bundle_id": s("Bundle id") }), &["bundle_id"]),
     ];
     for x in &mut t { x["lock"] = json!("touch"); x["timeout"] = json!(180); }
@@ -134,5 +132,10 @@ mod tests {
         for u in ["00008110-001A2B3C00000000", "00008110-001A2B3C00000000", "../nope"] { super::seen(&root, u); }
         assert_eq!(std::fs::read_to_string(root.join("iphones")).unwrap(), "00008110-001A2B3C00000000\n");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn consolidated_phone_tools() {
+        let names: Vec<String> = super::tools().into_iter().filter_map(|t| t["name"].as_str().map(String::from)).collect();
+        assert_eq!(names, vec!["phone_unlock", "phone_screenshot", "phone_input", "phone_open_app"]);
     }
 }

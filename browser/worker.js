@@ -17,8 +17,6 @@ const TOOLS = [
   tool('browser_click', 'Click element i of a tab.', { tab: TAB, i: EL }, ['tab', 'i']),
   tool('browser_type', 'Type into field i of a tab, replacing what it held; enter presses Enter after.',
     { tab: TAB, i: EL, text: str('What to type.'), enter: { type: 'boolean', description: 'Press Enter after.' } }, ['tab', 'i', 'text', 'enter']),
-  tool('browser_type_password', 'Fill a password field with a Hive saved password without revealing it. The tab must be on the login site.',
-    { tab: TAB, i: EL, site: str('The exact login site'), username: str('Which login; empty for the only one') }, ['tab', 'i', 'site', 'username']),
   tool('browser_js', "Run JavaScript in a tab's page and get the value of its last expression (a promise is awaited).",
     { tab: TAB, code: str('JavaScript.') }, ['tab', 'code']),
   tool('browser_screenshot', 'See an already visible tab without switching tabs. For background tabs, use browser_read or browser_js.', { tab: TAB }, ['tab'], { lock: 'screen' }),

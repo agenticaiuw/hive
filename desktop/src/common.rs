@@ -10,54 +10,36 @@ use std::time::{Duration, Instant};
 
 pub fn tools() -> Vec<Value> {
     let (k, on) = (os::KIND, os::NAME);
-    let xy = || json!({ "x": n("x in the latest screenshot"), "y": n("y in the latest screenshot") });
-    let mut input = vec![
-        tool(&format!("{k}_click"), &format!("Click on the {on} at (x, y). count 2 = double click; button left|right."),
-            { let mut p = xy(); p["button"] = s("left or right"); p["count"] = n("1 or 2"); p }, &["x", "y", "button", "count"]),
-        tool(&format!("{k}_drag"), &format!("Drag on the {on} from (x, y) to (to_x, to_y)."),
-            { let mut p = xy(); p["to_x"] = n("end x"); p["to_y"] = n("end y"); p }, &["x", "y", "to_x", "to_y"]),
-        tool(&format!("{k}_scroll"), &format!("Scroll on the {on} at (x, y): dy > 0 scrolls down, dx > 0 right (in wheel notches)."),
-            { let mut p = xy(); p["dy"] = n("notches down"); p["dx"] = n("notches right"); p }, &["x", "y", "dy", "dx"]),
-        tool(&format!("{k}_type"), &format!("Type text on the {on} into whatever has focus."), json!({ "text": s("Text to type") }), &["text"]),
-        tool(&format!("{k}_type_password"), &format!("Type a Hive saved password into the focused field on the {on} without revealing it."),
-            json!({ "site": s("The login site"), "username": s("Which login; empty for the only one") }), &["site", "username"]),
-        tool(&format!("{k}_key"), &format!("Press keys on the {on}, e.g. {}.", os::KEYS), json!({ "keys": s("Keys joined with +") }), &["keys"]),
-    ];
-    for t in &mut input { t["lock"] = json!("input"); }
     let mut shot = if cfg!(target_os = "macos") {
-        tool("mac_screenshot", "See the owner's Mac: the whole screen, or with app (e.g. \"Safari\") only that app's front window, even under \
-            other windows. The other mac tools then act in what it showed, x/y being its pixels: in an app's window they go to that app alone, \
-            in the background, and the owner keeps their pointer and keyboard (clicks, scrolling, typing and keys like return work there; \
-            shortcuts through the app's menus, like cmd+s, don't); on the whole screen they use the Mac's own pointer and keyboard, \
-            which reach everything (Dock, menu bar, cmd+space, system dialogs), once the owner has handed them over with mac_take_over.",
-            json!({ "app": s("An app's name for only its window, or \"\" for the whole screen") }), &["app"])
+        tool("mac_screenshot", "See the owner's Mac: whole screen (app=\"\"), or one app's front window in the background (owner keeps pointer/keyboard; menu shortcuts need mac_take_over). x/y in mac_input are pixels in this image.",
+            json!({ "app": s("App name for one window, or \"\" for whole screen") }), &["app"])
     } else {
-        tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in the other {k} tools are pixels in this image."), json!({}), &[])
+        tool(&format!("{k}_screenshot"), &format!("See the owner's {on} screen. x/y in {k}_input are pixels in this image."), json!({}), &[])
     };
     shot["lock"] = json!("input");
-    let mut all = vec![shot];
+
+    let actions = if cfg!(target_os = "macos") { "click|drag|scroll|type|key|authenticate|hand_back" } else { "click|drag|scroll|type|key" };
+    let mut input = tool(&format!("{k}_input"),
+        &format!("Drive pointer/keyboard on the {on}. action: {actions}. click(x,y,button?,count?), drag(x,y,to_x,to_y), scroll(x,y,dx?,dy?), type(text), key(keys e.g. {}){}.",
+            os::KEYS, if cfg!(target_os = "macos") { ", authenticate (types saved Mac login password into focused field after takeover), hand_back (returns pointer/keyboard)" } else { "" }),
+        json!({
+            "action": s(actions),
+            "x": n("x in latest screenshot"), "y": n("y in latest screenshot"),
+            "to_x": n("drag end x"), "to_y": n("drag end y"),
+            "dx": n("scroll notches right"), "dy": n("scroll notches down"),
+            "button": s("left or right"), "count": n("1 or 2"),
+            "text": s("text to type"), "keys": s("keys joined with +")
+        }), &["action"]);
+    input["lock"] = json!("input");
+
+    let mut all = vec![shot, input];
     if cfg!(target_os = "macos") {
-        let mut auth = tool("mac_authenticate", "Type the saved Mac login password into the focused authentication field, without revealing it. Requires an approved whole-Mac handover. Click the password field first, then inspect the result.", json!({}), &[]);
-        auth["lock"] = json!("input");
-        all.push(auth);
-        all.push(tool("mac_restore_phone_passcode", "Migrate the single phone passcode saved by older Hive versions in this Mac's Keychain to the current Hive Server, without exposing it. The iPhone must be connected; the server binds it to that iPhone. No passcode is typed.", json!({}), &[]));
-        let mut t = tool("mac_take_over", "Only when your next step needs the Mac's own pointer and keyboard because one app's window can't \
-            take it (a menu shortcut, the Dock or menu bar, a system dialog, a page that ignores background clicks); never for the shell, \
-            screenshots, or what an app's window or the browser tools can do. Asks the owner, in a floating window on their Mac, to hand them \
-            over, saying why and about how long. Waits for their answer; once they hand it over, it returns a screenshot of the whole screen, \
-            and its input works for that long (or until the owner takes it back). Use it at once (the owner is watching your log), and call \
-            mac_hand_back the moment you're done.",
-            json!({ "why": s("What you're doing and why you need the whole Mac, in a sentence or two for the owner"), "minutes": n("About how many minutes you need") }),
-            &["why", "minutes"]);
+        let mut t = tool("mac_take_over", "Ask the owner to hand over the Mac's pointer/keyboard when a single app window can't do it (menu shortcuts, Dock, system dialogs). Returns a whole-screen shot; call mac_input(action=\"hand_back\") when done.",
+            json!({ "why": s("Why you need the whole Mac"), "minutes": n("About how many minutes") }), &["why", "minutes"]);
         t["lock"] = json!("input");
         t["timeout"] = json!(660);
         all.push(t);
-        let mut back = tool("mac_hand_back", "Give the owner back the Mac's own pointer and keyboard the moment you're done with them (Hive also \
-            does when your turn ends).", json!({}), &[]);
-        back["lock"] = json!("input");
-        all.push(back);
     }
-    all.append(&mut input);
     all.extend([
         tool(&format!("{k}_shell"), &format!("Run a command on the owner's {on} ({}, as the owner) and get its output.", os::SHELL),
             json!({ "command": s("The command"), "timeout": n("Seconds, default 120") }), &["command", "timeout"]),
@@ -71,7 +53,9 @@ pub fn tools() -> Vec<Value> {
 pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
     let f = |k: &str| a[k].as_f64().unwrap_or(0.0);
     let done = |t: &str| Ok(json!({ "text": t }));
-    match tool.strip_prefix(os::KIND).and_then(|t| t.strip_prefix('_')).unwrap_or("") {
+    let op = tool.strip_prefix(os::KIND).and_then(|t| t.strip_prefix('_')).unwrap_or("");
+    let op = if op == "input" { a["action"].as_str().unwrap_or("") } else { op };
+    match op {
         "screenshot" => os::screenshot(a["app"].as_str().unwrap_or("")),
         "click" => { os::click(f("x"), f("y"), a["button"] == "right", a["count"].as_i64().unwrap_or(1).clamp(1, 3))?; done("Clicked.") }
         "drag" => { os::drag(f("x"), f("y"), f("to_x"), f("to_y"))?; done("Dragged.") }
@@ -89,8 +73,6 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         "hand_back" => { os::give_back(); done("Handed the Mac's pointer and keyboard back to the owner.") }
         #[cfg(target_os = "macos")]
         "authenticate" => { os::authenticate()?; done("Typed the saved Mac password. Inspect the authentication result.") }
-        #[cfg(target_os = "macos")]
-        "restore_phone_passcode" => { os::restore_phone_passcode()?; done("Restored the saved phone passcode to Hive, bound to the connected iPhone.") }
         "shell" => shell(os::shell(a["command"].as_str().unwrap_or("")), a["timeout"].as_u64().unwrap_or(120).clamp(1, 1800)),
         "get_file" => {
             let path = a["path"].as_str().unwrap_or("");
@@ -143,6 +125,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 10 + 4 * cfg!(target_os = "macos") as usize);
+        assert_eq!(tools().len(), 5 + cfg!(target_os = "macos") as usize);
     }
 }

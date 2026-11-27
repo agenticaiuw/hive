@@ -53,28 +53,65 @@ pub fn parse_test_counts(out: &str) -> (i64, i64) {
 pub struct Reinstall {
     pub passed: i64,
     pub total: i64,
+    pub net_loc: i64,
     pub commit: String,
     pub message: String,
 }
 
-/// Rebase onto GitHub's main (keeping local commits on top), verify with `cargo test`, build release, and restart.
-/// Aborts before restarting if tests or build fail, returning `(passed, total, commit, error)` so SIM records failed evals too.
-pub fn reinstall(repo: &Path) -> Result<Reinstall, (i64, i64, String, String)> {
+/// Parse `git diff --shortstat` (`N insertions(+), M deletions(-)`) into signed net LOC (`insertions - deletions`).
+pub fn parse_shortstat_net_loc(out: &str) -> i64 {
+    let (mut ins, mut del) = (0i64, 0i64);
+    for part in out.split(',') {
+        let mut toks = part.split_whitespace();
+        if let (Some(n), Some(kind)) = (toks.next().and_then(|v| v.parse::<i64>().ok()), toks.next()) {
+            if kind.starts_with("insertion") { ins += n; }
+            else if kind.starts_with("deletion") { del += n; }
+        }
+    }
+    ins - del
+}
+
+/// Anti-reward-hacking gate: prevent agents from deleting or weakening tests to make `cargo test` pass.
+pub fn check_test_baseline(state: &Path, total: i64) -> Result<(), String> {
+    let baseline = std::fs::read_to_string(state.join("test-baseline")).ok()
+        .and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0);
+    if baseline > 0 && total < baseline {
+        return Err(format!("Test count regressed ({total} < baseline {baseline}). Do not delete tests to make the suite pass; keep or expand test coverage."));
+    }
+    Ok(())
+}
+
+pub fn save_test_baseline(state: &Path, total: i64) {
+    let path = state.join("test-baseline");
+    let prev = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0);
+    if total > prev { std::fs::write(&path, total.to_string()).ok(); }
+}
+
+/// Rebase onto GitHub's main (keeping local commits on top), verify with `cargo test` + test-baseline gate, build release, and restart.
+/// Aborts before restarting if tests, baseline, or build fail, returning `(passed, total, commit, error)` so SIM records failed evals too.
+pub fn reinstall(repo: &Path, state: &Path) -> Result<Reinstall, (i64, i64, String, String)> {
     let _ = run_cmd("bash", &["-c", "git pull -q --rebase --autostash origin main || git rebase --abort"], repo, &[]);
     let commit = head_sha(repo);
     let env = [("CARGO_TARGET_DIR", "target")];
     let (ok, test_out) = run_cmd("cargo", &["test", "-p", "hive-server", "-p", "hive-protocol"], repo, &env);
     let (passed, total) = parse_test_counts(&test_out);
     if !ok { return Err((passed, total, commit, format!("Tests failed ({passed}/{total}):\n{}", tail(&test_out, 4000)))); }
+    if let Err(e) = check_test_baseline(state, total) {
+        return Err((passed, total, commit, e));
+    }
+    let (_, stat_out) = run_cmd("git", &["diff", "--shortstat", "HEAD~1..HEAD"], repo, &[]);
+    let net_loc = parse_shortstat_net_loc(&stat_out);
     let (ok, build_out) = run_cmd("cargo", &["build", "--release", "-p", "hive-server"], repo, &env);
     if !ok { return Err((passed, total, commit, format!("The build failed:\n{}", tail(&build_out, 4000)))); }
+    save_test_baseline(state, total);
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(2));
         Command::new("systemctl").args(["--no-block", "restart", "hive-server"]).status().ok();
     });
+    let sign = if net_loc > 0 { "+" } else { "" };
     Ok(Reinstall {
-        passed, total, commit: commit.clone(),
-        message: format!("Verified ({passed}/{total} tests passed at {commit}) and built. Hive's server restarts in a moment; your turn continues after it's back."),
+        passed, total, net_loc, commit: commit.clone(),
+        message: format!("Verified ({passed}/{total} tests passed at {commit}, net {sign}{net_loc} LOC) and built. Hive's server restarts in a moment; your turn continues after it's back."),
     })
 }
 
@@ -166,5 +203,21 @@ mod control_tests {
         let out = "running 16 tests\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured\n\
                    running 3 tests\ntest result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured\n";
         assert_eq!(parse_test_counts(out), (18, 19));
+    }
+    #[test]
+    fn parses_net_loc_and_enforces_test_baseline() {
+        assert_eq!(parse_shortstat_net_loc(" 3 files changed, 12 insertions(+), 45 deletions(-)\n"), -33);
+        assert_eq!(parse_shortstat_net_loc(" 1 file changed, 10 insertions(+)\n"), 10);
+        assert_eq!(parse_shortstat_net_loc(" 2 files changed, 8 deletions(-)\n"), -8);
+        let dir = std::env::temp_dir().join(format!("hive-baseline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(check_test_baseline(&dir, 10).is_ok());
+        save_test_baseline(&dir, 42);
+        assert!(check_test_baseline(&dir, 42).is_ok());
+        assert!(check_test_baseline(&dir, 45).is_ok());
+        assert!(check_test_baseline(&dir, 41).unwrap_err().contains("regressed"));
+        save_test_baseline(&dir, 30); // never lowers baseline
+        assert!(check_test_baseline(&dir, 41).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

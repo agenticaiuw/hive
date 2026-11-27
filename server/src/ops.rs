@@ -31,8 +31,7 @@ impl Actor {
     pub fn is_control_plane(self) -> bool { matches!(self.role, Role::Owner | Role::Orchestrator) }
 }
 
-fn s(v: &Value) -> String { v.as_str().map(String::from).unwrap_or_else(|| if v.is_null() { String::new() } else { v.to_string() }) }
-fn short(t: &str, n: usize) -> String { if t.chars().count() <= n { t.into() } else { t.chars().take(n).collect::<String>() + "…" } }
+use hive_protocol::{short, str_val as s};
 
 // ---- Projects ----
 
@@ -241,7 +240,7 @@ pub fn handoff(hive: &Arc<Hive>, actor: Actor, to_task: i64, kind: &str, text: &
             return Err(format!("Handoffs stay within the same project or request (yours is '{sp}', task #{to_task} is '{tp}'). Use request_help so the orchestrator can coordinate across projects."));
         }
         // Count hops between this pair since the last owner/orchestrator intervention on either task.
-        let reset_at = hive.db.get("select coalesce(max(at),0) as at from log where task_id in (?,?) and who in ('owner','hive')",
+        let reset_at = hive.db.get("select coalesce(max(at),0) as at from log where task_id in (?,?) and (who='owner' or (who='hive' and text not like 'New task #%'))",
             args!(actor.task_id, to_task)).and_then(|r| r["at"].as_i64()).unwrap_or(0);
         let hops = hive.db.get("select count(*) as n from messages where at>? and ((from_task=? and to_task=?) or (from_task=? and to_task=?))",
             args!(reset_at, actor.task_id, to_task, to_task, actor.task_id)).and_then(|r| r["n"].as_i64()).unwrap_or(0);
@@ -309,7 +308,7 @@ pub fn sim_op(hive: &Hive, actor: Actor, a: &Value) -> Result<Value, String> {
     match s(&a["mode"]).as_str() {
         "" | "read" => {
             let days = a["days"].as_i64().filter(|d| *d > 0).unwrap_or(7);
-            Ok(json!(format!("{}\n\n{}", sim::format(&hive.db, hive.repo.as_deref()), sim::friction(&hive.db, days))))
+            Ok(json!(format!("{}\n\n{}", sim::format(&hive.db, hive.repo.as_deref()), sim::friction(&hive.db, hive.repo.as_deref(), days))))
         }
         "propose" => {
             let id = sim::propose(&hive.db, hive.repo.as_deref(), hive.engine_name(), &model, &commit, a)?;
@@ -331,13 +330,13 @@ pub fn reinstall(hive: &Hive, actor: Actor, sim_id: i64) -> Result<crate::vm::Re
     if actor.role == Role::Worker && actor.agent_id > 0 {
         hive.take_lock("repo:hive", actor.agent_id).map_err(|e| (0, 0, String::new(), e))?;
     }
-    match crate::vm::reinstall(repo) {
+    match crate::vm::reinstall(repo, &hive.state) {
         Ok(r) => {
-            sim::record_eval(&hive.db, sim_id, true, r.passed, r.total, &r.commit);
+            sim::record_eval(&hive.db, sim_id, true, r.passed, r.total, r.net_loc, &r.commit);
             Ok(r)
         }
         Err((passed, total, commit, e)) => {
-            if total > 0 { sim::record_eval(&hive.db, sim_id, false, passed, total, &commit); }
+            if total > 0 { sim::record_eval(&hive.db, sim_id, false, passed, total, 0, &commit); }
             Err((passed, total, commit, e))
         }
     }

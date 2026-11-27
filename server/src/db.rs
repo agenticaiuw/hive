@@ -33,7 +33,7 @@ create table if not exists info(key text primary key, value text, updated intege
 create table if not exists files(id integer primary key, name text, size integer, node text, at integer);
 create table if not exists sim(id integer primary key, problem text, what text, files text default '', engine text default '',
   model text default '', predicted text default '', fixed text default '', missed text default '', passed integer default 0,
-  total integer default 0, status text default 'proposed', commit_sha text default '', at integer);
+  total integer default 0, net_loc integer default 0, status text default 'proposed', commit_sha text default '', at integer);
 create index if not exists log_agent on log(agent_id, id);
 create index if not exists log_task on log(task_id, id);
 create index if not exists tasks_status on tasks(status);
@@ -84,6 +84,7 @@ impl Db {
         c.execute_batch("alter table agents add column model text default ''").ok();
         c.execute_batch("alter table agents add column effort text default ''").ok();
         c.execute_batch("alter table agents add column role text default 'worker'").ok();
+        c.execute_batch("alter table sim add column net_loc integer default 0").ok();
         c.execute_batch("update agents set role='external' where kind='claude' and coalesce(role,'worker')='worker'").ok();
         Db(Mutex::new(c))
     }

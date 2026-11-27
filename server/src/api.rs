@@ -367,7 +367,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let days = req.q("days").parse::<i64>().unwrap_or(7);
             Res::json(&json!({
                 "sim": crate::sim::format(&hive.db, hive.repo.as_deref()),
-                "friction": crate::sim::friction(&hive.db, days),
+                "friction": crate::sim::friction(&hive.db, hive.repo.as_deref(), days),
             }))
         }
         ("POST", ["api", "retrospective"]) => {
@@ -375,7 +375,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!({ "task": hive.start_retrospective(every) }))
         }
         ("POST", ["api", "reinstall"]) => match crate::ops::reinstall(hive, crate::ops::Actor::owner(), b["sim_id"].as_i64().unwrap_or(0)) {
-            Ok(v) => Res::json(&json!({ "ok": true, "text": v.message, "passed": v.passed, "total": v.total, "commit": v.commit })),
+            Ok(v) => Res::json(&json!({ "ok": true, "text": v.message, "passed": v.passed, "total": v.total, "net_loc": v.net_loc, "commit": v.commit })),
             Err((_, _, _, e)) => Res::err(500, &e),
         },
         ("GET", ["api", "sites", name, "data"]) => Res::new(200, "application/json",

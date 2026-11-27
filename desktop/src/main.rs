@@ -25,7 +25,7 @@ mod os;
 /// server and the server takes it in. Saves the server's tailnet address; this run uses the door to it (tailnet.rs).
 fn join() -> Result<hive_protocol::Conf, String> {
     let (door, server) = tailnet::open("auto", &format!("{}-{}", os::KIND, os::host()), &open)?;
-    let id = format!("{}-{}", os::KIND, os::host().to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>());
+    let id = hive_protocol::stable_id(os::KIND);
     let r = ureq::post(&format!("{door}/api/pair/tailnet")).set("content-type", "application/json")
         .send_string(&serde_json::json!({ "kind": os::KIND, "name": os::host() }).to_string());
     let body = match r { Ok(r) => r.into_string().unwrap_or_default(), Err(ureq::Error::Status(_, r)) => r.into_string().unwrap_or_default(), Err(e) => return Err(e.to_string()) };

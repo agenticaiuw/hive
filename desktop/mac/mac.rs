@@ -101,7 +101,7 @@ pub fn take_over(a: &Value) -> Result<Value, String> {
     let mut shot = screenshot("")?;
     shot["text"] = json!(format!("The owner handed the Mac over for {minutes} minutes, and sees your log as you go. This is the whole \
         screen now: clicks, keys and typing use the Mac's own pointer and keyboard, which reach everything (menus, the Dock, system dialogs). \
-        Use them now, and call mac_hand_back as soon as you're done. {}", shot["text"].as_str().unwrap_or("")));
+        Use them now, and call mac_input(action=\"hand_back\") as soon as you're done. {}", shot["text"].as_str().unwrap_or("")));
     Ok(shot)
 }
 
@@ -280,62 +280,6 @@ fn read_device_credential(account: &str) -> Result<Vec<u8>, String> {
         CFRelease(data);
         Ok(bytes)
     }
-}
-
-/// One-time migration from the original Keychain store to the current server.
-/// Only the saved phone credential is sent, privately, to the authenticated Hive
-/// endpoint that binds it to the connected iPhone. Nothing is returned to agents.
-pub fn restore_phone_passcode() -> Result<(), String> {
-    let c = crate::tailnet::load().ok_or("This Mac isn't connected to Hive.")?;
-    let status = ureq::get(&format!("{}/api/phone", c.server)).set("Authorization", &format!("Bearer {}", c.token))
-        .timeout(std::time::Duration::from_secs(20)).call().map_err(|_| "Couldn't check Hive's phone credentials.")?
-        .into_string().map_err(|_| "Couldn't read Hive's phone status.")?;
-    let status: Value = serde_json::from_str(&status).map_err(|_| "Couldn't read Hive's phone status.")?;
-    if status["passcode"] == true || status["paused"] == true { return Err("Hive already has a phone credential or a paused unlock attempt; migration left it unchanged.".into()); }
-    if status["connected"] != true { return Err("The iPhone must be connected before its saved passcode can be migrated.".into()); }
-    let accounts = Command::new("/usr/bin/security").arg("dump-keychain").output().map_err(|_| "Couldn't inspect saved credential metadata.")?;
-    if !accounts.status.success() { return Err("Couldn't inspect saved credential metadata.".into()); }
-    let metadata = String::from_utf8_lossy(&accounts.stdout);
-    let account = legacy_phone_account(&metadata)?;
-    let mut secret = read_device_credential(&account)?;
-    let result = (|| {
-        let passcode = std::str::from_utf8(&secret).map_err(|_| "Saved phone credential isn't UTF-8.")?;
-        if !(4..=32).contains(&passcode.len()) || !passcode.bytes().all(|b| (b'!'..=b'~').contains(&b)) { return Err("Saved phone credential isn't a supported passcode.".into()); }
-        let response = ureq::post(&format!("{}/api/phone/passcode", c.server)).set("Authorization", &format!("Bearer {}", c.token))
-            .set("Content-Type", "application/json").timeout(std::time::Duration::from_secs(45))
-            .send_string(&json!({ "passcode": passcode }).to_string());
-        match response {
-            Ok(_) => Ok(()),
-            Err(_) => Err("Hive couldn't bind the saved passcode to the connected iPhone. No passcode was typed; inspect the phone connection.".into()),
-        }
-    })();
-    erase(&mut secret);
-    result
-}
-
-fn legacy_phone_account(metadata: &str) -> Result<String, String> {
-    let mut phones = Vec::new();
-    for block in metadata.split("keychain:") {
-        if !block.contains("\"svce\"<blob>=\"local.personal-agent.authentication\"") { continue; }
-        for line in block.lines() {
-            if let Some(account) = line.trim().strip_prefix("\"acct\"<blob>=\"").and_then(|s| s.strip_suffix('"')) {
-                if account.starts_with("phone:") { phones.push(account.to_string()); }
-            }
-        }
-    }
-    phones.sort(); phones.dedup();
-    if phones.len() != 1 { return Err("Migration needs exactly one saved phone credential; none was transferred.".into()); }
-    Ok(phones.remove(0))
-}
-
-#[test]
-fn legacy_phone_migration_requires_one_unambiguous_saved_account() {
-    let entry = |service: &str, account: &str| format!("keychain: test\n\"svce\"<blob>=\"{service}\"\n\"acct\"<blob>=\"{account}\"\n");
-    let old = "local.personal-agent.authentication";
-    let one = entry(old, "phone:one");
-    assert_eq!(legacy_phone_account(&(entry("other", "phone:unrelated") + &entry(old, "mac") + &entry(old, "attempt:mac") + &one)).unwrap(), "phone:one");
-    assert!(legacy_phone_account("").is_err());
-    assert!(legacy_phone_account(&(one + &entry(old, "phone:two"))).is_err());
 }
 
 // CoreGraphics inherits the source's modifier state, including Command left by a

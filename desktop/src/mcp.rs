@@ -57,11 +57,11 @@ fn tools() -> Vec<Value> {
             to it). With a request (from hand_off) instead, lists its open tasks; with neither, all of the owner's open tasks.",
             json!({ "task": n("The task's id"), "request": n("A request's id, from hand_off") }), &[]),
         tool("add_rule", "Save a standing instruction from the owner (always, never, from now on, a preference) as a Hive rule, which \
-            every agent then follows. Scope it as far as they meant: folder:<path> for this project, \"\" only when they clearly mean \
+            every agent then follows. Scope it as far as they meant: project:<slug> or folder:<path> for a project, \"\" only when they clearly mean \
             everything they do (also node:<kind>, site:<host>, app:<name>).",
-            json!({ "scope": s("folder:<path>, node:<kind>, site:<host>, app:<name>, or \"\" for everywhere"),
+            json!({ "scope": s("project:<slug>, folder:<path>, node:<kind>, site:<host>, app:<name>, or \"\" for everywhere"),
                 "rule": s("The rule, said plainly"), "quote": s("The owner's exact words") }), &["scope", "rule", "quote"]),
-        tool("get_rules", "The owner's rules for a folder (and this computer): follow every one.",
+        tool("get_rules", "The owner's rules for a folder/project (and this computer): follow every one.",
             json!({ "folder": s("The folder you work in; this session's folder when left out") }), &[]),
     ]
 }

@@ -169,38 +169,39 @@ impl Phone {
             std::thread::sleep(Duration::from_millis(600));
             Ok(json!({ "text": msg, "images": [self.screenshot()?] }))
         };
-        match tool {
-            "phone_unlock" => {
+        let op = if tool == "phone_input" { a["action"].as_str().unwrap_or("") } else { tool.strip_prefix("phone_").unwrap_or(tool) };
+        match op {
+            "unlock" => {
                 let r = self.unlock();
                 *self.sid.lock().unwrap() = None;
                 r.map(|_| json!({ "text": "The iPhone is unlocked." }))
                     .map_err(|e| format!("The phone didn't unlock ({e}). Don't retry; stop using the phone and say why."))
             }
-            "phone_screenshot" => Ok(json!({ "text": "The iPhone's screen.", "images": [self.screenshot()?] })),
-            "phone_tap" => {
+            "screenshot" => Ok(json!({ "text": "The iPhone's screen.", "images": [self.screenshot()?] })),
+            "tap" => {
                 let (x, y) = self.points(f("x"), f("y"))?;
                 self.touch(vec![json!({ "type": "pointerMove", "duration": 0, "x": x, "y": y }), json!({ "type": "pointerDown", "button": 0 }),
                     json!({ "type": "pause", "duration": 60 }), json!({ "type": "pointerUp", "button": 0 })])?;
                 shot("Tapped.")
             }
-            "phone_swipe" => {
+            "swipe" => {
                 let (ax, ay) = self.points(f("x"), f("y"))?;
                 let (bx, by) = self.points(f("to_x"), f("to_y"))?;
                 self.touch(vec![json!({ "type": "pointerMove", "duration": 0, "x": ax, "y": ay }), json!({ "type": "pointerDown", "button": 0 }),
                     json!({ "type": "pointerMove", "duration": 300, "x": bx, "y": by }), json!({ "type": "pointerUp", "button": 0 })])?;
                 shot("Swiped.")
             }
-            "phone_type" => {
+            "type" => {
                 let chars: Vec<String> = a["text"].as_str().unwrap_or("").chars().map(String::from).collect();
                 self.in_session("/wda/keys", "POST", Some(json!({ "value": chars })), 120)?;
                 shot("Typed.")
             }
-            "phone_home" => {
+            "home" => {
                 if self.locked()? { return Err("The iPhone is locked; call phone_unlock first.".into()); }
                 self.wda("/wda/homescreen", "POST", Some(json!({})), 120)?;
                 shot("Home screen.")
             }
-            "phone_open_app" => {
+            "open_app" => {
                 if self.locked()? { return Err("The iPhone is locked; call phone_unlock first.".into()); }
                 self.in_session("/wda/apps/activate", "POST", Some(json!({ "bundleId": a["bundle_id"] })), 120)?;
                 shot("Opened.")
