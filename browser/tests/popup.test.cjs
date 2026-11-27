@@ -7,6 +7,37 @@ const server = 'http://hive.example.ts.net';
 const c = { id: 'browser-test', token: 'test-only', server };
 const desktop = 'http://127.0.0.1:8791/';
 
+test('site rules can be deleted, and a failed deletion stays visible', async () => {
+  const nodes = {};
+  function element() {
+    return { children: [], append(...items) { this.children.push(...items); for (const item of items) item.parent = this; },
+      replaceChildren(...items) { this.children = []; this.append(...items); },
+      remove() { this.parent.children = this.parent.children.filter(item => item !== this); }, setAttribute() {} };
+  }
+  const document = { getElementById: id => nodes[id] ||= element(), createElement: element };
+  const calls = [];
+  let fail = true;
+  const api = async (config, path, body, method) => {
+    calls.push([path, method]);
+    if (method === 'DELETE') { if (fail) throw new Error('Delete failed'); return { ok: true }; }
+    return [{ id: 7, scope: 'site:example.com', text: 'First' }, { id: 8, scope: 'site:example.com', text: 'Second' },
+      { id: 9, scope: '', text: 'General' }];
+  };
+  const popup = code('popup.js').replace(/^import .*$/gm, '').split('// The tasks the last')[0];
+  const show = vm.runInNewContext(`${popup}\nshow`, { URL, document, api, conf: async () => c, work: async () => {},
+    setInterval() {}, chrome: { tabs: { query: async () => [{ url: 'https://example.com/' }] } } });
+  await show();
+  assert.equal(nodes.rules.children.length, 2);
+  const first = nodes.rules.children[0].children[1];
+  await first.onclick();
+  assert.equal(nodes.rules.children.length, 2); assert.equal(first.disabled, false); assert.equal(nodes.rulesNote.textContent, 'Delete failed');
+  fail = false; await first.onclick();
+  assert.deepEqual(calls.at(-1), ['/api/rules/7', 'DELETE']);
+  assert.equal(nodes.rules.children.length, 1); assert.equal(nodes.rulesNote.textContent, '');
+  await nodes.rules.children[0].children[1].onclick();
+  assert.equal(nodes.rulesBox.hidden, true);
+});
+
 test('a saved session hides sign-in after authentication and offers it again on disconnect', async () => {
   const nodes = {};
   let response = { status: 200, body: '{"ok":true}' };
