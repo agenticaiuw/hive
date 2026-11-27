@@ -190,6 +190,7 @@ if (!chrome.offscreen) {
   tailnet.call = (op, ...args) => (node ||= start(storage)).then((n) => n[op](...args)).catch((e) => ({ error: String(e?.message || e) }));
 }
 chrome.runtime.onMessage.addListener((m, _, reply) => {
+  if (m.hiveJoin) { pending().then(() => reply(true)); return true; }
   if (m.tailnet === 'load') { storage.load().then(reply); return true; }
   if (m.tailnet === 'save') storage.save(m.key, m.value);
   if (m.tailnet === 'status') storage.status(m.status);

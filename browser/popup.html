@@ -11,11 +11,14 @@
   ul { margin: 4px 0 0; padding-left: 18px; }
   .muted { color: var(--muted); }
   [hidden] { display: none; }
+  footer { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 8px; }
 </style>
 <div id="pair">
   <p id="server" class="muted"></p>
-  <button id="join">Sign in with Tailscale</button>
-  <p id="pairNote"></p>
+  <button id="join" hidden>Sign in with Tailscale</button>
+  <p id="pairNote" role="status"></p>
+  <a id="loginLink" target="_blank" rel="noopener" hidden>Continue Tailscale sign-in</a>
+  <button id="discover" hidden>Find another Hive server</button>
   <div id="serverChoices"></div>
 </div>
 <div id="main" hidden>
@@ -26,4 +29,5 @@
   <div id="workBox" hidden><ul id="work"></ul><p class="muted">Sending again about this goes to the same agent; anything else starts a new one.</p></div>
   <div id="rulesBox" hidden><p><b>Rules on <span id="site"></span></b></p><ul id="rules"></ul></div>
 </div>
+<footer id="footer" hidden><a id="dashboard" target="_blank" rel="noopener">Open dashboard</a><div id="dashboardNote" role="status" class="muted"></div></footer>
 <script type="module" src="popup.js"></script>

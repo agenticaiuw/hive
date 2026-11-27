@@ -45,7 +45,7 @@ export async function findServer(selected) {
   const failures = [];
   const matches = await Promise.all(peers.map(async (p) => {
     const host = p.dnsName.replace(/\.$/, '') || p.ips[0];
-    if (!p.online || !/^hive/i.test(p.hostName) || !host) return;
+    if (!p.online || !/^hive(?:-\d+)?$/i.test(p.hostName) || !host) return;
     const server = `http://${host}`;
     if (selected && server !== selected) return;
     try {

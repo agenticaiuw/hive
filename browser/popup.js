@@ -1,6 +1,8 @@
 // The toolbar popup: connect this browser to Hive, ask Hive from any page (the request goes to the orchestrator with the
 // page as context) and follow what it's doing, and see the owner's rules for this site.
-import { api, conf } from './hive.js';
+import { api, conf, tailnet } from './hive.js';
+
+import { openDashboard } from './dashboard.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -54,26 +56,72 @@ async function work(c) {
 
 // Keep reconnection available when the saved server has moved. The worker finishes pairing if the sign-in tab closes the popup.
 let signIn = false;
+let session = 'checking';
+let probing = false;
+async function checkSession() {
+  if (probing) return;
+  probing = true;
+  let timer;
+  try {
+    const c = await conf();
+    if (!c) return;
+    const request = tailnet.fetch(`${c.server}/api/me`, {
+      headers: { authorization: `Bearer ${c.token}` }, timeout: 5000,
+    });
+    const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), 7000); });
+    const response = await Promise.race([request, deadline]);
+    session = response?.status === 200 && JSON.parse(response.body).ok === true ? 'connected' : 'offline';
+  } catch { session = 'offline'; }
+  finally { clearTimeout(timer); probing = false; await tailscale(); }
+}
 async function tailscale() {
   const { hive, tailnet: t, joining, pairNote, serverChoices = [] } = await chrome.storage.local.get(['hive', 'tailnet', 'joining', 'pairNote', 'serverChoices']);
   const url = t?.state !== 'Running' && t?.url;
-  $('server').textContent = hive ? `Saved server: ${hive.server}` : 'Connect this browser to your Hive Server.';
-  if (signIn && url) { signIn = false; chrome.tabs.create({ url }); }
-  $('pairNote').textContent = pairNote || (joining ? 'Connecting through Tailscale…' : '');
-  $('serverChoices').replaceChildren(...serverChoices.map(server => {
+  const connected = hive && session === 'connected';
+  const login = $('loginLink');
+  login.hidden = !joining || !url || connected;
+  if (!login.hidden) login.href = url;
+  $('discover').hidden = !hive || session !== 'offline' || !pairNote;
+  $('join').textContent = joining ? 'Retry connection' : t?.state === 'Running' && hive ? 'Reconnect to Hive' : 'Sign in with Tailscale';
+  $('join').hidden = !!hive && (connected || session === 'checking');
+  $('server').textContent = !hive ? 'Connect this browser to your Hive Server.' : connected ? `Connected to ${hive.server}` :
+    session === 'checking' ? `Checking connection to ${hive.server}…` : `Saved server: ${hive.server}`;
+  $('footer').hidden = !hive;
+  if (hive) $('dashboard').href = new URL('/', hive.server).href;
+  if (signIn && url) { signIn = false; chrome.tabs.create({ url }).catch(() => { $('pairNote').textContent = 'Continue sign-in using the link below.'; }); }
+  $('pairNote').textContent = connected ? '' : pairNote || (joining ? 'Connecting through Tailscale…' : '');
+  $('serverChoices').replaceChildren(...(connected ? [] : serverChoices).map(server => {
     const button = document.createElement('button');
     button.textContent = new URL(server).hostname;
     button.onclick = () => join(server);
     return button;
   }));
 }
-chrome.storage.onChanged.addListener((ch) => { if (ch.hive?.newValue) location.reload(); else tailscale(); });
+chrome.storage.onChanged.addListener((ch) => { if (ch.hive) location.reload(); else if (ch.tailnet || ch.joining || ch.pairNote || ch.serverChoices) tailscale(); });
 tailscale();
 
-async function join(server = true) {
+async function join(server) {
   signIn = true;
+  $('pairNote').textContent = 'Connecting through Tailscale…';
+  if (server === undefined) {
+    const saved = (await conf())?.server;
+    server = saved && /^http:\/\/[^/]+\.ts\.net$/i.test(saved) ? saved : true;
+  }
   await chrome.storage.local.set({ joining: server, pairNote: '', serverChoices: [] });
+  chrome.runtime.sendMessage({ hiveJoin: true }).catch(() => {});
   await tailscale();
 }
 $('join').onclick = () => join();
+$('discover').onclick = () => join(true);
+$('dashboard').onclick = async (event) => {
+  event.preventDefault();
+  if ($('dashboard').ariaBusy === 'true') return;
+  $('dashboard').ariaBusy = 'true';
+  $('dashboardNote').textContent = 'Opening dashboard…';
+  try { await openDashboard(await conf()); window.close(); }
+  catch (err) { $('dashboardNote').textContent = err.message; }
+  finally { $('dashboard').ariaBusy = 'false'; }
+};
+checkSession();
+setInterval(checkSession, 15000);
 show();
