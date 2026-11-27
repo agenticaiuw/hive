@@ -39,6 +39,27 @@ pub fn tools() -> Vec<Value> {
         t["lock"] = json!("input");
         t["timeout"] = json!(660);
         all.push(t);
+        all.push(tool("mac_apple", "Direct read-through / write-through access to Apple Reminders & Apple Calendar (Single Source of Truth via EventKit — never mirror in Hive). \
+            Actions: list_reminders (optional list, include_completed, limit), create_reminder (title, optional list, due ISO-8601, notes, priority), \
+            complete_reminder (external_id or exact title, optional completed bool), delete_reminder (external_id), \
+            list_events (optional start/end ISO-8601, calendar, limit), create_event (title, start, end ISO-8601, optional calendar, location, notes, all_day), delete_event (external_id).",
+            json!({
+                "action": s("list_reminders | create_reminder | complete_reminder | delete_reminder | list_events | create_event | delete_event"),
+                "external_id": s("Stable Apple EventKit external_id returned by list/create"),
+                "title": s("Reminder or event title"),
+                "list": s("Apple Reminders list name; empty for default/all"),
+                "calendar": s("Apple Calendar name; empty for default/all"),
+                "due": s("ISO-8601 due date for reminder, e.g. 2026-11-28T17:00:00Z"),
+                "start": s("ISO-8601 start timestamp for event/window"),
+                "end": s("ISO-8601 end timestamp for event/window"),
+                "location": s("Event location"),
+                "notes": s("Concise notes"),
+                "priority": n("Reminder priority (0=none, 1=high, 5=medium, 9=low)"),
+                "completed": { "type": "boolean", "description": "Target completed state for complete_reminder (default true)" },
+                "include_completed": { "type": "boolean", "description": "Include completed items in list_reminders" },
+                "all_day": { "type": "boolean", "description": "All-day event flag for create_event" },
+                "limit": n("Max items to return (default 50)")
+            }), &["action"]));
     }
     all.extend([
         tool(&format!("{k}_shell"), &format!("Run a command on the owner's {on} ({}, as the owner) and get its output.", os::SHELL),
@@ -69,6 +90,8 @@ pub fn run(tool: &str, a: &Value) -> Result<Value, String> {
         "key" => { os::key(a["keys"].as_str().unwrap_or(""))?; done("Pressed.") }
         #[cfg(target_os = "macos")]
         "take_over" => os::take_over(a),
+        #[cfg(target_os = "macos")]
+        "apple" => crate::apple::run(a),
         #[cfg(target_os = "macos")]
         "hand_back" => { os::give_back(); done("Handed the Mac's pointer and keyboard back to the owner.") }
         #[cfg(target_os = "macos")]
@@ -125,6 +148,6 @@ mod tests {
         let got = run(&format!("{}_get_file", os::KIND), &json!({ "path": p })).unwrap();
         assert_eq!(b64::decode(got["data"].as_str().unwrap()).unwrap(), b"hello");
         std::fs::remove_file(&path).ok();
-        assert_eq!(tools().len(), 5 + cfg!(target_os = "macos") as usize);
+        assert_eq!(tools().len(), 5 + (cfg!(target_os = "macos") as usize) * 2);
     }
 }

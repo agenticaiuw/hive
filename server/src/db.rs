@@ -35,6 +35,7 @@ create table if not exists contacts(id integer primary key, name text, relation 
 create table if not exists playbooks(id integer primary key, host text, title text default '', steps text default '',
   selectors text default '', uses integer default 0, fails integer default 0, verified_at integer default 0, updated integer default 0);
 create virtual table if not exists memory_fts using fts5(tier, ref_id unindexed, key_or_host, body, tokenize='porter unicode61');
+create table if not exists apple_links(external_id text primary key, kind text, task_id integer default 0, project text default '', updated integer default 0);
 create table if not exists files(id integer primary key, name text, size integer, node text, at integer);
 create table if not exists sim(id integer primary key, problem text, what text, files text default '', engine text default '',
   model text default '', predicted text default '', fixed text default '', missed text default '', passed integer default 0,

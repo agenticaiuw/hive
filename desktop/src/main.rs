@@ -1,13 +1,18 @@
 //! `hive`: the Hive app for Mac and Windows, and every agent's way into Hive. The app has no window (the dashboard is the web
 //! page): it makes this computer one of a Hive's devices, and on a Mac it carries Hive for Safari and the fn key's type bar.
 //!   hive                        open the app: this computer is one of a Hive's devices while it runs (the server is its own download)
-//!   hive hook                   Claude Code hook (UserPromptSubmit, PostToolUse): prompts go to Hive's orchestrator first
-//!   hive mcp                    MCP server on stdio: any agent (Claude Code, Codex, Cursor, …) saves its tasks and rules in Hive
+//!   hive hook                   Lifecycle hook (SessionStart, UserPromptSubmit, PostToolUse, PreCompact) for external harnesses
+//!   hive mcp                    MCP server on stdio: any agent (Claude Code, Codex, Antigravity, T3 Code, …) shares rules, memory & tasks
+//!   hive connect [target]       Wire `hive mcp` + lifecycle hooks into claude | codex | antigravity | all
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#[cfg(target_os = "macos")]
+#[path = "../mac/apple.rs"]
+mod apple;
 #[cfg(target_os = "macos")]
 #[path = "../mac/bar.rs"]
 mod bar;
 mod common;
+mod connect;
 #[cfg(target_os = "macos")]
 mod phone_setup;
 mod hook;
@@ -60,6 +65,10 @@ fn main() {
         Some("hook") => hook::run(),
         Some("sessions") => sessions::run(tailnet::load().unwrap_or_else(|| fail("Open Hive first".into()))),
         Some("mcp") => mcp::serve(),
+        Some("connect") => match connect::run(args.get(1).map(|s| s.as_str()).unwrap_or("all")) {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => fail(e),
+        },
         Some("--version") => println!("{}", hive_protocol::DEVICES),
         None => {
             #[cfg(target_os = "macos")]
@@ -76,6 +85,6 @@ fn main() {
                 Err(_) => {}
             }
         }
-        _ => fail("usage: hive | hive hook | hive mcp".into()),
+        _ => fail("usage: hive | hive hook | hive mcp | hive connect [claude|codex|antigravity|all]".into()),
     }
 }

@@ -651,8 +651,9 @@ impl Hive {
                 t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Other workers work in it at the same time: \
                     lock the files you'll change (lock) before you edit them, never edit one another worker holds, and commit only your own \
                     (git commit -m <message> -- <files>). Keep it lean. Commit locally with a clear message, then call reinstall. \
-                    NEVER push directly to club `main` from an automated self-improvement: keep owner-specific changes local, and for generalizable \
-                    fixes push a feature branch (`git push origin HEAD:hive/<slug>`) and open a draft PR (`gh pr create --draft`) with an anonymized `sim(mode=\"export\")` entry for human review.", repo.display());
+                    NEVER push directly to club `main` from an automated self-improvement: keep owner-specific changes local, and when an improvement \
+                    generalizes to the majority of club members and saves everyone time, push a feature branch (`git push origin HEAD:hive/<slug>`) and open a \
+                    draft PR (`gh pr create --draft`) with an anonymized `sim(mode=\"export\")` entry, test counts, and net-LOC delta for club review.", repo.display());
             }
         }
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
@@ -1462,6 +1463,21 @@ impl Hive {
                 }
                 let base = r["text"].as_str().map(String::from).unwrap_or_else(|| r.to_string());
                 r["text"] = json!(format!("{base}\n\n{hint}"));
+            }
+        }
+        if name == "mac_apple" && r["error"].is_null() {
+            let act = s(&a["action"]);
+            if matches!(act.as_str(), "delete_reminder" | "delete_event") {
+                let ext = s(&a["external_id"]);
+                if !ext.is_empty() { self.db.run("delete from apple_links where external_id=?", args!(ext)); }
+            } else if let Some(ext) = r["external_id"].as_str().filter(|v| !v.is_empty()) {
+                let project = if task > 0 {
+                    self.db.get("select project from tasks where id=?", args!(task)).map(|row| s(&row["project"])).unwrap_or_default()
+                } else { String::new() };
+                let kind = r["apple_kind"].as_str().unwrap_or("reminder");
+                self.db.run("insert into apple_links(external_id, kind, task_id, project, updated) values(?,?,?,?,?) \
+                    on conflict(external_id) do update set task_id=excluded.task_id, project=excluded.project, updated=excluded.updated",
+                    args!(ext, kind, task, project, now()));
             }
         }
         if name == "mac_hand_back" || (name == "mac_input" && a["action"] == "hand_back") {
