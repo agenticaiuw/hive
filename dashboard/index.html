@@ -145,7 +145,7 @@ button:disabled { opacity: .5; cursor: wait; }
 </header>
 <nav id="tabs"></nav>
 <main>
-  <div id="orchestrator" class="card"><div class="row"><b>Orchestrator</b><span id="planner-usage" class="muted"></span></div><div id="orchestrator-log" class="log chat-log"></div><div class="composer" data-composer="main">
+  <div id="orchestrator" class="card"><div class="row"><b>Orchestrator</b><span id="planner-usage" class="muted"></span><button id="earlier" class="plain" hidden onclick="loadEarlier()">Earlier messages</button></div><div id="orchestrator-log" class="log chat-log"></div><div class="composer" data-composer="main">
     <textarea id="ask" rows="2" placeholder="Tell Hive what to do"></textarea>
     <div class="attachments"></div>
     <p class="row" style="margin:8px 0 0"><button class="plain" onclick="this.nextElementSibling.click()">Attach files</button><input type="file" multiple hidden><button data-send onclick="send()">Send</button><span id="reply" class="muted" role="status"></span></p>
@@ -169,6 +169,13 @@ async function login() {
   const r = await fetch('api/login', { method: 'POST' });
   if (!r.ok) $('#loginerr').textContent = (await r.json()).error;
   return r.ok;
+}
+async function renameNode(id, current) {
+  const name = prompt('Device name', current)?.trim();
+  if (!name || name === current) return;
+  const result = await api(`api/nodes/${encodeURIComponent(id)}/name`, { method: 'PUT', body: { name } });
+  if (result.error) { alert(result.error); return; }
+  await refresh(); await render();
 }
 async function forget(id, name) {
   if (!confirm(`Forget ${name}? It stops working with Hive until it joins again.`)) return;
@@ -417,16 +424,36 @@ async function loadChat() {
     } while (more);
   } finally { chatLoading = false; }
 }
+let earliestOrchestrator = 0;
+function appendOrchestrator(box, l) {
+  appendLogEntry(box, l.task_id > 0 && l.who !== 'image' ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
+}
+async function loadEarlier() {
+  const button = $('#earlier'), box = $('#orchestrator-log');
+  button.disabled = true;
+  try {
+    const rows = await api(`api/orchestrator?page=recent&before=${earliestOrchestrator}`);
+    const older = document.createElement('div');
+    rows.forEach(row => appendOrchestrator(older, row));
+    const height = box.scrollHeight;
+    box.prepend(...older.childNodes);
+    box.scrollTop += box.scrollHeight - height;
+    if (rows.length) earliestOrchestrator = rows[0].id;
+    button.hidden = rows.length < 25;
+  } finally { button.disabled = false; }
+}
 async function loadOrchestrator() {
   const box = $('#orchestrator-log');
   if (!box || orchestratorLoading) return;
   orchestratorLoading = true;
   try {
-    const rows = await api(`api/orchestrator?after=${orchestratorAfter}`);
-    updateLog(box, rows, l => {
-      appendLogEntry(box, l.task_id > 0 && l.who !== 'image' ? {...l, text: `Task #${l.task_id} · ${l.task_title || 'Task'}${l.who === 'done' ? ' · Done' : l.who === 'needs you' ? ' · Needs you' : ''}\n\n${l.text}`} : l);
-      orchestratorAfter = l.id;
-    });
+    const query = orchestratorAfter ? `after=${orchestratorAfter}` : 'page=recent';
+    const rows = await api(`api/orchestrator?${query}`);
+    if (!earliestOrchestrator && rows.length) {
+      earliestOrchestrator = rows[0].id;
+      $('#earlier').hidden = rows.length < 25;
+    }
+    updateLog(box, rows, l => { appendOrchestrator(box, l); orchestratorAfter = l.id; });
   } finally { orchestratorLoading = false; }
 }
 function updateSessions() {
@@ -525,7 +552,7 @@ async function render() {
     v.innerHTML = `<div class="card row"><input type="file" id="up" multiple style="flex:1"><button onclick="upload()">Upload to Hive</button></div>
       ${files.map(f => `<div class="card row"><a href="api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
   } else if (tab === 'Nodes') {
-    v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
+    v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="renameNode(this.dataset.id, this.dataset.name)">Rename</button> <button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
     const phone = await api('api/phone');
     v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span></div>
       <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div>
@@ -565,18 +592,18 @@ async function delRule(id) { await api(`api/rules/${id}`, { method: 'DELETE' });
 async function addInfo() { await api('api/info', { method: 'POST', body: { key: $('#ikey').value, value: $('#ival').value } }); render(); }
 async function upload() { for (const f of $('#up').files) await api(`api/files?name=${encodeURIComponent(f.name)}`, { method: 'POST', body: f }); render(); }
 
-async function refresh() {
-  state = await api('api/state');
+async function refresh(includeChat = true) {
+  state = await api('api/state?view=dashboard');
   const online = state.nodes.filter(n => Date.now() - n.seen < 90000);
-  $('#nodes').innerHTML = `<span class="dot on"></span>vm ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.kind)}`).join(' ');
+  $('#nodes').innerHTML = `<span class="dot on"></span>Hive Server ` + state.nodes.map(n => `<span class="dot ${online.includes(n) ? 'on' : ''}"></span>${esc(n.name || n.kind)}`).join(' ');
   if (tab === 'Sessions') updateSessions();
   $('#planner-usage').textContent = usageLabel(state.planner_usage);
   if (tab === 'Tasks') updateTasks();
-  await Promise.all([loadChat(), loadOrchestrator()]);
+  if (includeChat && tab === 'Sessions') await Promise.all([loadChat(), loadOrchestrator()]);
 }
 async function start() {
   try { await api('api/me'); } catch { if (!await login()) return; $('#login').hidden = true; }
-  $('#app').hidden = false; tabs(); await refresh(); await render();
+  $('#app').hidden = false; tabs(); await refresh(false); await render();
   clearInterval(timer);
   timer = setInterval(() => { refresh().catch(() => {}); }, 2000);
 }

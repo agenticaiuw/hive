@@ -161,6 +161,14 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Some(text) => Res::json(&json!({ "text": text })), None => Res::err(404, "There are no such instructions.") },
         ("PUT", ["api", "instructions", name]) => match hive.set_prompt(name, &s(&b["text"])) {
             Ok(()) => Res::json(&json!({ "ok": true })), Err(e) => Res::err(400, &e) },
+        // Open at the newest messages. Earlier pages use the same stable ID cursor.
+        ("GET", ["api", "orchestrator"]) if req.q("page") == "recent" => {
+            let before = req.q("before").parse::<i64>().unwrap_or(i64::MAX);
+            let mut rows = hive.db.all("select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
+                where l.id<? and l.agent_id=0 and (l.task_id=0 or l.who in ('hive','worker','handoff')) order by l.id desc limit 25", args!(before));
+            rows.reverse();
+            Res::json(&json!(rows))
+        }
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
             "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
             where l.id>? and l.agent_id=0 and (l.task_id=0 or l.who in ('hive','worker','handoff'))
@@ -172,8 +180,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t where coalesce(t.quote,'')!='Imported session' order by id desc", &[]),
             "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where (a.kind!='claude' or exists (select 1 from tasks real where real.agent_id=a.id and coalesce(real.quote,'')!='Imported session')) and (a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued')) order by a.id desc", &[]),
-            "nodes": hive.db.all("select id, kind, name, seen, version from nodes order by seen desc", &[]),
-            "requests": hive.db.all("select * from requests order by id desc limit 30", &[]),
+            "nodes": hive.db.all("select id, kind, coalesce(display_name,name) as name, seen, version from nodes order by seen desc", &[]),
+            "requests": if req.q("view") == "dashboard" { vec![] } else { hive.db.all("select * from requests order by id desc limit 30", &[]) },
             "locks": hive.locks(),
             "now": now(),
         })),
@@ -246,6 +254,16 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Ok(rid) => Res::json(&json!({ "id": rid })),
             Err(e) => Res::err(400, &e),
         },
+        ("PUT", ["api", "nodes", node, "name"]) => {
+            let name = b["name"].as_str().unwrap_or("").trim();
+            if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+                return Res::err(400, "Use a device name between 1 and 64 characters.");
+            }
+            match hive.db.get("update nodes set display_name=? where id=? returning id, display_name as name", args!(name, node)) {
+                Some(row) => { hive.bump(); Res::json(&row) }
+                None => Res::err(404, "Device not found"),
+            }
+        }
         ("DELETE", ["api", "nodes", node]) => {
             hive.db.run("delete from tokens where node=?", args!(node));
             hive.db.run("delete from nodes where id=?", args!(node));
@@ -287,7 +305,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             json!({ "node": "orchestrator (agent)", "tools": crate::tools::orchestrator() }),
             json!({ "node": "worker (cloud)", "tools": crate::tools::worker(&["vm".into(), "browser".into(), "hive".into()]) }),
         ].into_iter()
-            .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
+            .chain(hive.db.all("select id, kind, coalesce(display_name,name) as name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
         ("GET", ["api", "vm", "control"]) => crate::vm::control(&req, owners(hive, &req)),
@@ -302,7 +320,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("POST", ["api", "node", "hello"]) => {
             let nid = s(&b["id"]);
             // The same device under an id it no longer uses (it joined again) goes once it's been quiet for an hour.
-            hive.db.run("delete from nodes where kind=? and name=? and id!=? and seen < ?", args!(s(&b["kind"]), s(&b["name"]), nid.clone(), now() - 3_600_000));
+            hive.db.run("delete from nodes where kind=? and name=? and id!=? and display_name is null and seen < ?", args!(s(&b["kind"]), s(&b["name"]), nid.clone(), now() - 3_600_000));
             hive.db.run("insert into nodes(id, kind, name, notes, tools, seen, version) values(?,?,?,?,?,?,?) on conflict(id) do update set \
                 kind=excluded.kind, name=excluded.name, notes=excluded.notes, tools=excluded.tools, seen=excluded.seen, version=excluded.version",
                 args!(nid, s(&b["kind"]), s(&b["name"]), s(&b["notes"]), b["tools"].clone(), now(), s(&b["version"])));

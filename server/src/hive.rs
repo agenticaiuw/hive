@@ -333,7 +333,7 @@ impl Hive {
         }
 
         t += if self.repo.is_some() { "\nNodes: vm, hive" } else { "\nNodes: vm" };
-        for n in self.db.all("select id, kind, name, seen from nodes order by kind", &[]) {
+        for n in self.db.all("select id, kind, coalesce(display_name,name) as name, seen from nodes order by kind", &[]) {
             let on = if node_online(&n) { "online" } else { "offline" };
             t += &format!(", {} ({}, {on})", s(&n["kind"]), s(&n["name"]));
         }
@@ -1080,7 +1080,7 @@ impl Hive {
 
     /// The device that declared this tool (the most recently seen one), and its declaration.
     fn device_for(&self, tool: &str) -> Option<(Value, Value)> {
-        self.db.all("select id, kind, name, seen, tools from nodes order by seen desc", &[]).into_iter()
+        self.db.all("select id, kind, coalesce(display_name,name) as name, seen, tools from nodes order by seen desc", &[]).into_iter()
             .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == tool).map(|t| (n.clone(), t)))
     }
 
@@ -1312,7 +1312,7 @@ impl Hive {
             }
             "browser_devices" => {
                 self.require_node(task, "browser")?;
-                return Ok(json!(serde_json::to_string(&self.db.all("select id, name, seen from nodes where kind='browser' order by seen desc", &[])).unwrap()));
+                return Ok(json!(serde_json::to_string(&self.db.all("select id, coalesce(display_name,name) as name, seen from nodes where kind='browser' order by seen desc", &[])).unwrap()));
             }
             "handoff" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;

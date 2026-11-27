@@ -85,6 +85,7 @@ impl Db {
         c.execute_batch("alter table agents add column effort text default ''").ok();
         c.execute_batch("alter table agents add column role text default 'worker'").ok();
         c.execute_batch("alter table sim add column net_loc integer default 0").ok();
+        c.execute_batch("alter table nodes add column display_name text").ok();
         c.execute_batch("update agents set role='external' where kind='claude' and coalesce(role,'worker')='worker'").ok();
         Db(Mutex::new(c))
     }
