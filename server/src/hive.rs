@@ -74,6 +74,12 @@ const CLAUDE_AGENT: &str = "claude-agent";
 const PHONE_ID: &str = "phone-iphone";
 
 use hive_protocol::{short, str_val as s};
+// The local phone relay polls even when the physical phone is disconnected.
+fn node_online(node: &Value) -> bool {
+    node["seen"].as_i64().unwrap_or(0) > now() - 90_000
+        && (node["id"] != PHONE_ID || hive_phone::connected())
+}
+
 /// A tool list's names, which tell whether an agent's thread has today's tools.
 fn names(tools: &[Value]) -> String {
     let mut n: Vec<String> = tools.iter().map(|t| s(&t["name"])).collect();
@@ -327,8 +333,8 @@ impl Hive {
         }
 
         t += if self.repo.is_some() { "\nNodes: vm, hive" } else { "\nNodes: vm" };
-        for n in self.db.all("select kind, name, seen from nodes order by kind", &[]) {
-            let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline" };
+        for n in self.db.all("select id, kind, name, seen from nodes order by kind", &[]) {
+            let on = if node_online(&n) { "online" } else { "offline" };
             t += &format!(", {} ({}, {on})", s(&n["kind"]), s(&n["name"]));
         }
 
@@ -1080,6 +1086,9 @@ impl Hive {
 
     pub fn call_node(&self, node: &Value, tool: &str, args: &Value, agent: i64, secs: u64) -> Result<Value, String> {
         let (id, kind) = (s(&node["id"]), s(&node["kind"]));
+        if id == PHONE_ID && !hive_phone::connected() {
+            return Err("The iPhone is offline. Hive Phone needs to be open and connected before phone tools can run.".into());
+        }
         // A device that's away for a moment (restarting into an update, its network changing) gets three minutes to come back.
         let here = || self.db.get("select seen from nodes where id=?", args!(id)).and_then(|n| n["seen"].as_i64()).filter(|t| *t >= now() - 90_000);
         if here().is_none() && self.wait_until(180_000, here).is_none() {
@@ -1528,6 +1537,19 @@ mod tests {
             "drop":[991], "start":[], "messages":[{"task":991,"text":"help me cancel it"}]}));
         assert_eq!(hive.db.get("select status from tasks where id=991", &[]).unwrap()["status"], "open");
         assert!(hive.db.all("select * from log where task_id=991", &[]).is_empty());
+    }
+
+    #[test]
+    fn disconnected_phone_relay_is_offline_and_does_not_queue_calls() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let phone = json!({"id": PHONE_ID, "kind": "phone", "seen": now()});
+        assert!(!node_online(&phone));
+        assert!(node_online(&json!({"id": "mac-test", "seen": now()})));
+        assert!(!node_online(&json!({"id": "mac-test", "seen": now() - 100_000})));
+        let error = hive.call_node(&phone, "phone_screenshot", &json!({}), 1, 180).unwrap_err();
+        assert!(error.contains("iPhone is offline"));
+        assert!(hive.db.all("select * from calls", &[]).is_empty());
     }
 
     #[test]

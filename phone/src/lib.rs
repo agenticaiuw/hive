@@ -4,7 +4,7 @@
 mod link;
 mod phone;
 
-pub use link::{accept, device};
+pub use link::{accept, connected, device};
 pub mod bootstrap;
 
 use hive_protocol::{n, s, tool};
