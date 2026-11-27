@@ -11,7 +11,7 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
     let events=b["events"].as_array().ok_or("Missing events")?;
     if events.len()>500 { return Err("Too many events".into()) }
     let agent=h.db.get("select * from agents where kind='claude' and name=?",args!(name));
-    let aid=agent.as_ref().and_then(|a|a["id"].as_i64()).unwrap_or_else(|| h.db.run("insert into agents(kind,name,status,at,updated) values('claude',?,'idle',?,0)",args!(name,now())));
+    let aid=agent.as_ref().and_then(|a|a["id"].as_i64()).unwrap_or_else(|| h.db.run("insert into agents(kind,role,name,status,at,updated) values('claude','external',?,'idle',?,0)",args!(name,now())));
     // Transcripts are session activity, not owner-created work. Keep their history,
     // but attach it to a task only after the session explicitly saves one in Hive.
     let task=h.db.get("select t.id from tasks t where t.agent_id=? and coalesce(t.quote,'')!='Imported session' order by t.id desc limit 1",args!(aid))

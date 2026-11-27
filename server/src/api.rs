@@ -154,7 +154,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let tasks = hive.db.all("select id, title, quote, status from tasks where request_id=?1
                 or id in (select task_id from log where request_id=?1 and task_id>0 and who='owner')", args!(rid));
             let ctx = &b["context"];
-            let rules = rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]));
+            let rules = crate::ops::rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]), &s(&ctx["project"]));
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
         }
         ("GET", ["api", "instructions", name]) => match hive.prompt(name) {
@@ -163,11 +163,12 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Ok(()) => Res::json(&json!({ "ok": true })), Err(e) => Res::err(400, &e) },
         ("GET", ["api", "orchestrator"]) => Res::json(&json!(hive.db.all(
             "select l.*, t.title as task_title from log l left join tasks t on t.id=l.task_id
-            where l.id>? and l.agent_id=0 and (l.task_id=0 or l.who='hive')
+            where l.id>? and l.agent_id=0 and (l.task_id=0 or l.who in ('hive','worker','handoff'))
             order by l.id limit 2000",
             args!(req.q("after").parse::<i64>().unwrap_or(0))))),
         ("GET", ["api", "state"]) => Res::json(&json!({
             "version": hive.version,
+            "projects": crate::ops::list_projects(hive),
             "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t where coalesce(t.quote,'')!='Imported session' order by id desc", &[]),
             "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where (a.kind!='claude' or exists (select 1 from tasks real where real.agent_id=a.id and coalesce(real.quote,'')!='Imported session')) and (a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued')) order by a.id desc", &[]),
@@ -176,6 +177,15 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "locks": hive.locks(),
             "now": now(),
         })),
+        ("GET", ["api", "projects"]) => Res::json(&json!(crate::ops::list_projects(hive))),
+        ("POST", ["api", "projects"]) => match crate::ops::upsert_project(hive, crate::ops::Actor::owner(), &s(&b["slug"]), &s(&b["title"]), &s(&b["summary"]), b.get("default_nodes")) {
+            Ok(p) => Res::json(&p),
+            Err(e) => Res::err(400, &e),
+        },
+        ("GET", ["api", "inspect"]) => match crate::ops::inspect(hive, req.q("kind"), id_q(&req, "id"), req.q("name")) {
+            Ok(v) => Res::json(&v),
+            Err(e) => Res::err(400, &e),
+        },
         ("GET", ["api", "tasks"]) => {
             let st = if req.q("status").is_empty() { "done" } else { req.q("status") };
             Res::json(&json!(hive.db.all("select * from tasks where status=? order by updated desc limit 200", args!(st))))
@@ -190,6 +200,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                 order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
         })),
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
+        ("POST", ["api", "tasks", _, "grant"]) => match crate::ops::grant_nodes(hive, crate::ops::Actor::owner(), id(2), &crate::hive::list(&b["nodes"])) {
+            Ok(nodes) => Res::json(&json!({ "ok": true, "nodes": nodes })),
+            Err(e) => Res::err(400, &e),
+        },
         ("POST", ["api", "tasks", _, "message"]) => match hive.message_task(id(2), 0, &s(&b["text"]), "owner") {
             Ok(()) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(409, &e),
@@ -207,10 +221,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "select * from log where id > ? and (?=0 or request_id=?) order by id desc limit ?",
             args!(req.q("after").parse::<i64>().unwrap_or(0), id_q(&req, "request"), id_q(&req, "request"), req.q("limit").parse::<i64>().unwrap_or(300))))),
         ("GET", ["api", "rules"]) => {
-            if req.q("site").is_empty() && req.q("folder").is_empty() && req.q("app").is_empty() && req.q("node").is_empty() {
+            if req.q("site").is_empty() && req.q("folder").is_empty() && req.q("app").is_empty() && req.q("node").is_empty() && req.q("project").is_empty() {
                 Res::json(&json!(hive.db.all("select * from rules where active=1 order by id", &[])))
             } else {
-                Res::json(&json!(rules_for(hive, &[req.q("node").to_string()], req.q("site"), req.q("app"), req.q("folder"))))
+                Res::json(&json!(crate::ops::rules_for(hive, &[req.q("node").to_string()], req.q("site"), req.q("app"), req.q("folder"), req.q("project"))))
             }
         }
         ("GET", ["api", "phone", "bootstrap", device]) => developer_identity(hive, device),
@@ -228,7 +242,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Ok(()) => Res::json(&hive_phone::status(&hive.state)),
             Err(e) => Res::err(409, &e),
         },
-        ("POST", ["api", "rules"]) => match hive.add_rule(&s(&b["text"]), &s(&b["quote"]), &s(&b["scope"])) {
+        ("POST", ["api", "rules"]) => match crate::ops::add_rule(hive, &s(&b["text"]), &s(&b["quote"]), &s(&b["scope"])) {
             Ok(rid) => Res::json(&json!({ "id": rid })),
             Err(e) => Res::err(400, &e),
         },
@@ -238,10 +252,13 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             hive.bump();
             Res::json(&json!({ "ok": true }))
         }
-        ("DELETE", ["api", "rules", _]) => { hive.db.run("update rules set active=0 where id=?", args!(id(2))); hive.bump(); Res::json(&json!({ "ok": true })) }
+        ("DELETE", ["api", "rules", _]) => match crate::ops::delete_rule(hive, crate::ops::Actor::owner(), id(2)) {
+            Ok(()) => Res::json(&json!({ "ok": true })),
+            Err(e) => Res::err(403, &e),
+        },
         ("GET", ["api", "info"]) => Res::json(&json!(hive.db.all("select * from info order by key", &[]))),
         ("POST", ["api", "info"]) => {
-            hive.db.run("insert into info(key, value, updated) values(?,?,?) on conflict(key) do update set value=excluded.value, updated=excluded.updated", args!(s(&b["key"]), s(&b["value"]), now()));
+            crate::ops::info(hive, &s(&b["key"]), &s(&b["value"]));
             Res::json(&json!({ "ok": true }))
         }
         ("GET", ["api", "files"]) => Res::json(&json!(hive.db.all("select * from files order by id desc limit 500", &[]))),
@@ -266,7 +283,10 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Res::json(&json!(hive.db.all(&format!("select * from {table} order by rowid desc limit ? offset ?"),
                 args!(req.q("limit").parse::<i64>().unwrap_or(100), req.q("offset").parse::<i64>().unwrap_or(0)))))
         }
-        ("GET", ["api", "tools"]) => Res::json(&json!([json!({ "node": "cloud", "tools": crate::tools::cloud(&["hive".into()]) })].into_iter()
+        ("GET", ["api", "tools"]) => Res::json(&json!([
+            json!({ "node": "orchestrator (agent)", "tools": crate::tools::orchestrator() }),
+            json!({ "node": "worker (cloud)", "tools": crate::tools::worker(&["vm".into(), "browser".into(), "hive".into()]) }),
+        ].into_iter()
             .chain(hive.db.all("select id, kind, name, tools from nodes order by kind", &[]).into_iter()
                 .map(|n| json!({ "node": format!("{} ({})", s(&n["kind"]), s(&n["name"])), "tools": serde_json::from_str::<Value>(&s(&n["tools"])).unwrap_or(json!([])) })))
             .collect::<Vec<_>>())),
@@ -354,15 +374,9 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let every = b["every"].as_i64().unwrap_or(0).max(0);
             Res::json(&json!({ "task": hive.start_retrospective(every) }))
         }
-        ("POST", ["api", "reinstall"]) => match hive.repo.as_ref().ok_or((0, 0, String::new(), "Hive isn't on a VM here".to_string())).and_then(|r| crate::vm::reinstall(r)) {
-            Ok(v) => {
-                crate::sim::record_eval(&hive.db, b["sim_id"].as_i64().unwrap_or(0), true, v.passed, v.total, &v.commit);
-                Res::json(&json!({ "ok": true, "text": v.message, "passed": v.passed, "total": v.total, "commit": v.commit }))
-            }
-            Err((passed, total, commit, e)) => {
-                if total > 0 { crate::sim::record_eval(&hive.db, b["sim_id"].as_i64().unwrap_or(0), false, passed, total, &commit); }
-                Res::err(500, &e)
-            }
+        ("POST", ["api", "reinstall"]) => match crate::ops::reinstall(hive, crate::ops::Actor::owner(), b["sim_id"].as_i64().unwrap_or(0)) {
+            Ok(v) => Res::json(&json!({ "ok": true, "text": v.message, "passed": v.passed, "total": v.total, "commit": v.commit })),
+            Err((_, _, _, e)) => Res::err(500, &e),
         },
         ("GET", ["api", "sites", name, "data"]) => Res::new(200, "application/json",
             std::fs::read(hive.state.join("sites").join(clean(name)).join("data.json")).unwrap_or(b"{}".to_vec())),
@@ -384,11 +398,6 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
 
 fn id_q(req: &Req, k: &str) -> i64 { req.q(k).parse().unwrap_or(0) }
 fn clean(name: &str) -> String { name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect() }
-
-fn rules_for(hive: &Hive, nodes: &[String], site: &str, app: &str, folder: &str) -> Vec<Value> {
-    hive.db.all("select id, text, scope, code from rules where active=1 order by id", &[]).into_iter()
-        .filter(|r| crate::db::scope_applies(r["scope"].as_str().unwrap_or(""), nodes, site, app, folder)).collect()
-}
 
 fn mime(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
@@ -528,6 +537,44 @@ mod tests {
         let cookie = &login.headers.iter().find(|(k, _)| k == "Set-Cookie").unwrap().1;
         let t = cookie.trim_start_matches("hive=").split(';').next().unwrap();
         assert!(valid(&hive, t) && !valid(&hive, "nope") && !valid(&hive, ""));
+        std::fs::remove_dir_all(state).ok();
+    }
+    #[test]
+    fn unified_control_plane_routes_projects_inspect_grant_and_tools() {
+        let state = std::env::temp_dir().join(format!("hive-ops-api-test-{}", std::process::id()));
+        std::fs::create_dir_all(&state).unwrap();
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let key = new_token(&hive, "test");
+        let call = |method: &str, path: &str, query: &[(&str, &str)], body: Value| {
+            let req = Req { method: method.into(), path: path.into(),
+                query: query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                headers: [("authorization".into(), format!("Bearer {key}"))].into_iter().collect(),
+                body: if body.is_null() { vec![] } else { body.to_string().into_bytes() }, peer: "192.0.2.10".into() };
+            let res = handle(&hive, req);
+            (res.status, serde_json::from_slice::<Value>(&res.body).unwrap_or(Value::Null))
+        };
+        assert_eq!(call("POST", "/api/projects", &[], json!({"slug":"web","title":"Web App","summary":"Frontend"})).0, 200);
+        let (st, projects) = call("GET", "/api/projects", &[], Value::Null);
+        assert_eq!(st, 200);
+        assert_eq!(projects[0]["slug"], "web");
+        let tid = hive.add_task(0, &json!({"title":"UI","project":"web","nodes":["vm"]}));
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('b1','browser','Safari','[]',?)", args!(crate::db::now()));
+        let (st, granted) = call("POST", &format!("/api/tasks/{tid}/grant"), &[], json!({"nodes":["browser"]}));
+        assert_eq!(st, 200);
+        assert_eq!(granted["nodes"], json!(["vm", "browser"]));
+        let (st, inspected) = call("GET", "/api/inspect", &[("kind", "project"), ("name", "web")], Value::Null);
+        assert_eq!(st, 200);
+        assert_eq!(inspected["project"]["title"], "Web App");
+        let (st, tools) = call("GET", "/api/tools", &[], Value::Null);
+        assert_eq!(st, 200);
+        let has_tool = |node: &str, name: &str| tools.as_array().unwrap().iter().any(|g| {
+            g["node"] == node && g["tools"].as_array().unwrap().iter().any(|t| t["name"] == name)
+        });
+        assert!(has_tool("orchestrator (agent)", "inspect"));
+        assert!(has_tool("worker (cloud)", "handoff"));
+        // Instructions route supports both "worker" and legacy "agent" alias.
+        assert_eq!(call("GET", "/api/instructions/worker", &[], Value::Null).1["text"],
+            call("GET", "/api/instructions/agent", &[], Value::Null).1["text"]);
         std::fs::remove_dir_all(state).ok();
     }
 }

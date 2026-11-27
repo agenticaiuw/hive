@@ -510,10 +510,10 @@ async function render() {
     updateTasks();
   } else if (tab === 'Rules') {
     const rules = await api('api/rules');
-    v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
+    v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, project:slug, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
       ${rules.map(r => `<div class="card row"><b>R${r.id}</b>${r.scope ? `<span class="badge">${esc(r.scope)}</span>` : ''}<span style="flex:1">${esc(r.text)}${r.code ? ' <span class="muted">(page change)</span>' : ''}${r.quote ? `<br><span class="muted">"${esc(r.quote)}"</span>` : ''}</span><button class="plain" onclick="delRule(${r.id})">Remove</button></div>`).join('')}`;
   } else if (tab === 'Instructions') {
-    const prompts = [['orchestrator', 'The orchestrator', 'what it hears with every request, before your rules'], ['agent', 'Every agent', 'what each agent hears first, before its task']];
+    const prompts = [['orchestrator', 'Orchestrator agent', 'what the orchestrator hears with every request, before your rules'], ['worker', 'Worker agents', 'what each worker agent hears first, before its task']];
     const texts = await Promise.all(prompts.map(([name]) => api(`api/instructions/${name}`)));
     v.innerHTML = prompts.map(([name, title, hint], i) => `<div class="card"><b>${title}</b> <span class="muted">${hint}. Save empty to go back to Hive's.</span>
       <textarea id="prompt-${name}" rows="16">${esc(texts[i].text)}</textarea><div class="row"><button onclick="savePrompt('${name}')">Save</button></div></div>`).join('');

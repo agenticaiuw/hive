@@ -149,11 +149,13 @@ pub fn end_turn() -> Value {
             "need": st("When not done: exactly what you need from the owner.") } } })
 }
 
-/// The planner: one `claude -p` with a JSON schema for its answer.
-pub fn plan(cmd: &str, env: &[(String, String)], cwd: &Path, model: (&str, &str), prompt: &str, schema: &Value, input: &str) -> Result<Value, String> {
-    let mut child = command(cmd, env, cwd).args(["-p", "--output-format", "json", "--json-schema", &schema.to_string(), "--model", model.0,
-        "--effort", model.1, "--append-system-prompt", prompt, "--strict-mcp-config", "--permission-mode", "plan", "--no-session-persistence", "--settings", NO_HOOKS])
-        .spawn().map_err(|e| format!("couldn't start Claude Code ({cmd}): {e}"))?;
+/// The orchestrator planner: one `claude -p` with a JSON schema for its answer and optional read-only MCP tools.
+pub fn plan(cmd: &str, env: &[(String, String)], cwd: &Path, model: (&str, &str), prompt: &str, schema: &Value, input: &str, mcp: Option<&str>) -> Result<Value, String> {
+    let mut cmd_exec = command(cmd, env, cwd);
+    cmd_exec.args(["-p", "--output-format", "json", "--json-schema", &schema.to_string(), "--model", model.0,
+        "--effort", model.1, "--append-system-prompt", prompt, "--strict-mcp-config", "--permission-mode", "plan", "--no-session-persistence", "--settings", NO_HOOKS]);
+    if let Some(cfg) = mcp { cmd_exec.args(["--mcp-config", cfg]); }
+    let mut child = cmd_exec.spawn().map_err(|e| format!("couldn't start Claude Code ({cmd}): {e}"))?;
     // The input goes in as the prompt on stdin, which has no length limit the way a command line does.
     let mut stdin = child.stdin.take().unwrap();
     let input = input.to_string();

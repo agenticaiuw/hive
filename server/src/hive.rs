@@ -4,7 +4,8 @@
 use crate::args;
 use crate::claude::{Claude, Out};
 use crate::codex::{tool_result, Codex, Event};
-use crate::db::{now, Db};
+use crate::db::{now, scope_applies, Db};
+use crate::ops::{self, Actor, Role};
 use crate::sim;
 use crate::tools;
 use hive_protocol::b64;
@@ -219,13 +220,24 @@ impl Hive {
             let me = self.clone();
             std::thread::spawn(move || me.plan(id));
         }
-        for t in self.db.all("select id from tasks where status='open' and agent_id is null order by id", &[]) {
+        for t in self.db.all("select id, depends_on from tasks where status='open' and agent_id is null order by id", &[]) {
             let id = t["id"].as_i64().unwrap_or(0);
+            let dep = t["depends_on"].as_i64().unwrap_or(0);
+            if dep > 0 {
+                let dep_status = self.db.get("select status from tasks where id=?", args!(dep)).map(|r| s(&r["status"])).unwrap_or_default();
+                if dep_status == "dropped" {
+                    self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
+                        args!(format!("Prerequisite task #{dep} was dropped."), "Drop this task or tell Hive how to proceed.", now(), id));
+                    self.bump();
+                    continue;
+                }
+                if dep_status != "done" { continue; }
+            }
             self.db.run("update tasks set status='working', updated=? where id=?", args!(now(), id));
             let me = self.clone();
             std::thread::spawn(move || me.start_agent(id));
         }
-        // Claimed tasks wait while their agent works on its current task.
+        // Queued tasks wait while their assigned worker finishes its current task.
         for a in self.db.all("select id from agents where kind!='claude' and status in ('idle','done') and exists (select 1 from tasks where id=agents.task_id and status='done') and exists (select 1 from tasks where agent_id=agents.id and status='queued')", &[]) {
             let agent = a["id"].as_i64().unwrap_or(0);
             if let Some(t) = self.db.get("select id from tasks where agent_id=? and status='queued' order by id limit 1", args!(agent)) {
@@ -244,7 +256,7 @@ impl Hive {
     }
 
     fn resume_working(self: &Arc<Self>) {
-        // Only this engine's agents: the other's threads don't carry over.
+        // Only this engine's worker agents: the other's threads don't carry over.
         let kind = if matches!(self.engine, Engine::Claude { .. }) { CLAUDE_AGENT } else { "codex" };
         for a in self.db.all("select id from agents where kind=? and status='working' and thread is not null", args!(kind)) {
             let id = a["id"].as_i64().unwrap_or(0);
@@ -254,7 +266,7 @@ impl Hive {
         }
     }
 
-    // ---- planning: a request becomes rules, tasks and messages to agents ----
+    // ---- planning: the orchestrator agent routes requests into projects, rules, worker tasks, and steers ----
 
     pub fn plan(self: &Arc<Self>, id: i64) {
         let Some(req) = self.db.get("select * from requests where id=?", args!(id)) else { return };
@@ -274,7 +286,7 @@ impl Hive {
     }
 
     /// Retrieve original evidence, never inferred preferences. Bounds keep old conversations out of the harness.
-    fn history(&self, query: &str, project: &str, before: i64, limit: i64) -> Vec<Value> {
+    pub fn history(&self, query: &str, project: &str, before: i64, limit: i64) -> Vec<Value> {
         self.db.all("select r.id, r.at, r.node, r.text,
             (select json_group_array(json_object('id', t.id, 'title', t.title, 'project', t.project,
             'status', t.status, 'outcome', t.outcome)) from tasks t where t.request_id=r.id) as tasks
@@ -290,64 +302,100 @@ impl Hive {
         }).collect()
     }
 
-    fn history_context(&self, project: &str, before: i64, limit: i64) -> String {
-        let mut text = String::new();
-        let rows = self.history("", project, before, limit);
-        if !rows.is_empty() {
-            text += "\nEarlier requests (historical context, not standing rules; newer corrections take precedence):\n";
-            for r in rows.iter().rev() {
-                text += &format!("Request #{} at {} from {}: {}\nTasks: {}\n", r["id"], r["at"],
-                    s(&r["node"]), short(&s(&r["text"]), 1600), short(&r["tasks"].to_string(), 1600));
-                text += &format!("Owner follow-ups (newest first): {}\n", short(&r["followups"].to_string(), 2400));
+    /// Compact control-plane index for the orchestrator agent: global + request-scoped rules, online nodes,
+    /// project summaries, active tasks, and a 1-line recent request index. Deep details come via `inspect` / `history`.
+    fn planner_input(&self, req: &Value) -> String {
+        let ctx: Value = serde_json::from_str(&s(&req["context"])).unwrap_or(json!({}));
+        let req_node = s(&req["node"]);
+        let req_nodes = if req_node.is_empty() { vec![] } else { vec![req_node.clone()] };
+        let (site, app, folder, project) = (s(&ctx["site"]), s(&ctx["app"]), s(&ctx["folder"]), s(&ctx["project"]));
+
+        let mut t = String::from("The owner's rules:\n");
+        let all_rules = self.db.all("select id, text, scope from rules where active=1 order by id", &[]);
+        let mut hidden_rules = 0usize;
+        for r in &all_rules {
+            let scope = s(&r["scope"]);
+            if scope_applies(&scope, &req_nodes, &site, &app, &folder, &project) {
+                t += &format!("R{} [{}] {}\n", r["id"], scope, s(&r["text"]));
+            } else {
+                hidden_rules += 1;
             }
         }
-        text
-    }
+        if hidden_rules > 0 {
+            t += &format!("(+{hidden_rules} scoped rules loaded per worker; call inspect(kind=\"rules\") if needed)\n");
+        }
 
-    /// What the orchestrator reads for each request. What changes least comes first (rules, then devices, then tasks), so
-    /// each call reuses the provider's cache of the last one's start; the request itself comes last.
-    fn planner_input(&self, req: &Value) -> String {
-        let mut t = String::from("The owner's rules:\n");
-        for r in self.db.all("select id, text, scope from rules where active=1 order by id", &[]) {
-            t += &format!("R{} [{}] {}\n", r["id"], s(&r["scope"]), s(&r["text"]));
+        t += if self.repo.is_some() { "\nNodes: vm, hive" } else { "\nNodes: vm" };
+        for n in self.db.all("select kind, name, seen from nodes order by kind", &[]) {
+            let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline" };
+            t += &format!(", {} ({}, {on})", s(&n["kind"]), s(&n["name"]));
         }
-        t += if self.repo.is_some() { "\nNodes: vm (the VM's shell and its own Chrome; always there), hive (changing Hive's own code)" }
-            else { "\nNodes: vm (the shell of the computer Hive runs on; always there)" };
-        for n in self.db.all("select kind, name, notes, seen from nodes order by kind", &[]) {
-            let on = if n["seen"].as_i64().unwrap_or(0) > now() - 90_000 { "online" } else { "offline now" };
-            t += &format!(", {} ({}, {on}: {})", s(&n["kind"]), s(&n["name"]), s(&n["notes"]));
+
+        let projects = ops::list_projects(self);
+        if !projects.is_empty() {
+            t += "\n\nProjects:\n";
+            for p in projects.iter().take(12) {
+                let sum = s(&p["summary"]);
+                if sum.is_empty() {
+                    t += &format!("- {}\n", s(&p["slug"]));
+                } else {
+                    t += &format!("- {}: {}\n", s(&p["slug"]), short(&sum, 220));
+                }
+            }
         }
+
         t += "\n\nOpen tasks:\n";
-        for task in self.db.all("select t.id, t.title, t.status, t.nodes, t.project, t.agent_id, a.task_id as on_task from tasks t
+        for task in self.db.all("select t.id, t.title, t.status, t.nodes, t.project, t.agent_id, t.depends_on, t.need, a.task_id as on_task from tasks t
             left join agents a on a.id=t.agent_id where t.status in ('open','queued','working','needs','idle') order by t.id", &[]) {
             let who = match (task["agent_id"].as_i64(), task["on_task"].as_i64()) {
-                (Some(a), Some(on)) if on != task["id"].as_i64().unwrap_or(0) => format!(", agent {a}, which is on #{on} now"),
-                (Some(a), _) => format!(", agent {a}"),
+                (Some(a), Some(on)) if on != task["id"].as_i64().unwrap_or(0) => format!(", worker {a}, which is on #{on} now"),
+                (Some(a), _) => format!(", worker {a}"),
                 _ => String::new(),
             };
-            t += &format!("#{} [{}] {} (nodes {}, project {}{who})\n", task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
+            let dep = task["depends_on"].as_i64().filter(|&d| d > 0).map(|d| format!(", depends_on #{d}")).unwrap_or_default();
+            let need = if s(&task["status"]) == "needs" && !s(&task["need"]).is_empty() {
+                format!(", needs: {}", short(&s(&task["need"]), 120))
+            } else { String::new() };
+            t += &format!("#{} [{}] {} (nodes {}, project {}{who}{dep}{need})\n",
+                task["id"], s(&task["status"]), s(&task["title"]), s(&task["nodes"]), s(&task["project"]));
         }
-        t += &self.history_context("", req["id"].as_i64().unwrap_or(i64::MAX), 8);
-        t += &format!("\nRequest #{} from {} ({}):\n{}\n", req["id"], s(&req["node"]), s(&req["agent"]), s(&req["text"]));
-        let ctx = s(&req["context"]);
-        if !ctx.is_empty() && ctx != "null" && ctx != "{}" { t += &format!("Context: {}\n", ctx); }
+
+        let before = req["id"].as_i64().unwrap_or(i64::MAX);
+        let recent = self.db.all("select id, node, text from requests where id<? order by id desc limit 5", args!(before));
+        if !recent.is_empty() {
+            t += "\nRecent requests (use inspect or history for details):\n";
+            for r in recent.iter().rev() {
+                t += &format!("- #{} [{}]: {}\n", r["id"], s(&r["node"]), short(&s(&r["text"]), 140));
+            }
+        }
+
+        t += &format!("\nRequest #{} from {} ({}):\n{}\n", req["id"], req_node, s(&req["agent"]), s(&req["text"]));
+        let raw_ctx = s(&req["context"]);
+        if !raw_ctx.is_empty() && raw_ctx != "null" && raw_ctx != "{}" { t += &format!("Context: {}\n", raw_ctx); }
         t
     }
 
     /// The orchestrator reads (never writes) Hive's own code, so it works in the checkout when this Hive has one.
     fn planner_cwd(&self) -> &std::path::Path { self.repo.as_deref().unwrap_or(&self.state) }
 
-    /// The orchestrator's or every agent's instructions (PROMPTS): the owner's own, edited on the dashboard's Instructions tab,
-    /// else Hive's (server/orchestrator.md, server/agent.md). None for a name that isn't one.
+    fn prompt_key(name: &str) -> &str { if name == "agent" { "worker" } else { name } }
+
+    /// The orchestrator's or worker agents' instructions (PROMPTS): the owner's own, edited on the dashboard's Instructions tab,
+    /// else Hive's (server/orchestrator.md, server/worker.md). Accepts "agent" as a legacy alias for "worker".
     pub fn prompt(&self, name: &str) -> Option<String> {
-        let own = PROMPTS.iter().find(|p| p.0 == name)?.1;
-        Some(std::fs::read_to_string(self.state.join(format!("{name}.md"))).ok().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| own.into()))
+        let key = Self::prompt_key(name);
+        let own = PROMPTS.iter().find(|p| p.0 == key)?.1;
+        let custom = std::fs::read_to_string(self.state.join(format!("{key}.md"))).ok().filter(|t| !t.trim().is_empty())
+            .or_else(|| (key == "worker").then(|| std::fs::read_to_string(self.state.join("agent.md")).ok().filter(|t| !t.trim().is_empty())).flatten());
+        Some(custom.unwrap_or_else(|| own.into()))
     }
 
     /// Save the owner's own instructions; empty, or Hive's own, goes back to Hive's.
     pub fn set_prompt(&self, name: &str, text: &str) -> Result<(), String> {
-        let own = PROMPTS.iter().find(|p| p.0 == name).ok_or("There are no such instructions.")?.1;
-        let path = self.state.join(format!("{name}.md"));
+        let key = Self::prompt_key(name);
+        let own = PROMPTS.iter().find(|p| p.0 == key).ok_or("There are no such instructions.")?.1;
+        let path = self.state.join(format!("{key}.md"));
+        if key == "worker" { std::fs::remove_file(self.state.join("agent.md")).ok(); }
         if text.trim().is_empty() || text.trim() == own.trim() { std::fs::remove_file(&path).ok(); return Ok(()); }
         std::fs::write(&path, text).map_err(|e| format!("Couldn't save them: {e}"))
     }
@@ -355,13 +403,23 @@ impl Hive {
     fn plan_inner(self: &Arc<Self>, req: &Value) -> Result<String, String> {
         let id = req["id"].as_i64().unwrap_or(0);
         if let Engine::Claude { cmd, env } = &self.engine {
-            let plan = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, &self.prompt("orchestrator").unwrap_or_default(), &plan_schema(&self.kinds()), &self.planner_input(req))?;
+            let token = crate::api::random(24);
+            let mcp_cfg = if self.local.is_empty() { None } else {
+                self.mcp.lock().unwrap().insert(token.clone(), 0);
+                Some(json!({ "mcpServers": { "hive": { "type": "http", "url": format!("{}/mcp/{token}", self.local) } } }).to_string())
+            };
+            let res = crate::claude::plan(cmd, env, self.planner_cwd(), CLAUDE_PLANNER, &self.prompt("orchestrator").unwrap_or_default(),
+                &plan_schema(&self.kinds()), &self.planner_input(req), mcp_cfg.as_deref());
+            self.mcp.lock().unwrap().remove(&token);
+            let plan = res?;
             return Ok(self.apply_plan(id, req, &plan));
         }
         let codex = self.codex()?;
+        let orch_tools: Vec<Value> = tools::orchestrator().iter().map(tools::for_codex).collect();
         let started = codex.request("thread/start", json!({
             "model": PLANNER_MODEL.0, "ephemeral": true, "approvalPolicy": "never", "sandbox": "read-only",
             "cwd": self.planner_cwd().to_string_lossy(), "developerInstructions": self.prompt("orchestrator").unwrap_or_default(),
+            "dynamicTools": orch_tools,
         }), 60)?;
         let thread = s(&started["thread"]["id"]);
         let (tx, rx) = mpsc::channel();
@@ -389,10 +447,24 @@ impl Hive {
     pub fn apply_plan(self: &Arc<Self>, id: i64, req: &Value, plan: &Value) -> String {
         // A session outside Hive (a request with an `agent`) writes its own tasks with `hive mcp`: it has the context the
         // orchestrator lacks.
-        if s(&req["agent"]).is_empty() {
-            for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
-        }
         if !s(&req["agent"]).is_empty() { self.bump(); return s(&plan["reply"]); }
+        for p in plan["projects"].as_array().into_iter().flatten() {
+            if let Err(e) = ops::upsert_project(self, Actor::orchestrator(), &s(&p["slug"]), &s(&p["title"]), &s(&p["summary"]), None) {
+                self.log(0, 0, id, "hive", &format!("Couldn't update project: {e}"));
+            }
+        }
+        for r in plan["rules"].as_array().into_iter().flatten() {
+            if let Err(e) = ops::add_rule(self, &s(&r["text"]), &s(&r["quote"]), &s(&r["scope"])) {
+                self.log(0, 0, id, "hive", &format!("Couldn't save rule: {e}"));
+            }
+        }
+        for g in plan["grant"].as_array().into_iter().flatten() {
+            let tid = g["task"].as_i64().unwrap_or(0);
+            if let Err(e) = ops::grant_nodes(self, Actor::orchestrator(), tid, &list(&g["nodes"])) {
+                self.log(0, tid, id, "hive", &format!("Couldn't grant nodes to task #{tid}: {e}"));
+            }
+        }
+        for t in plan["tasks"].as_array().into_iter().flatten() { self.add_task(id, t); }
         for t in plan["start"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
             if let Err(e) = self.start_now(t) { self.log(0, t, id, "hive", &format!("Couldn't start task #{t}: {e}")); }
         }
@@ -407,15 +479,21 @@ impl Hive {
         s(&plan["reply"])
     }
 
-    /// A task for a request, written by the orchestrator or by the agent that took the request. A session outside Hive
-    /// works on its own tasks itself; any other task gets a new agent.
+    /// A task for a request, written by the orchestrator or an external session. An external session works on its own tasks;
+    /// any other task starts on a fresh worker (unless `continue_worker` is explicitly set).
     pub fn add_task(self: &Arc<Self>, request: i64, t: &Value) -> i64 {
         let level = s(&t["level"]);
         let level = if LEVELS.iter().any(|l| l.0 == level) { level } else { "normal".into() };
         let nodes = if t["nodes"].is_array() { t["nodes"].clone() } else { json!(["vm"]) };
         let every = t["every"].as_i64().unwrap_or(0).max(0);
-        let tid = self.db.run("insert into tasks(request_id, project, title, quote, nodes, level, every, at, updated) values(?,?,?,?,?,?,?,?,?)",
-            args!(request, s(&t["project"]), s(&t["title"]), s(&t["quote"]), nodes, level, every, now(), now()));
+        let depends_on = t["depends_on"].as_i64().unwrap_or(0).max(0);
+        let continue_agent = t["continue_worker"].as_i64().or_else(|| t["continue_agent"].as_i64()).unwrap_or(0).max(0);
+        let project = s(&t["project"]).trim().to_string();
+        ops::touch_project(self, &project, &nodes);
+        let tid = self.db.run(
+            "insert into tasks(request_id, project, title, quote, nodes, level, every, depends_on, continue_agent, at, updated) values(?,?,?,?,?,?,?,?,?,?,?)",
+            args!(request, project, s(&t["title"]), s(&t["quote"]), nodes, level, every, depends_on, continue_agent, now(), now()),
+        );
         let requester = self.db.get("select agent from requests where id=?", args!(request)).map(|r| s(&r["agent"])).unwrap_or_default();
         if !requester.is_empty() {
             let agent = self.agent_for_session(&requester, tid);
@@ -426,25 +504,14 @@ impl Hive {
         tid
     }
 
-    /// A standing instruction, saved by the agent that heard it (it knows how far the owner meant it to reach).
-    pub fn add_rule(&self, text: &str, quote: &str, scope: &str) -> Result<i64, String> {
-        if text.trim().is_empty() || quote.trim().is_empty() { return Err("give the rule and the owner's exact words".into()); }
-        if !(scope.is_empty() || ["node:", "site:", "app:", "folder:"].iter().any(|p| scope.starts_with(p))) {
-            return Err("scope is node:<kind>, site:<host>, app:<name>, folder:<path>, or empty for everywhere".into());
-        }
-        let rid = self.db.run("insert into rules(text, quote, scope, at) values(?,?,?,?)", args!(text, quote, scope, now()));
-        self.log(0, 0, 0, "hive", &format!("New rule R{rid}: {text}"));
-        self.bump();
-        Ok(rid)
-    }
-
     fn agent_for_session(&self, name: &str, task: i64) -> i64 {
         if let Some(a) = self.db.get("select id from agents where kind='claude' and name=?", args!(name)) {
             let id = a["id"].as_i64().unwrap_or(0);
-            self.db.run("update agents set task_id=?, status='working', updated=? where id=?", args!(task, now(), id));
+            self.db.run("update agents set task_id=?, role='external', status='working', updated=? where id=?", args!(task, now(), id));
             return id;
         }
-        self.db.run("insert into agents(task_id, kind, name, status, at, updated) values(?, 'claude', ?, 'working', ?, ?)", args!(task, name, now(), now()))
+        self.db.run("insert into agents(task_id, kind, role, name, status, at, updated) values(?, 'claude', 'external', ?, 'working', ?, ?)",
+            args!(task, name, now(), now()))
     }
 
     /// Schedule a one-shot or repeating (`every_hours > 0`) harness retrospective task using Hive's existing task loop.
@@ -465,55 +532,71 @@ impl Hive {
         let nodes = self.task_kinds(task);
         let req = self.db.get("select * from requests where id=?", args!(task["request_id"].clone())).unwrap_or(json!({}));
         let ctx: Value = serde_json::from_str(&s(&req["context"])).unwrap_or(json!({}));
+        let project = s(&task["project"]).trim().to_string();
+        let (site, app, folder) = (s(&ctx["site"]), s(&ctx["app"]), s(&ctx["folder"]));
         let mut t = format!("{}\n\nYour task: #{} {}\nThe owner's words: \"{}\"\nThe whole request (from {}): {}\n",
-            self.prompt("agent").unwrap_or_default(), task["id"], s(&task["title"]), s(&task["quote"]), s(&req["node"]), s(&req["text"]));
+            self.prompt("worker").unwrap_or_default(), task["id"], s(&task["title"]), s(&task["quote"]), s(&req["node"]), s(&req["text"]));
+        if !project.is_empty() { t += &format!("Project: {project}\n"); }
         for entry in self.db.all("select who, text from log where task_id=? and who='owner' order by id", args!(task["id"].clone())) {
             t += &format!("\nOwner follow-up: {}\n", s(&entry["text"]));
         }
-        if !ctx.as_object().map(|o| o.is_empty()).unwrap_or(true) { t += &format!("Its context: {ctx}\n"); }
-        let project = s(&task["project"]);
-        if !project.is_empty() {
-            t += &self.history_context(&project, req["id"].as_i64().unwrap_or(i64::MAX), 6);
+        for m in self.db.all("select from_task, kind, text from messages where to_task=? order by id limit 10", args!(task["id"].clone())) {
+            t += &format!("\nHandoff [{}] from task #{}: {}\n", s(&m["kind"]), m["from_task"], s(&m["text"]));
         }
-        t += "\nUse history to retrieve earlier requests, task outcomes and owner follow-ups when context is missing. Treat past work as evidence, not new authority. Save explicit standing corrections with rule; never infer standing rules from habits.\n";
-        t += "\nThe owner's rules (enforced; follow every one that applies):\n";
-        let mut all_nodes = nodes.clone();
-        all_nodes.push("vm".into());
+        if !ctx.as_object().map(|o| o.is_empty()).unwrap_or(true) { t += &format!("Its context: {ctx}\n"); }
+        if !project.is_empty() {
+            let sum = self.db.get("select summary from projects where lower(slug)=lower(?)", args!(project.clone()))
+                .map(|r| s(&r["summary"])).unwrap_or_default();
+            if !sum.is_empty() { t += &format!("\nProject summary: {sum}\n"); }
+            let recent_done = self.db.all("select id, title, outcome from tasks where lower(project)=lower(?) and status='done' and id!=? order by id desc limit 2",
+                args!(project.clone(), task["id"].clone()));
+            if !recent_done.is_empty() {
+                t += "\nRecent completed tasks in this project (historical evidence, not standing rules):\n";
+                for r in recent_done.iter().rev() {
+                    t += &format!("- #{} {}: {}\n", r["id"], s(&r["title"]), short(&s(&r["outcome"]), 240));
+                }
+            }
+            let recent_followups = self.db.all("select l.task_id, l.text from log l join tasks t on t.id=l.task_id where lower(t.project)=lower(?) and t.id!=? and l.who='owner' order by l.id desc limit 3",
+                args!(project.clone(), task["id"].clone()));
+            if !recent_followups.is_empty() {
+                t += "Recent owner follow-ups in this project:\n";
+                for f in recent_followups.iter().rev() {
+                    t += &format!("- (on #{}) {}\n", f["task_id"], short(&s(&f["text"]), 240));
+                }
+            }
+        }
+        t += "\nUse `history` for older requests or outcomes in this project. Use `handoff` for bounded coordination with a peer worker in the same project, and `request_help` if you need an extra node capability or orchestrator help.\n";
+        t += "\nThe owner's rules (scoped to this task; follow every one):\n";
         for r in self.db.all("select id, text, scope from rules where active=1 and (code is null or code='') order by id", &[]) {
             let scope = s(&r["scope"]);
-            if scope.strip_prefix("node:").is_some_and(|k| !all_nodes.iter().any(|n| n == k)) { continue; }
+            if !scope_applies(&scope, &nodes, &site, &app, &folder, &project) { continue; }
             t += &if scope.is_empty() { format!("- R{} {}\n", r["id"], s(&r["text"])) } else { format!("- R{} [{scope}] {}\n", r["id"], s(&r["text"])) };
         }
-        t += "\nYou can claim more open tasks with claim_task; Hive runs them sequentially after this task.\n";
         t += "\nWhere you work:\n";
-        match &self.repo {
-            Some(repo) => {
-                t += VM_NOTES;
-                t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Other agents work in it at the same time: \
-                    lock the files you'll change (lock) before you edit them, never edit one another agent holds, and commit only your own \
+        let has_vm = nodes.iter().any(|n| n == "vm" || n == "hive");
+        let has_hive = nodes.iter().any(|n| n == "hive");
+        if has_vm {
+            match &self.repo {
+                Some(_) => { t += VM_NOTES; }
+                None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
+                    with the dashboard and nodes) are in {}.", self.state.join("files").display()),
+            }
+        }
+        if has_hive {
+            if let Some(repo) = &self.repo {
+                t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Other workers work in it at the same time: \
+                    lock the files you'll change (lock) before you edit them, never edit one another worker holds, and commit only your own \
                     (git commit -m <message> -- <files>). Keep it lean. Commit with a clear message, then call reinstall. When a change makes sense for everyone who uses Hive, also push it to GitHub (git push \
                     origin HEAD:main), which is how it reaches the owner's devices; one that's only for the owner or a small group stays here.", repo.display());
             }
-            None => t += &format!("- The computer Hive runs on, the owner's own (you run as their user): your shell. Hive's files (shared \
-                with the dashboard and nodes) are in {}.", self.state.join("files").display()),
         }
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
             if nodes.contains(&s(&n["kind"])) && !s(&n["notes"]).is_empty() { t += &format!("\n- {}", s(&n["notes"])); }
         }
-        if list(&task["nodes"]).iter().any(|n| n == "hive") {
+        if has_hive {
             t += &format!("\n\n{}\n\nCurrent SIM:\n{}", sim::PROTOCOL, sim::format(&self.db, self.repo.as_deref()));
         }
         t
-    }
-
-    /// Claim without interrupting the agent's current task. Existing owners cannot be displaced.
-    pub fn claim_task(&self, agent: i64, task: i64) -> Result<(), String> {
-        let _assignment = self.assignments.lock().unwrap();
-        self.db.get("select id from agents where id=? and kind!='claude'", args!(agent)).ok_or("no such Hive agent")?;
-        self.db.run("update tasks set agent_id=?, status='queued', updated=? where id=? and agent_id is null and status='open'", args!(agent, now(), task));
-        self.db.get("select id from tasks where id=? and agent_id=?", args!(task, agent)).ok_or("task is already claimed or closed")?;
-        self.bump();
-        Ok(())
     }
 
     /// Task completion and turn completion are both required before reusing a session.
@@ -530,12 +613,12 @@ impl Hive {
         let (model, effort) = self.model_for(&s(&task["level"]));
         let on_claude = matches!(self.engine, Engine::Claude { .. });
         let kind = if on_claude { CLAUDE_AGENT } else { "codex" };
-        // A task an agent claimed waits for it; any other goes to a free agent that knows its project, else a new one.
+        // Fresh isolated worker by default. Reuse an existing worker only when explicitly bound or when
+        // the orchestrator requested `continue_agent` for tightly coupled follow-up work.
         let owner = task["agent_id"].as_i64().or_else(|| {
-            let project = s(&task["project"]);
-            if project.is_empty() { return None; }
-            self.db.all("select distinct a.id from agents a join tasks t on t.agent_id=a.id where a.kind=? and t.project=? order by a.id desc", args!(kind, project))
-                .iter().filter_map(|a| a["id"].as_i64()).find(|&a| self.ready_for_task(a))
+            let cont = task["continue_agent"].as_i64().unwrap_or(0);
+            (cont > 0 && self.db.get("select 1 from agents where id=? and kind=?", args!(cont, kind)).is_some() && self.ready_for_task(cont))
+                .then_some(cont)
         });
         let agent = if let Some(agent) = owner {
             self.db.run("update tasks set agent_id=?, status='queued' where id=?", args!(agent, task_id));
@@ -544,7 +627,7 @@ impl Hive {
             self.db.run("update agents set task_id=?, thread=null, tools='', status='working', updated=?, model=?, effort=? where id=?", args!(task_id, now(), model, effort, agent));
             agent
         } else {
-            self.db.run("insert into agents(task_id, kind, name, status, at, updated, model, effort) values(?, ?, ?, 'working', ?, ?, ?, ?)",
+            self.db.run("insert into agents(task_id, kind, role, name, status, at, updated, model, effort) values(?, ?, 'worker', ?, 'working', ?, ?, ?, ?)",
                 args!(task_id, kind, short(&s(&task["title"]), 60), now(), now(), model, effort))
         };
         self.db.run("update tasks set agent_id=?, status='working', updated=? where id=?", args!(agent, now(), task_id));
@@ -552,10 +635,10 @@ impl Hive {
             else { self.new_thread(agent, &task).and_then(|_| self.start_turn_with(agent, "Start on your task now.", effort)) };
         if let Err(e) = result {
             self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?",
-                args!(format!("Hive couldn't start an agent: {e}"), format!("Nothing from you if {} comes back by itself; send the task a message to retry.",
+                args!(format!("Hive couldn't start a worker: {e}"), format!("Nothing from you if {} comes back by itself; send the task a message to retry.",
                     if on_claude { "Claude Code" } else { "Codex" }), now(), task_id));
             self.db.run("update agents set status='idle' where id=?", args!(agent));
-            self.log(agent, task_id, 0, "hive", &format!("Couldn't start the agent: {e}"));
+            self.log(agent, task_id, 0, "hive", &format!("Couldn't start the worker: {e}"));
         }
         self.bump();
     }
@@ -818,14 +901,21 @@ impl Hive {
 
     /// A task ended: done with the outcome, or needs the owner (exact why and need). False if it says neither.
     fn finish(&self, agent: i64, task: i64, e: &Value) -> bool {
+        let info = self.db.get("select project, title from tasks where id=?", args!(task)).unwrap_or(json!({}));
+        let (project, title) = (s(&info["project"]), s(&info["title"]));
         if e["done"] == true {
-            self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(s(&e["outcome"]), now(), task));
+            let outcome = s(&e["outcome"]);
+            self.db.run("update tasks set status='done', outcome=?, updated=? where id=?", args!(outcome, now(), task));
             self.db.run("update agents set status='done', updated=? where id=?", args!(now(), agent));
-            self.log(agent, task, 0, "done", &s(&e["outcome"]));
+            self.log(agent, task, 0, "done", &outcome);
+            ops::record_project_outcome(self, &project, task, &title, &outcome);
+            self.log(0, task, 0, "worker", &format!("Task #{task} ({title}) done: {}", short(&outcome, 240)));
         } else if !s(&e["why"]).trim().is_empty() && !s(&e["need"]).trim().is_empty() {
-            self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(s(&e["why"]), s(&e["need"]), now(), task));
+            let (why, need) = (s(&e["why"]), s(&e["need"]));
+            self.db.run("update tasks set status='needs', why=?, need=?, updated=? where id=?", args!(why, need, now(), task));
             self.db.run("update agents set status='idle', updated=? where id=?", args!(now(), agent));
-            self.log(agent, task, 0, "needs you", &format!("{} Needs: {}", s(&e["why"]), s(&e["need"])));
+            self.log(agent, task, 0, "needs you", &format!("{why} Needs: {need}"));
+            self.log(0, task, 0, "worker", &format!("Task #{task} ({title}) needs owner: {}", short(&need, 200)));
         } else {
             return false;
         }
@@ -836,7 +926,7 @@ impl Hive {
         true
     }
 
-    /// A Claude Code session says how its task ended.
+    /// An external session says how its task ended.
     pub fn end_task(&self, task: i64, e: &Value) -> Result<(), String> {
         let agent = self.db.get("select agent_id from tasks where id=?", args!(task)).and_then(|r| r["agent_id"].as_i64()).ok_or(format!("there's no task #{task} with an agent"))?;
         if self.finish(agent, task, e) { Ok(()) } else { Err("Say done with the outcome, or needs with exactly why and what the owner must do.".into()) }
@@ -844,7 +934,7 @@ impl Hive {
 
     // ---- locks: tools that share a lock are used by one agent at a time ----
 
-    fn take_lock(&self, name: &str, agent: i64) -> Result<(), String> {
+    pub(crate) fn take_lock(&self, name: &str, agent: i64) -> Result<(), String> {
         let got = self.wait_until(120_000, || {
             let mut l = self.locks.lock().unwrap();
             match l.get(name) {
@@ -854,7 +944,7 @@ impl Hive {
         });
         got.ok_or_else(|| {
             let holder = self.locks.lock().unwrap().get(name).map(|x| x.0).unwrap_or(0);
-            format!("The {name} is in use by task {}; it frees up when that agent's turn ends. Try again, or message that task.", self.holder(holder))
+            format!("The {name} is in use by task {}; it frees up when that worker's turn ends. Try again, or handoff to that task.", self.holder(holder))
         })
     }
 
@@ -864,7 +954,7 @@ impl Hive {
             .map(|r| format!("#{} {}", r["id"], s(&r["title"]))).unwrap_or_default()
     }
 
-    /// Lock files in Hive's checkout for an agent, all or none: agents share the checkout, and none edits a file another holds.
+    /// Lock files in Hive's checkout for a worker, all or none: workers share the checkout, and none edits a file another holds.
     fn lock_files(&self, files: &[String], agent: i64) -> Result<Value, String> {
         let root = self.repo.as_ref().map(|r| format!("{}/", r.display())).unwrap_or_default();
         let files: Vec<String> = files.iter().map(|f| f.trim().strip_prefix(root.as_str()).unwrap_or(f.trim()).trim_start_matches("./").to_string())
@@ -873,12 +963,12 @@ impl Hive {
         let mut locks = self.locks.lock().unwrap();
         if let Some((file, holder)) = files.iter().find_map(|f| locks.get(&format!("file {f}")).filter(|h| h.0 != agent).map(|h| (f.clone(), h.0))) {
             drop(locks);
-            return Err(format!("{file} is locked by task {}; it frees up when that agent's turn ends. Wait and lock it again, or message that task.", self.holder(holder)));
+            return Err(format!("{file} is locked by task {}; it frees up when that worker's turn ends. Wait and lock it again, or handoff to that task.", self.holder(holder)));
         }
         for f in &files { locks.insert(format!("file {f}"), (agent, now())); }
         drop(locks);
         self.bump();
-        Ok(json!(format!("Locked {}. No other agent can lock them until your turn ends.", files.join(", "))))
+        Ok(json!(format!("Locked {}. No other worker can lock them until your turn ends.", files.join(", "))))
     }
 
     /// An agent's turn ended: its locks go. A Mac whose own pointer and keyboard it may have had goes back to the owner first, and
@@ -907,26 +997,24 @@ impl Hive {
 
     // ---- devices: each declares its tools; calls wait in the calls table until the device takes and answers them ----
 
-    /// The device kinds Hive knows, for the planner.
-    fn kinds(&self) -> Vec<String> {
+    /// The device kinds Hive knows, for the orchestrator.
+    pub(crate) fn kinds(&self) -> Vec<String> {
         let mut k = vec!["vm".to_string()];
         if self.repo.is_some() { k.push("hive".into()); }
         k.extend(self.db.all("select distinct kind from nodes order by kind", &[]).iter().map(|r| s(&r["kind"])));
         k
     }
 
-    /// The devices a task's agent gets: the task's own, plus the owner's Mac and iPhone (for sign-in verifications) and, on a Hive
-    /// with a checkout, Hive's own code: its way around a technical problem.
+    /// Strictly the node kinds granted to this task (defaulting to ["vm"] when unspecified).
+    /// Keeps every worker's tool catalog lean (<15 tools) and enforces least privilege.
     fn task_kinds(&self, task: &Value) -> Vec<String> {
-        let mut kinds = list(&task["nodes"]);
-        let extra = if self.repo.is_some() { &["mac", "phone", "browser", "hive"][..] } else { &["mac", "phone", "browser"][..] };
-        for k in extra { if !kinds.iter().any(|n| n == k) { kinds.push(k.to_string()); } }
-        kinds
+        let kinds = list(&task["nodes"]);
+        if kinds.is_empty() { vec!["vm".into()] } else { kinds }
     }
 
-    /// Every tool a task on these devices gets: the cloud's, then each device's (the most recently seen device of a kind wins).
+    /// Tools a worker on these granted node kinds gets: core worker tools + strictly those devices' tools.
     fn tools_for(&self, kinds: &[String]) -> Vec<Value> {
-        let mut out: Vec<Value> = tools::cloud(kinds);
+        let mut out: Vec<Value> = tools::worker(kinds);
         let mut names: HashSet<String> = out.iter().map(|t| s(&t["name"])).collect();
         for n in self.db.all("select kind, tools from nodes order by seen desc", &[]) {
             if !kinds.contains(&s(&n["kind"])) { continue; }
@@ -970,12 +1058,34 @@ impl Hive {
         }
     }
 
-    // ---- tool calls from agents ----
+    // ---- tool calls from agents (orchestrator read-only tools + worker scoped tools) ----
+
+    fn run_orchestrator_tool(&self, name: &str, a: &Value) -> (bool, String, Vec<String>) {
+        let res: Result<String, String> = match name {
+            "inspect" => ops::inspect(self, &s(&a["kind"]), a["id"].as_i64().unwrap_or(0), &s(&a["name"]))
+                .map(|v| serde_json::to_string(&v).unwrap_or_default()),
+            "history" => {
+                let before = a["before"].as_i64().filter(|n| *n > 0).unwrap_or(i64::MAX);
+                Ok(serde_json::to_string(&self.history(&s(&a["query"]), &s(&a["project"]), before, 10)).unwrap_or_default())
+            }
+            "info" => Ok(ops::info(self, &s(&a["key"]), &s(&a["value"]))),
+            _ => Err(format!("Orchestrator agent is read-only for tool '{name}'; delegate execution to a worker.")),
+        };
+        match res {
+            Ok(text) => (true, text, vec![]),
+            Err(err) => (false, err, vec![]),
+        }
+    }
 
     fn tool(self: &Arc<Self>, params: &Value) -> Value {
         let name = s(&params["tool"]);
         let a = &params["arguments"];
-        let agent_row = self.db.get("select * from agents where thread=?", args!(s(&params["threadId"]))).unwrap_or(json!({}));
+        let tid = s(&params["threadId"]);
+        if self.watchers.lock().unwrap().contains_key(&tid) {
+            let (ok, text, images) = self.run_orchestrator_tool(&name, a);
+            return tool_result(ok, &text, &images);
+        }
+        let agent_row = self.db.get("select * from agents where thread=?", args!(tid)).unwrap_or(json!({}));
         let (agent, task) = (agent_row["id"].as_i64().unwrap_or(0), agent_row["task_id"].as_i64().unwrap_or(0));
         let (ok, text, images) = self.run_tool(&name, a, agent, task);
         tool_result(ok, &text, &images)
@@ -1027,9 +1137,9 @@ impl Hive {
         }
     }
 
-    // ---- Claude Code agents (claude.rs): a process per agent while it works, its tools over MCP ----
+    // ---- Claude Code agents (claude.rs): a process per worker while it works, its tools over MCP ----
 
-    /// A message into a Claude agent's process (a steer mid-turn, else a new turn), starting the process if it isn't running.
+    /// A message into a Claude worker's process (a steer mid-turn, else a new turn), starting the process if it isn't running.
     fn claude_turn(self: &Arc<Self>, agent: i64, text: &str) -> Result<(), String> {
         let running = self.claudes.lock().unwrap().get(&agent).cloned();
         // One that just exited fails to take it; a new process resumes its session.
@@ -1043,7 +1153,7 @@ impl Hive {
     fn spawn_claude(self: &Arc<Self>, agent: i64) -> Result<Arc<Claude>, String> {
         let Engine::Claude { cmd, env } = &self.engine else { return Err("this Hive runs on Codex, not Claude Code".into()) };
         let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
-        let task = self.db.get("select * from tasks where id=?", args!(a["task_id"].clone())).ok_or("the agent has no task")?;
+        let task = self.db.get("select * from tasks where id=?", args!(a["task_id"].clone())).ok_or("the worker has no task")?;
         let (model, effort) = self.model_for(&s(&task["level"]));
         let token = crate::api::random(24);
         let mcp = json!({ "mcpServers": { "hive": { "type": "http", "url": format!("{}/mcp/{token}", self.local) } } });
@@ -1060,7 +1170,7 @@ impl Hive {
         Ok(c)
     }
 
-    /// What a Claude agent's process said (None: it exited), as note() does for Codex's.
+    /// What a Claude worker's process said (None: it exited), as note() does for Codex's.
     fn claude_out(self: &Arc<Self>, agent: i64, c: &Claude, out: Option<Out>) {
         use std::sync::atomic::Ordering::SeqCst;
         let task = self.db.get("select task_id from agents where id=?", args!(agent)).and_then(|r| r["task_id"].as_i64()).unwrap_or(0);
@@ -1098,9 +1208,13 @@ impl Hive {
         }
     }
 
-    /// An MCP message from a Claude agent's process, signed in by its secret. Ok(None) for a notification.
+    /// An MCP message from a Claude agent's process (agent=0 is the orchestrator; >0 is a worker), signed in by its secret.
     pub fn mcp(self: &Arc<Self>, token: &str, m: &Value) -> Result<Option<Value>, String> {
         let agent = self.mcp.lock().unwrap().get(token).copied().ok_or("no such agent")?;
+        if agent == 0 {
+            let tools = || tools::orchestrator().iter().map(tools::for_mcp).collect::<Vec<_>>();
+            return Ok(hive_protocol::mcp::answer(m, "", tools, |name, a| self.run_orchestrator_tool(name, a)));
+        }
         let task = self.db.get("select t.* from agents a join tasks t on t.id=a.task_id where a.id=?", args!(agent)).unwrap_or(json!({}));
         let tid = task["id"].as_i64().unwrap_or(0);
         let tools = || {
@@ -1110,7 +1224,7 @@ impl Hive {
         };
         Ok(hive_protocol::mcp::answer(m, "", tools, |name, a| {
             if name != "end_turn" { return self.run_tool(name, a, agent, tid); }
-            // What a Codex agent's final message would be: after_turn reads it when the turn's result comes.
+            // What a Codex worker's final message would be: after_turn reads it when the turn's result comes.
             let end = json!({ "done": a["done"], "outcome": s(&a["outcome"]), "why": s(&a["why"]), "need": s(&a["need"]) });
             if !a["done"].is_boolean() { return (false, "Give done (true or false), with the outcome, or why and need.".into(), vec![]); }
             self.last.lock().unwrap().insert(agent, end.to_string());
@@ -1118,32 +1232,38 @@ impl Hive {
         }))
     }
 
+    fn require_node(&self, task: i64, node: &str) -> Result<(), String> {
+        if task <= 0 { return Ok(()); }
+        let Some(trow) = self.db.get("select nodes from tasks where id=?", args!(task)) else { return Ok(()); };
+        if self.task_kinds(&trow).iter().any(|k| k == node) { return Ok(()); }
+        Err(format!("Task #{task} is not granted node '{node}'. Call request_help(kind=\"capability\", node=\"{node}\", ...) to ask the orchestrator."))
+    }
+
     fn tool_inner(self: &Arc<Self>, name: &str, a: &Value, agent: i64, task: i64) -> Result<Value, String> {
+        let actor = if agent == 0 && task == 0 { Actor::orchestrator() } else { Actor::worker(agent, task) };
         match name {
-            "browser_devices" => return Ok(json!(serde_json::to_string(&self.db.all("select id, name, seen from nodes where kind='browser' order by seen desc", &[])).unwrap())),
-            "claim_task" => {
-                self.claim_task(agent, a["task"].as_i64().ok_or("give the task id")?)?;
-                return Ok(json!("Claimed. It runs after your current task."));
+            "inspect" => {
+                if !actor.is_control_plane() { return Err("Only the orchestrator agent can call inspect; workers use history or request_help.".into()); }
+                return ops::inspect(self, &s(&a["kind"]), a["id"].as_i64().unwrap_or(0), &s(&a["name"]))
+                    .map(|v| json!(serde_json::to_string(&v).unwrap_or_default()));
             }
-            "message_agent" => {
+            "browser_devices" => {
+                self.require_node(task, "browser")?;
+                return Ok(json!(serde_json::to_string(&self.db.all("select id, name, seen from nodes where kind='browser' order by seen desc", &[])).unwrap()));
+            }
+            "handoff" => {
                 let to = a["task"].as_i64().ok_or("give the task id")?;
-                self.message_task(to, 0, &s(&a["text"]), &format!("task #{task}'s agent"))?;
-                return Ok(json!(format!("Sent to task #{to}'s agent.")));
+                return ops::handoff(self, actor, to, &s(&a["kind"]), &s(&a["text"])).map(|m| json!(m));
+            }
+            "request_help" => {
+                return ops::request_help(self, actor, &s(&a["kind"]), &s(&a["text"]), &s(&a["node"])).map(|m| json!(m));
             }
             "history" => {
                 let before = a["before"].as_i64().filter(|n| *n > 0).unwrap_or(i64::MAX);
                 let rows = self.history(&s(&a["query"]), &s(&a["project"]), before, 10);
                 return Ok(json!(serde_json::to_string(&rows).unwrap()));
             }
-            "info" => {
-                let (key, value) = (s(&a["key"]), s(&a["value"]));
-                if !key.is_empty() && !value.is_empty() {
-                    self.db.run("insert into info(key, value, updated) values(?,?,?) on conflict(key) do update set value=excluded.value, updated=excluded.updated", args!(key, value, now()));
-                    return Ok(json!("Saved."));
-                }
-                let rows = if key.is_empty() { self.db.all("select key, value from info order by key", &[]) } else { self.db.all("select key, value from info where key=?", args!(key)) };
-                return Ok(json!(rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")));
-            }
+            "info" => return Ok(json!(ops::info(self, &s(&a["key"]), &s(&a["value"])))),
             "type_password" => {
                 let (site, user, tool) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]));
                 if tool.is_empty() { return crate::vm::type_password(&site, &user).map(|m| json!(m)); }
@@ -1159,55 +1279,24 @@ impl Hive {
             }
             "lock" => return self.lock_files(&list(&a["files"]), agent),
             "sim" => {
-                let model = self.db.get("select model from agents where id=?", args!(agent)).map(|r| s(&r["model"])).unwrap_or_default();
-                let commit = self.repo.as_deref().map(crate::vm::head_sha).unwrap_or_default();
-                return match s(&a["mode"]).as_str() {
-                    "" | "read" => {
-                        let days = a["days"].as_i64().filter(|d| *d > 0).unwrap_or(7);
-                        Ok(json!(format!("{}\n\n{}", sim::format(&self.db, self.repo.as_deref()), sim::friction(&self.db, days))))
-                    }
-                    "propose" => {
-                        let id = sim::propose(&self.db, self.repo.as_deref(), self.engine_name(), &model, &commit, a)?;
-                        self.bump();
-                        Ok(json!(format!("Recorded SIM attempt #{id}. Pass sim_id={id} to reinstall, then record outcome.")))
-                    }
-                    "outcome" => {
-                        sim::outcome(&self.db, a["id"].as_i64().unwrap_or(0), &s(&a["fixed"]), &s(&a["missed"]), &s(&a["status"]))?;
-                        self.bump();
-                        Ok(json!("Updated SIM outcome."))
-                    }
-                    "export" => sim::export_line(&self.db, a["id"].as_i64().unwrap_or(0)).map(|l| json!(l)),
-                    other => Err(format!("unknown sim mode '{other}' (use read, propose, outcome, or export)")),
-                };
+                self.require_node(task, "hive")?;
+                return ops::sim_op(self, actor, a);
             }
             "reinstall" => {
-                let repo = self.repo.as_ref().ok_or("Hive isn't on a VM here")?;
-                let sim_id = a["sim_id"].as_i64().unwrap_or(0);
-                return match crate::vm::reinstall(repo) {
-                    Ok(r) => {
-                        sim::record_eval(&self.db, sim_id, true, r.passed, r.total, &r.commit);
-                        Ok(json!(r.message))
-                    }
-                    Err((passed, total, commit, e)) => {
-                        if total > 0 { sim::record_eval(&self.db, sim_id, false, passed, total, &commit); }
-                        Err(e)
-                    }
-                };
+                self.require_node(task, "hive")?;
+                return ops::reinstall(self, actor, a["sim_id"].as_i64().unwrap_or(0))
+                    .map(|r| json!(r.message))
+                    .map_err(|(_, _, _, e)| e);
             }
-            "rule" => return self.add_rule(&s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
-            "task" => {
-                let request = self.db.get("select request_id from tasks where id=?", args!(task)).map(|r| r["request_id"].clone()).unwrap_or(json!(0));
-                return Ok(json!(format!("Task #{} made; another agent takes it.", self.add_task(request.as_i64().unwrap_or(0), a))));
-            }
+            "rule" => return ops::add_rule(self, &s(&a["text"]), &s(&a["quote"]), &s(&a["scope"])).map(|r| json!(format!("Saved as R{r}."))),
             "page_code" => {
-                let code = json!({ "css": s(&a["css"]), "js": s(&a["js"]) }).to_string();
-                let rule = a["rule"].as_i64().unwrap_or(0);
-                self.db.get("select id from rules where id=? and active=1 and scope like 'site:%'", args!(rule)).ok_or("give the id of an active site rule (R12 is 12)")?;
-                self.db.run("update rules set code=? where id=?", args!(code, rule));
-                self.bump();
-                return Ok(json!("Saved: the owner's browsers apply it on that site's pages from their next load."));
+                self.require_node(task, "browser")?;
+                return ops::set_page_code(self, a["rule"].as_i64().unwrap_or(0), &s(&a["css"]), &s(&a["js"])).map(|m| json!(m));
             }
             _ => {}
+        }
+        if actor.role == Role::Orchestrator {
+            return Err(format!("Orchestrator agent cannot invoke execution tool '{name}'; dispatch a worker instead."));
         }
         let selected = a["browser"].as_str().filter(|id| !id.is_empty());
         let (node, decl) = if name.starts_with("browser_") {
@@ -1216,7 +1305,9 @@ impl Hive {
             devices.into_iter().filter(|n| selected.is_none_or(|id| n["id"] == id))
                 .find_map(|n| list_values(&n["tools"]).into_iter().find(|t| t["name"] == name).map(|t| (n, t)))
         } else { self.device_for(name) }.ok_or(format!("Hive has no tool called {name}"))?;
-        // Mobile Safari and native touch share the same phone, even with two agents: Safari takes the phone node's touch lock.
+        // Enforce capability boundary at runtime: a worker can only call devices granted to its task.
+        self.require_node(task, &s(&node["kind"]))?;
+        // Mobile Safari and native touch share the same phone, even with two workers: Safari takes the phone node's touch lock.
         if node["name"] == "Safari on iPhone" { self.take_lock(&format!("{PHONE_ID} touch"), agent)?; }
         // Screenshots change the Mac driver's shared target; takeover changes its
         // permission state. They must own the same lock as keyboard and mouse,
@@ -1263,7 +1354,7 @@ impl Hive {
     }
 }
 
-/// The final message of every agent turn.
+/// The final message of every worker turn.
 fn end_schema() -> Value {
     let st = json!({ "type": "string" });
     json!({ "type": "object", "additionalProperties": false, "required": ["done", "outcome", "why", "need"],
@@ -1276,40 +1367,49 @@ fn ended(text: &str) -> Option<Value> {
 
 fn plan_schema(kinds: &[String]) -> Value {
     let st = json!({ "type": "string" });
+    let int = json!({ "type": "integer" });
     json!({
-        "type": "object", "additionalProperties": false, "required": ["reply", "tasks", "messages", "start", "drop"],
+        "type": "object", "additionalProperties": false,
+        "required": ["reply", "tasks", "messages", "grant", "rules", "projects", "start", "drop"],
         "properties": {
             "reply": st,
             "tasks": { "type": "array", "items": { "type": "object", "additionalProperties": false,
-                "required": ["title", "quote", "nodes", "level", "project"],
+                "required": ["title", "quote", "nodes", "level", "project", "depends_on", "continue_worker", "every"],
                 "properties": { "title": st, "quote": st, "project": st,
                     "nodes": { "type": "array", "items": { "type": "string", "enum": kinds } },
-                    "level": { "type": "string", "enum": ["easy", "normal", "hard", "hardest"] } } } },
+                    "level": { "type": "string", "enum": ["easy", "normal", "hard", "hardest"] },
+                    "depends_on": int, "continue_worker": int, "every": int } } },
             "messages": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["task", "text"],
-                "properties": { "task": { "type": "integer" }, "text": st } } },
-            "start": { "type": "array", "items": { "type": "integer" } },
-            "drop": { "type": "array", "items": { "type": "integer" } },
+                "properties": { "task": int, "text": st } } },
+            "grant": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["task", "nodes"],
+                "properties": { "task": int, "nodes": { "type": "array", "items": { "type": "string", "enum": kinds } } } } },
+            "rules": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["text", "quote", "scope"],
+                "properties": { "text": st, "quote": st, "scope": st } } },
+            "projects": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["slug", "title", "summary"],
+                "properties": { "slug": st, "title": st, "summary": st } } },
+            "start": { "type": "array", "items": int },
+            "drop": { "type": "array", "items": int },
         }
     })
 }
 
-/// The orchestrator's instructions, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
+/// The orchestrator agent's instructions, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
 pub const PLANNER: &str = include_str!("../orchestrator.md");
 
-/// What an agent that's about to stop for the owner hears first.
+/// What a worker that's about to stop for the owner hears first.
 const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
-sending as them, deleting or paying, or their finger or face)? A tool falling short isn't. Use the other device: Safari's page tools \
-and the Mac's window tools see the same page differently. Ask for the whole Mac with mac_take_over, approve a sign-in's verification \
-on their iPhone, or fix Hive's own code. Then keep going. If it truly is theirs, end the same way again.";
+sending as them, deleting or paying, or their finger or face)? A tool falling short isn't. If you need an extra device capability not \
+granted to this task (such as phone for 2FA, mac, browser, or hive), call request_help(kind=\"capability\", ...) so the orchestrator can \
+grant it. Then keep going. If it truly is theirs, end the same way again.";
 
-/// What every agent hears first, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
-pub const AGENT: &str = include_str!("../agent.md");
+/// What every worker agent hears first, Hive's own: the owner edits theirs on the dashboard's Instructions tab (Hive::prompt).
+pub const WORKER: &str = include_str!("../worker.md");
 
-/// Hive's own instructions by name, which the owner can replace with theirs: the orchestrator's and every agent's.
-pub const PROMPTS: [(&str, &str); 2] = [("orchestrator", PLANNER), ("agent", AGENT)];
+/// Hive's own instructions by name, which the owner can replace with theirs: the orchestrator agent and worker agents.
+pub const PROMPTS: [(&str, &str); 2] = [("orchestrator", PLANNER), ("worker", WORKER)];
 
-/// Claude Code has no schema for a turn's final message, so its agents end with a tool instead.
-const CLAUDE_NOTES: &str = "Hive's tools (rule, task, info, type_password, message_agent and the devices') are yours as MCP tools \
+/// Claude Code has no schema for a turn's final message, so its workers end with a tool instead.
+const CLAUDE_NOTES: &str = "Hive's tools (handoff, request_help, history, rule, info, type_password, and your task's granted device tools) are yours as MCP tools \
 named mcp__hive__<name>. Hive doesn't read your final message: end every turn by calling mcp__hive__end_turn as your very last \
 action, with done true and the outcome, or done false with exactly why you stopped and exactly what you need from the owner.";
 
@@ -1454,10 +1554,12 @@ mod tests {
         hive.tool_inner("browser_tabs", &json!({"browser":"phone-browser"}), 1, 0).unwrap_err();
         assert_eq!(hive.db.get("select node from calls", &[]).unwrap()["node"], "phone-browser");
         assert_eq!(hive.locks()[0]["lock"], format!("{PHONE_ID} touch"));
-        let kinds = hive.task_kinds(&json!({"nodes":["phone"]}));
-        let tools = hive.tools_for(&kinds);
-        assert!(tools.iter().any(|t| t["name"] == "browser_devices"));
-        assert!(tools.iter().any(|t| t["name"] == "browser_tabs" && t["inputSchema"]["properties"]["browser"]["type"] == "string"));
+        // Strict least-privilege: phone-only tasks don't get browser tools; browser-granted tasks do.
+        let phone_tools = hive.tools_for(&hive.task_kinds(&json!({"nodes":["phone"]})));
+        assert!(!phone_tools.iter().any(|t| t["name"] == "browser_tabs" || t["name"] == "browser_devices"));
+        let browser_tools = hive.tools_for(&hive.task_kinds(&json!({"nodes":["browser"]})));
+        assert!(browser_tools.iter().any(|t| t["name"] == "browser_devices"));
+        assert!(browser_tools.iter().any(|t| t["name"] == "browser_tabs" && t["inputSchema"]["properties"]["browser"]["type"] == "string"));
     }
 
     #[test]
@@ -1469,6 +1571,7 @@ mod tests {
         }
         let tid = hive.add_task(1, &json!({"title":"Keyboard", "project":"typing", "quote":"Build the keyboard"}));
         hive.db.run("update tasks set status='done', outcome='Built and tested' where id=?", args!(tid));
+        ops::record_project_outcome(&hive, "typing", tid, "Keyboard", "Built and tested");
         hive.log(0, tid, 0, "owner", "Keep calibration across restarts");
         hive.log(0, tid, 0, "agent", "This is not owner evidence");
         let rows = hive.history("calibration", "typing", 3, 10);
@@ -1479,8 +1582,12 @@ mod tests {
         assert!(hive.history("", "other", 3, 10).is_empty());
         assert!(hive.history("", "", 1, 10).is_empty());
         assert_eq!(hive.history("", "", 3, 1)[0]["id"], 2);
+        // Slim planner_input carries the project summary & 1-line request index; orchestrator uses inspect/history for raw followups.
         let req = hive.db.get("select * from requests where id=3", &[]).unwrap();
-        assert!(hive.planner_input(&req).contains("Keep calibration"));
+        let p_in = hive.planner_input(&req);
+        assert!(p_in.contains("typing:") && p_in.contains("Built and tested") && p_in.contains("Build the keyboard"), "{p_in}");
+        let inspected = hive.tool_inner("inspect", &json!({"kind":"project", "name":"typing"}), 0, 0).unwrap();
+        assert!(inspected.as_str().unwrap().contains("Keep calibration"));
         let task = hive.add_task(3, &json!({"title":"Fix", "project":"typing", "quote":"Fix this problem"}));
         let task = hive.db.get("select * from tasks where id=?", args!(task)).unwrap();
         let instructions = hive.instructions(&task);
@@ -1539,62 +1646,57 @@ mod tests {
     }
 
     #[test]
-    fn claims_queue_without_displacing_current_work() {
+    fn depends_on_gates_task_until_prerequisite_is_done() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
             Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
-        hive.db.run("insert into tasks(id, status) values(10, 'working')", &[]);
-        let agent = hive.db.run("insert into agents(task_id, kind, status) values(10, 'codex', 'working')", &[]);
-        let other = hive.db.run("insert into agents(kind) values('codex')", &[]);
-        let task = hive.add_task(0, &json!({"title":"Next", "quote":"next"}));
-        hive.claim_task(agent, task).unwrap();
-        assert!(hive.claim_task(other, task).is_err());
-        let a = hive.db.get("select * from agents where id=?", args!(agent)).unwrap();
-        assert_eq!(a["task_id"], 10);
-        assert_eq!(a["status"], "working");
-        hive.message_task(task, 0, "More detail", "owner").unwrap();
-        assert_eq!(hive.db.get("select status from tasks where id=?", args!(task)).unwrap()["status"], "queued");
-        hive.drop_task(task);
-        assert_eq!(hive.db.get("select status from agents where id=?", args!(agent)).unwrap()["status"], "working");
-        let next = hive.add_task(0, &json!({"title":"Next task", "quote":"do next"}));
-        hive.claim_task(agent, next).unwrap();
-        assert!(hive.finish(agent, 10, &json!({"done":true,"outcome":"finished"})));
-        // An unavailable engine stops the next task, but keeps the same agent and task history.
-        hive.start_agent(next);
-        let a = hive.db.get("select * from agents where id=?", args!(agent)).unwrap();
-        assert_eq!(a["task_id"], next);
-        assert_eq!(hive.db.get("select count(*) as n from agents", &[]).unwrap()["n"], 2);
-        assert_eq!(hive.db.get("select agent_id from tasks where id=?", args!(task)).unwrap()["agent_id"], agent);
+        let first = hive.add_task(0, &json!({"title":"Step 1", "project":"deploy", "quote":"build"}));
+        let second = hive.add_task(0, &json!({"title":"Step 2", "project":"deploy", "quote":"ship", "depends_on": first}));
+        hive.db.run("update tasks set status='working' where id=?", args!(first));
+        // Second task stays open while prerequisite is not done.
+        hive.tick();
+        assert_eq!(hive.db.get("select status, agent_id from tasks where id=?", args!(second)).unwrap()["status"], "open");
+        assert!(hive.db.get("select agent_id from tasks where id=?", args!(second)).unwrap()["agent_id"].is_null());
+        // Once prerequisite finishes, tick picks up second (unavailable engine sets it to needs, proving it was dispatched).
+        hive.db.run("update tasks set status='done' where id=?", args!(first));
+        hive.tick();
+        assert!(hive.wait_until(2000, || {
+            hive.db.get("select status from tasks where id=?", args!(second)).filter(|r| r["status"] != "open")
+        }).is_some());
     }
 
     #[test]
-    fn new_work_never_waits_behind_a_busy_agent() {
+    fn fresh_worker_by_default_and_explicit_continue_worker_reuse() {
         for kind in ["codex", CLAUDE_AGENT] {
             let engine = if kind == "codex" { Engine::Codex { cmd: String::new(), env: vec![] } }
                 else { Engine::Claude { cmd: String::new(), env: vec![] } };
             let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
                 engine, String::new(), String::new());
             let current = hive.add_task(0, &json!({"title":"Current", "project":"handoff"}));
-            let agent = hive.db.run("insert into agents(task_id, kind, status, thread) values(?, ?, 'idle', 'thread')", args!(current, kind));
+            let agent = hive.db.run("insert into agents(task_id, kind, role, status, thread) values(?, ?, 'worker', 'idle', 'thread')", args!(current, kind));
             hive.db.run("update tasks set agent_id=? where id=?", args!(agent, current));
             for status in ["working", "needs", "dropped", "open"] {
                 hive.db.run("update tasks set status=? where id=?", args!(status, current));
-                let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
+                let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff", "continue_worker": agent}));
                 hive.start_agent(next);
                 assert!(!hive.ready_for_task(agent));
                 assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], current);
                 let t = hive.db.get("select * from tasks where id=?", args!(next)).unwrap();
-                assert_ne!(t["agent_id"], agent, "a new agent takes it");
+                assert_ne!(t["agent_id"], agent, "busy worker is never blocked on; a fresh worker takes it");
                 assert_ne!(t["status"], "queued");
             }
-            // A turn still running keeps the agent busy; once it ends, the free agent that knows the project takes new work.
+            // Even when the prior worker is free and on the same project, independent tasks get a fresh worker by default.
             hive.db.run("update tasks set status='done' where id=?", args!(current));
             hive.turns.lock().unwrap().insert("thread".into(), "turn".into());
             assert!(!hive.ready_for_task(agent));
             hive.turns.lock().unwrap().clear();
             assert!(hive.ready_for_task(agent));
-            let next = hive.add_task(0, &json!({"title":"Next", "project":"handoff"}));
-            hive.start_agent(next);
-            assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], next);
+            let isolated = hive.add_task(0, &json!({"title":"Isolated", "project":"handoff"}));
+            hive.start_agent(isolated);
+            assert_ne!(hive.db.get("select agent_id from tasks where id=?", args!(isolated)).unwrap()["agent_id"], agent);
+            // Explicit continue_worker reuses that exact idle worker.
+            let continued = hive.add_task(0, &json!({"title":"Continued", "project":"handoff", "continue_worker": agent}));
+            hive.start_agent(continued);
+            assert_eq!(hive.db.get("select task_id from agents where id=?", args!(agent)).unwrap()["task_id"], continued);
         }
     }
 
@@ -1603,21 +1705,84 @@ mod tests {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
             Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
         hive.db.run("insert into tasks(id, status, title) values(10, 'working', 'Long job')", &[]);
-        let busy = hive.db.run("insert into agents(task_id, kind, status) values(10, 'codex', 'working')", &[]);
+        let busy = hive.db.run("insert into agents(task_id, kind, role, status) values(10, 'codex', 'worker', 'working')", &[]);
         hive.db.run("update tasks set agent_id=? where id=10", args!(busy));
         hive.db.run("insert into tasks(id, agent_id, status, title) values(11, ?, 'queued', 'Waiting'), (12, null, 'idle', 'Unwanted')", args!(busy));
         let input = hive.planner_input(&json!({ "id": 1, "text": "start the queued one" }));
-        assert!(input.contains(&format!("#11 [queued] Waiting (nodes [], project , agent {busy}, which is on #10 now)")), "{input}");
-        assert!(input.contains(&format!("#10 [working] Long job (nodes [], project , agent {busy})")), "{input}");
+        assert!(input.contains(&format!("#11 [queued] Waiting (nodes [], project , worker {busy}, which is on #10 now)")), "{input}");
+        assert!(input.contains(&format!("#10 [working] Long job (nodes [], project , worker {busy})")), "{input}");
         assert!(input.starts_with("The owner's rules:") && input.trim_end().ends_with("start the queued one"), "the request comes last: {input}");
-        hive.apply_plan(1, &json!({}), &json!({ "reply": "Starting #11 and dropping #12.", "tasks": [], "messages": [], "start": [11, 10], "drop": [12] }));
+        hive.apply_plan(1, &json!({}), &json!({ "reply": "Starting #11 and dropping #12.", "tasks": [], "messages": [], "grant": [], "rules": [], "projects": [], "start": [11, 10], "drop": [12] }));
         let t = hive.db.get("select * from tasks where id=11", &[]).unwrap();
-        assert_eq!((t["status"].clone(), t["agent_id"].clone()), (json!("open"), Value::Null), "Hive's loop gives it its own agent");
+        assert_eq!((t["status"].clone(), t["agent_id"].clone()), (json!("open"), Value::Null), "Hive's loop gives it its own worker");
         assert_eq!(hive.db.get("select status from tasks where id=12", &[]).unwrap()["status"], "dropped");
         assert_eq!(hive.db.get("select status from tasks where id=10", &[]).unwrap()["status"], "working", "a working task isn't restarted");
         assert!(hive.db.get("select * from log where text=\"Couldn't start task #10: it's working, not waiting\"", &[]).is_some());
-        assert!(PLANNER.contains("Never make a task whose work is coordinating other tasks"));
-        assert_eq!(plan_schema(&[])["required"], json!(["reply", "tasks", "messages", "start", "drop"]));
+        assert!(PLANNER.contains("Never create a task whose job is coordinating other tasks"));
+        assert_eq!(plan_schema(&[])["required"], json!(["reply", "tasks", "messages", "grant", "rules", "projects", "start", "drop"]));
+    }
+
+    #[test]
+    fn scoped_rules_projects_and_role_boundaries_are_enforced() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        ops::add_rule(&hive, "Global tone rule", "be concise", "").unwrap();
+        ops::add_rule(&hive, "Alpha-only rule", "use bun in alpha", "project:alpha").unwrap();
+        ops::add_rule(&hive, "Mac-only rule", "ask before closing tabs", "node:mac").unwrap();
+        // Orchestrator sees global rule + count of hidden scoped rules (not noisy project/node rules).
+        let req = json!({"id": 1, "node": "dashboard", "text": "hello", "context": "{}"});
+        let p_in = hive.planner_input(&req);
+        assert!(p_in.contains("Global tone rule"));
+        assert!(!p_in.contains("Alpha-only rule") && !p_in.contains("Mac-only rule"));
+        assert!(p_in.contains("+2 scoped rules"));
+        // Worker on project=alpha, nodes=[vm] sees global + alpha rule, not mac rule.
+        let alpha_task = json!({"id": 1, "request_id": 0, "project": "alpha", "title": "Build", "quote": "build", "nodes": "[\"vm\"]"});
+        let instr = hive.instructions(&alpha_task);
+        assert!(instr.contains("Global tone rule") && instr.contains("Alpha-only rule") && !instr.contains("Mac-only rule"));
+        // Orchestrator cannot execute device/worker tools; worker cannot call inspect or ungranted node tools.
+        assert!(hive.tool_inner("mac_screenshot", &json!({}), 0, 0).unwrap_err().contains("Orchestrator agent cannot invoke"));
+        let tid = hive.add_task(0, &json!({"title":"VM only", "project":"alpha", "nodes":["vm"]}));
+        assert!(hive.tool_inner("inspect", &json!({"kind":"rules"}), 1, tid).unwrap_err().contains("Only the orchestrator"));
+        assert!(hive.tool_inner("sim", &json!({"mode":"read"}), 1, tid).unwrap_err().contains("not granted node 'hive'"));
+        assert!(hive.tool_inner("browser_devices", &json!({}), 1, tid).unwrap_err().contains("not granted node 'browser'"));
+        // Orchestrator can grant extra capability, and apply_plan can create projects & rules.
+        let decl = json!([{"name":"browser_tabs","timeout":0}]);
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('b1','browser','Safari',?,?)", args!(decl.to_string(), now()));
+        hive.apply_plan(1, &req, &json!({
+            "reply": "Updated", "tasks": [], "messages": [], "start": [], "drop": [],
+            "projects": [{"slug": "alpha", "title": "Alpha App", "summary": "Web client"}],
+            "rules": [{"text": "Run tests", "quote": "always run tests", "scope": "project:alpha"}],
+            "grant": [{"task": tid, "nodes": ["browser"]}]
+        }));
+        assert_eq!(hive.db.get("select title from projects where slug='alpha'", &[]).unwrap()["title"], "Alpha App");
+        assert!(hive.tool_inner("browser_devices", &json!({}), 1, tid).is_ok());
+    }
+
+    #[test]
+    fn handoff_and_request_help_enforce_project_scope_and_hop_limits() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let t_a1 = hive.add_task(1, &json!({"title":"Backend", "project":"shop", "quote":"api"}));
+        let t_a2 = hive.add_task(1, &json!({"title":"Frontend", "project":"shop", "quote":"ui"}));
+        let t_b = hive.add_task(2, &json!({"title":"Other", "project":"music", "quote":"song"}));
+        // Cross-project handoff is rejected; workers must escalate via request_help.
+        assert!(hive.tool_inner("handoff", &json!({"task": t_b, "kind": "fact", "text": "hi"}), 1, t_a1)
+            .unwrap_err().contains("same project"));
+        // Same-project handoffs succeed up to MAX_HANDOFF_HOPS (2), then block until orchestrator/owner intervenes.
+        assert!(hive.tool_inner("handoff", &json!({"task": t_a2, "kind": "artifact", "text": "schema at /tmp/s.json"}), 1, t_a1).is_ok());
+        let t_a2_row = hive.db.get("select * from tasks where id=?", args!(t_a2)).unwrap();
+        assert!(hive.instructions(&t_a2_row).contains("schema at /tmp/s.json"));
+        assert!(hive.tool_inner("handoff", &json!({"task": t_a1, "kind": "fact", "text": "endpoint ready"}), 2, t_a2).is_ok());
+        assert!(hive.tool_inner("handoff", &json!({"task": t_a2, "kind": "question", "text": "hop 3"}), 1, t_a1)
+            .unwrap_err().contains("hop limit"));
+        assert!(!hive.db.all("select * from log where who='handoff'", &[]).is_empty());
+        // request_help enforces capability node name and MAX_HELP_PER_TASK (2).
+        assert!(hive.tool_inner("request_help", &json!({"kind": "capability", "text": "need safari", "node": ""}), 1, t_a1).is_err());
+        assert!(hive.tool_inner("request_help", &json!({"kind": "capability", "text": "need safari", "node": "browser"}), 1, t_a1).is_ok());
+        assert!(hive.tool_inner("request_help", &json!({"kind": "propose_task", "text": "add smoke test", "node": ""}), 1, t_a1).is_ok());
+        assert!(hive.tool_inner("request_help", &json!({"kind": "orchestrator", "text": "third ask", "node": ""}), 1, t_a1)
+            .unwrap_err().contains("help limit"));
+        assert_eq!(hive.db.all("select * from requests where node=?", args!(format!("worker:#{t_a1}"))).len(), 2);
     }
 
     #[test]
@@ -1648,8 +1813,8 @@ mod tests {
         let (claude, codex) = (request("claude:s1"), request("codex:s2"));
         for (rid, name) in [(claude, "claude:s1"), (codex, "codex:s2")] {
             let tid = hive.add_task(rid, &json!({ "title": "Fix it", "quote": "fix it" }));
-            let t = hive.db.get("select t.status, a.kind, a.name from tasks t join agents a on a.id=t.agent_id where t.id=?", args!(tid)).unwrap();
-            assert_eq!((s(&t["status"]), s(&t["kind"]), s(&t["name"])), ("working".into(), "claude".into(), name.into()));
+            let t = hive.db.get("select t.status, a.kind, a.role, a.name from tasks t join agents a on a.id=t.agent_id where t.id=?", args!(tid)).unwrap();
+            assert_eq!((s(&t["status"]), s(&t["kind"]), s(&t["role"]), s(&t["name"])), ("working".into(), "claude".into(), "external".into(), name.into()));
             hive.end_task(tid, &json!({ "done": true, "outcome": "fixed" })).unwrap();
         }
         std::fs::remove_dir_all(&state).ok();

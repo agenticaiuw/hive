@@ -7,13 +7,17 @@ use std::sync::Mutex;
 pub const SCHEMA: &str = "
 create table if not exists requests(id integer primary key, at integer, node text, agent text, text text, context text,
   status text default 'new', reply text);
+create table if not exists projects(slug text primary key, title text default '', summary text default '',
+  default_nodes text default '[]', status text default 'active', updated integer default 0);
 create table if not exists tasks(id integer primary key, request_id integer, project text default '', title text, quote text,
   nodes text default '[]', level text default 'normal', status text default 'open', agent_id integer, outcome text,
-  why text, need text, at integer, updated integer, every integer default 0);
+  why text, need text, at integer, updated integer, every integer default 0, depends_on integer default 0, continue_agent integer default 0);
 create table if not exists rules(id integer primary key, text text, quote text, scope text default '', code text,
   at integer, active integer default 1);
-create table if not exists agents(id integer primary key, task_id integer, kind text default 'codex', name text, thread text,
+create table if not exists agents(id integer primary key, task_id integer, kind text default 'codex', role text default 'worker', name text, thread text,
   status text default 'working', at integer, updated integer, tools text default '', model text default '', effort text default '');
+create table if not exists messages(id integer primary key, at integer, from_agent integer, from_task integer, to_task integer,
+  kind text default 'fact', hops integer default 1, text text);
 create table if not exists log(id integer primary key, at integer, agent_id integer, task_id integer, request_id integer,
   who text, text text);
 create table if not exists session_events(agent integer, source text, offset integer, primary key(agent,source,offset));
@@ -33,6 +37,7 @@ create table if not exists sim(id integer primary key, problem text, what text, 
 create index if not exists log_agent on log(agent_id, id);
 create index if not exists log_task on log(task_id, id);
 create index if not exists tasks_status on tasks(status);
+create index if not exists messages_pair on messages(from_task, to_task, id);
 ";
 
 pub fn now() -> i64 {
@@ -73,9 +78,13 @@ impl Db {
         c.execute_batch(SCHEMA).expect("schema");
         // Columns added since a database was made (fails harmlessly once it has them).
         c.execute_batch("alter table tasks add column every integer default 0").ok();
+        c.execute_batch("alter table tasks add column depends_on integer default 0").ok();
+        c.execute_batch("alter table tasks add column continue_agent integer default 0").ok();
         c.execute_batch("alter table agents add column tools text default ''").ok();
         c.execute_batch("alter table agents add column model text default ''").ok();
         c.execute_batch("alter table agents add column effort text default ''").ok();
+        c.execute_batch("alter table agents add column role text default 'worker'").ok();
+        c.execute_batch("update agents set role='external' where kind='claude' and coalesce(role,'worker')='worker'").ok();
         Db(Mutex::new(c))
     }
 
@@ -116,11 +125,12 @@ impl Db {
     }
 }
 
-/// Whether a rule's scope applies: '' always; node:<kind>; site:<host> (and its subdomains); app:<name>; folder:<path>.
-pub fn scope_applies(scope: &str, nodes: &[String], site: &str, app: &str, folder: &str) -> bool {
+/// Whether a rule's scope applies: '' always; project:<slug>; node:<kind>; site:<host> (and subdomains); app:<name>; folder:<path>.
+pub fn scope_applies(scope: &str, nodes: &[String], site: &str, app: &str, folder: &str, project: &str) -> bool {
     let Some((kind, val)) = scope.split_once(':') else { return scope.is_empty() };
     let val = val.trim();
     match kind {
+        "project" => !project.is_empty() && project.eq_ignore_ascii_case(val),
         "node" => nodes.iter().any(|n| n == val),
         "site" => {
             let site = site.trim_start_matches("www.");
@@ -139,13 +149,15 @@ mod tests {
     #[test]
     fn scopes() {
         let mac = vec!["mac".to_string()];
-        assert!(scope_applies("", &[], "", "", ""));
-        assert!(scope_applies("node:mac", &mac, "", "", ""));
-        assert!(!scope_applies("node:phone", &mac, "", "", ""));
-        assert!(scope_applies("site:youtube.com", &[], "m.youtube.com", "", ""));
-        assert!(!scope_applies("site:youtube.com", &[], "", "", ""));
-        assert!(scope_applies("folder:/Users/x/hive", &[], "", "", "/Users/x/hive/server"));
-        assert!(scope_applies("app:Notes", &[], "", "notes", ""));
+        assert!(scope_applies("", &[], "", "", "", ""));
+        assert!(scope_applies("project:hive", &[], "", "", "", "Hive"));
+        assert!(!scope_applies("project:hive", &[], "", "", "", "other"));
+        assert!(scope_applies("node:mac", &mac, "", "", "", ""));
+        assert!(!scope_applies("node:phone", &mac, "", "", "", ""));
+        assert!(scope_applies("site:youtube.com", &[], "m.youtube.com", "", "", ""));
+        assert!(!scope_applies("site:youtube.com", &[], "", "", "", ""));
+        assert!(scope_applies("folder:/Users/x/hive", &[], "", "", "/Users/x/hive/server", ""));
+        assert!(scope_applies("app:Notes", &[], "", "notes", "", ""));
     }
     #[test]
     fn round_trip() {
@@ -162,11 +174,13 @@ mod tests {
         Connection::open(&path).unwrap().execute_batch("create table tasks(id integer primary key, title text, status text, updated integer); \
             create table agents(id integer primary key, task_id integer, kind text)").unwrap();
         let db = Db::open(path.to_str().unwrap());
-        db.run("insert into tasks(title, status, updated, every) values('daily', 'done', 0, 24)", &[]);
+        db.run("insert into tasks(title, status, updated, every, depends_on, continue_agent) values('daily', 'done', 0, 24, 0, 0)", &[]);
         db.run("insert into tasks(title, status, updated) values('once', 'done', 0)", &[]);
-        db.run("insert into agents(task_id, kind, model, effort) values(1, 'codex', 'gpt-6.1-terra', 'low')", &[]);
-        assert_eq!(db.get("select model, effort from agents where task_id=1", &[]), Some(json!({ "model": "gpt-6.1-terra", "effort": "low" })));
-        assert!(db.tables().iter().any(|t| t == "sim"));
+        db.run("insert into agents(task_id, kind, role, model, effort) values(1, 'codex', 'worker', 'gpt-6.1-terra', 'low')", &[]);
+        assert_eq!(db.get("select role, model, effort from agents where task_id=1", &[]),
+            Some(json!({ "role": "worker", "model": "gpt-6.1-terra", "effort": "low" })));
+        let tables = db.tables();
+        assert!(tables.iter().any(|t| t == "sim") && tables.iter().any(|t| t == "projects") && tables.iter().any(|t| t == "messages"));
         let due = db.all("select title from tasks where every>0 and status='done' and updated<=?-every*3600000", args!(now()));
         assert_eq!(due, vec![json!({ "title": "daily" })]);
         drop(db);
