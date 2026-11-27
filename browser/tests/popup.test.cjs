@@ -39,7 +39,7 @@ function dashboard({ direct = false, same = true, existing = false } = {}) {
     update: async (id, o) => actions.push(['update', id, o.active]), remove: async id => actions.push(['remove', id]),
   };
   const fetch = async (url, opts) => {
-    if (url === '/api/state') return { ok: true, json: async () => ({ now: 1000000, nodes: [{ id: c.id, kind: 'browser', seen: same ? 1000000 : 1 }] }) };
+    if (url === '/api/state?view=dashboard') return { ok: true, json: async () => ({ now: 1000000, nodes: [{ id: c.id, kind: 'browser', seen: same ? 1000000 : 1 }] }) };
     assert.equal(opts.credentials, 'omit'); assert.equal(opts.headers, undefined);
     return { ok: direct || url.origin + '/' === desktop, json: async () => ({ ok: true }) };
   };
@@ -59,4 +59,20 @@ test('dashboard reuses the verified desktop tab when only the embedded tailnet c
 test('dashboard dismisses its own background tab if that server has only a stale registration', async () => {
   const d = dashboard({ same: false }); await assert.rejects(d.run(), /same Tailscale network/);
   assert.deepEqual(d.actions, [['create', desktop, false], ['remove', 5]]);
+});
+
+test('retry immediately asks the worker to reconnect to the saved Tailscale server', async () => {
+  const form = {}, writes = [], messages = [];
+  const source = code('popup.js').split('async function join(server) {')[1].split("$('join').onclick")[0];
+  const join = vm.runInNewContext('let signIn = false; async function join(server) {' + source + '\njoin', {
+    $: () => form, conf: async () => c, tailscale: async () => {},
+    chrome: { storage: { local: { set: async change => writes.push(change) } },
+      runtime: { sendMessage: async msg => messages.push(msg.hiveJoin) } },
+  });
+  await join();
+  assert.equal(writes[0].joining, c.server);
+  assert.match(form.textContent, /Connecting/);
+  assert.deepEqual(messages, [true]);
+  await join(true);
+  assert.equal(writes[1].joining, true);
 });

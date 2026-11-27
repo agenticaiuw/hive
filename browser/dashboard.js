@@ -14,7 +14,7 @@ async function healthy(root) {
 async function desktopMatches(id, origin) {
   if (location.origin !== origin) return false;
   for (let i = 0; i < 5; i++) {
-    const r = await fetch('/api/state', { redirect: 'error', signal: AbortSignal.timeout(3000) });
+    const r = await fetch('/api/state?view=dashboard', { redirect: 'error', signal: AbortSignal.timeout(3000) });
     if (r.ok) {
       const { now, nodes } = await r.json();
       return nodes.some(n => n.kind === 'browser' && n.id === id && Math.abs(now - n.seen) < 90_000);
