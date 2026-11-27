@@ -36,7 +36,28 @@ async function show() {
     // Only this site's own rules: the owner's general rules apply everywhere and aren't about this page.
     const rules = (await api(c, `/api/rules?site=${encodeURIComponent(site)}`).catch(() => [])).filter((r) => r.scope?.startsWith('site:'));
     $('site').textContent = site;
-    $('rules').replaceChildren(...rules.map((r) => Object.assign(document.createElement('li'), { textContent: r.text })));
+    $('rules').replaceChildren(...rules.map((r) => {
+      const item = document.createElement('li');
+      const label = document.createElement('span');
+      const button = document.createElement('button');
+      label.textContent = r.text;
+      button.textContent = 'Delete';
+      button.setAttribute('aria-label', `Delete rule: ${r.text}`);
+      button.onclick = async () => {
+        button.disabled = true;
+        $('rulesNote').textContent = '';
+        try {
+          await api(c, `/api/rules/${r.id}`, undefined, 'DELETE');
+          item.remove();
+          $('rulesBox').hidden = !$('rules').children.length;
+        } catch (err) {
+          $('rulesNote').textContent = err.message;
+          button.disabled = false;
+        }
+      };
+      item.append(label, button);
+      return item;
+    }));
     $('rulesBox').hidden = !rules.length;
   }
 }
