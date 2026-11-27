@@ -3,7 +3,34 @@
 use hive_protocol::{n, s, tool};
 use serde_json::{json, Value};
 
-/// Read-only inspection tools for the orchestrator agent (control plane).
+fn memory_tool() -> Value {
+    tool("memory", "Three-tier memory (Tier 1: owner profile & contacts; Tier 2: verified site playbooks) with SQLite FTS5 BM25 search. \
+        Never store passwords, tokens, or payment cards here—those stay in the Tier 0 encrypted vault (`hive-cred` / `type_password`). \
+        Actions: search (query, optional tier), get (optional tier/key/host/id), save_profile (key, value), save_contact (name, relation, email, phone, org, notes), \
+        save_playbook (host, title, steps, selectors—stable CSS/ARIA/URLs only, never data-hive indices), report_playbook (id, ok), delete (tier, key/id/name).",
+        json!({
+            "action": s("search | get | save_profile | save_contact | save_playbook | report_playbook | delete"),
+            "tier": s("profile | contact | playbook | empty for all"),
+            "query": s("BM25 search query (for action='search')"),
+            "key": s("Profile key (e.g. home_address) or contact name filter"),
+            "value": s("Profile value (for save_profile)"),
+            "id": n("Numeric id for contact/playbook update, report, or delete; 0 otherwise"),
+            "name": s("Contact full name (for save_contact)"),
+            "relation": s("Relationship to owner (e.g. advisor, parent, teammate)"),
+            "email": s("Contact email"),
+            "phone": s("Contact phone"),
+            "org": s("Contact organization"),
+            "notes": s("Concise contact notes"),
+            "host": s("Site host for playbook (e.g. canvas.wisc.edu)"),
+            "title": s("Playbook short title"),
+            "steps": s("Verified concise workflow steps / stable URLs"),
+            "selectors": s("Stable CSS/ARIA selectors (never transient data-hive indices)"),
+            "ok": { "type": "boolean", "description": "Whether a playbook succeeded (for report_playbook)" }
+        }),
+        &["action"])
+}
+
+/// Read-only inspection + memory tools for the orchestrator agent (control plane).
 pub fn orchestrator() -> Vec<Value> {
     vec![
         tool("inspect", "Read details on demand so orchestrator context stays small. Returns compact JSON for one project, task, request, worker, or scoped rule set.",
@@ -16,9 +43,7 @@ pub fn orchestrator() -> Vec<Value> {
                 "project": s("Exact project slug; empty for all projects."),
                 "before": n("Only requests before this id; 0 for newest. Use the last returned id for the next page.") }),
             &["query", "project", "before"]),
-        tool("info", "Read or save the owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, neither to list all.",
-            json!({ "key": s("e.g. home_address; empty to list all."), "value": s("Value to save; empty to read.") }),
-            &["key", "value"]),
+        memory_tool(),
     ]
 }
 
@@ -41,20 +66,23 @@ pub fn worker(nodes: &[String]) -> Vec<Value> {
                 "project": s("Exact project slug; empty for all projects."),
                 "before": n("Only requests before this id; 0 for newest. Use the last returned id for the next page.") }),
             &["query", "project", "before"]),
-        tool("info", "The owner's personal info catalogue (not passwords): give key and value to save, key alone to read one, \
-            neither to list all. Save confirmed personal details discovered or used during a task so future sessions can retrieve them. Read existing entries and reuse their keys; never save guesses, passwords, codes or tokens.",
-            json!({ "key": s("e.g. home_address"), "value": s("Value to save; empty to read.") }), &["key", "value"]),
+        memory_tool(),
         tool("rule", "Save a standing instruction the owner just gave (always, never, from now on, a preference) as one of their rules.",
             json!({ "text": s("The rule, short."), "quote": s("The owner's exact words."),
                 "scope": s("How far it reaches: project:<slug>, folder:<path>, site:<host>, app:<name>, or node:<kind>; empty only when they clearly mean everything they do.") }),
             &["text", "quote", "scope"]),
     ];
     if nodes.is_empty() || has("vm") || has("browser") || has("mac") || has("windows") {
-        t.push(tool("type_password", "Type a saved login's password (`hive-cred list` shows them) without you seeing it: with tool empty, into \
-            the focused field of the VM's screen (:99); else through a device's typing tool, e.g. browser_type (Safari, Chrome) or mac_type.",
-            json!({ "site": s("The site, e.g. x.com"), "username": s("Which login; empty for the only one."),
-                "tool": s("Empty for the VM's screen, else the device's typing tool."),
-                "args": s("That tool's other arguments as JSON, all but text, e.g. {\"tab\": 3, \"i\": 5}.") }),
+        t.push(tool("type_password", "Blind-type a Tier 0 encrypted secret (`hive-cred list` shows logins and card labels/last4) without seeing it. \
+            For logins: kind='login' (default), site, username. For payment cards (ONE-WAY DOOR: only after explicit owner confirmation of item, total amount, and card): \
+            kind='card', site=<card label>, field='number'|'exp'|'cvv'|'zip'|'cardholder', confirmed=true. With tool empty, types into VM screen (:99); else via browser_type, mac_input, or windows_input.",
+            json!({ "site": s("Login site (e.g. x.com) or saved card label (when kind='card')."),
+                "username": s("Login username; empty for the only one or when kind='card'."),
+                "tool": s("Empty for the VM's screen, else browser_type, mac_input, or windows_input."),
+                "args": s("That tool's other arguments as JSON, all but text, e.g. {\"tab\": 3, \"i\": 5}."),
+                "kind": s("login (default) | card"),
+                "field": s("When kind='card': number | exp | cvv | zip | cardholder"),
+                "confirmed": { "type": "boolean", "description": "Required true for kind='card', confirming the owner explicitly approved this payment." } }),
             &["site", "username", "tool", "args"]));
     }
     if has("browser") {

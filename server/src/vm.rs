@@ -10,15 +10,25 @@ pub fn screen() -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+fn xdotool_type(secret: &str) -> Result<(), String> {
+    let mut child = Command::new("xdotool").args(["type", "--delay", "40", "--file", "-"]).envs(x_env())
+        .stdin(Stdio::piped()).spawn().map_err(|e| format!("couldn't run xdotool: {e}"))?;
+    child.stdin.take().unwrap().write_all(secret.as_bytes()).ok();
+    if child.wait().map(|s| s.success()).unwrap_or(false) { Ok(()) }
+    else { Err("xdotool couldn't type on the VM's screen".into()) }
+}
+
 pub fn type_password(site: &str, username: &str) -> Result<String, String> {
     let login = crate::cred::pick(site, username)?;
     let password = login["password"].as_str().ok_or(format!("No saved password for {site}"))?;
-    let mut child = Command::new("xdotool").args(["type", "--delay", "40", "--file", "-"]).envs(x_env())
-        .stdin(Stdio::piped()).spawn().map_err(|e| format!("couldn't run xdotool: {e}"))?;
-    child.stdin.take().unwrap().write_all(password.as_bytes()).ok();
-    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-    if !ok { return Err("xdotool couldn't type on the VM's screen".into()); }
+    xdotool_type(password)?;
     Ok(format!("Typed the password for {} ({}) into the focused field.", login["url"].as_str().unwrap_or(site), login["username"].as_str().unwrap_or("")))
+}
+
+pub fn type_card_field(label: &str, field: &str) -> Result<String, String> {
+    let secret = crate::cred::pick_card(label, field)?;
+    xdotool_type(&secret)?;
+    Ok(format!("Typed saved card '{}' field '{field}' into the focused field.", if label.is_empty() { "default" } else { label }))
 }
 
 fn run_cmd(prog: &str, args: &[&str], dir: &Path, envs: &[(&str, &str)]) -> (bool, String) {

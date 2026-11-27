@@ -612,12 +612,29 @@ impl Hive {
                 }
             }
         }
-        t += "\nUse `history` for older requests or outcomes in this project. Use `handoff` for bounded coordination with a peer worker in the same project, and `request_help` if you need an extra node capability or orchestrator help.\n";
+        t += "\nUse `memory` (Tier 1 profile/contacts, Tier 2 verified site playbooks) and `history` on demand. Use `handoff` for bounded coordination with a peer worker in the same project, and `request_help` if you need an extra node capability or orchestrator help.\n";
         t += "\nThe owner's rules (scoped to this task; follow every one):\n";
         for r in self.db.all("select id, text, scope from rules where active=1 and (code is null or code='') order by id", &[]) {
             let scope = s(&r["scope"]);
             if !scope_applies(&scope, &nodes, &site, &app, &folder, &project) { continue; }
             t += &if scope.is_empty() { format!("- R{} {}\n", r["id"], s(&r["text"])) } else { format!("- R{} [{scope}] {}\n", r["id"], s(&r["text"])) };
+        }
+        if nodes.iter().any(|n| n == "browser") {
+            let mut hosts = Vec::new();
+            if !site.is_empty() { hosts.push(crate::memory::normalize_host(&site)); }
+            for h in crate::memory::extract_hosts(&format!("{} {} {}", s(&task["title"]), s(&task["quote"]), s(&req["text"]))) {
+                if !hosts.contains(&h) { hosts.push(h); }
+            }
+            let mut matched = Vec::new();
+            for h in hosts {
+                for p in crate::memory::playbooks_for_host(&self.db, &h) {
+                    if !matched.iter().any(|m: &Value| m["id"] == p["id"]) { matched.push(p); }
+                }
+            }
+            let hint = crate::memory::format_playbooks_hint(&matched);
+            if !hint.is_empty() {
+                t += &format!("\nVerified site playbook(s) (Tier 2 — call memory(action='report_playbook', id=..., ok=false) if outdated):\n{hint}\n");
+            }
         }
         t += "\nWhere you work:\n";
         let has_vm = nodes.iter().any(|n| n == "vm" || n == "hive");
@@ -633,8 +650,9 @@ impl Hive {
             if let Some(repo) = &self.repo {
                 t += &format!("\n- Hive's own code: the git checkout at {}; README.md maps it. Other workers work in it at the same time: \
                     lock the files you'll change (lock) before you edit them, never edit one another worker holds, and commit only your own \
-                    (git commit -m <message> -- <files>). Keep it lean. Commit with a clear message, then call reinstall. When a change makes sense for everyone who uses Hive, also push it to GitHub (git push \
-                    origin HEAD:main), which is how it reaches the owner's devices; one that's only for the owner or a small group stays here.", repo.display());
+                    (git commit -m <message> -- <files>). Keep it lean. Commit locally with a clear message, then call reinstall. \
+                    NEVER push directly to club `main` from an automated self-improvement: keep owner-specific changes local, and for generalizable \
+                    fixes push a feature branch (`git push origin HEAD:hive/<slug>`) and open a draft PR (`gh pr create --draft`) with an anonymized `sim(mode=\"export\")` entry for human review.", repo.display());
             }
         }
         for n in self.db.all("select kind, notes from nodes order by seen desc", &[]) {
@@ -1121,7 +1139,8 @@ impl Hive {
                 let before = a["before"].as_i64().filter(|n| *n > 0).unwrap_or(i64::MAX);
                 Ok(serde_json::to_string(&self.history(&s(&a["query"]), &s(&a["project"]), before, 10)).unwrap_or_default())
             }
-            "info" => Ok(ops::info(self, &s(&a["key"]), &s(&a["value"]))),
+            "info" => ops::info(self, &s(&a["key"]), &s(&a["value"])),
+            "memory" => ops::memory(self, a).map(|v| serde_json::to_string(&v).unwrap_or_default()),
             _ => Err(format!("Orchestrator agent is read-only for tool '{name}'; delegate execution to a worker.")),
         };
         match res {
@@ -1326,10 +1345,27 @@ impl Hive {
                 let rows = self.history(&s(&a["query"]), &s(&a["project"]), before, 10);
                 return Ok(json!(serde_json::to_string(&rows).unwrap()));
             }
-            "info" => return Ok(json!(ops::info(self, &s(&a["key"]), &s(&a["value"])))),
+            "info" => return ops::info(self, &s(&a["key"]), &s(&a["value"])).map(|m| json!(m)),
+            "memory" => return ops::memory(self, a).map(|v| json!(serde_json::to_string(&v).unwrap_or_default())),
             "type_password" => {
-                let (site, user, tool) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]));
-                if tool.is_empty() { return crate::vm::type_password(&site, &user).map(|m| json!(m)); }
+                let kind = match s(&a["kind"]).trim().to_ascii_lowercase().as_str() {
+                    "" | "login" => "login",
+                    "card" => "card",
+                    other => return Err(format!("kind must be 'login' or 'card', got '{other}'")),
+                };
+                let (site, user, tool, field) = (s(&a["site"]), s(&a["username"]), s(&a["tool"]), s(&a["field"]));
+                if kind == "card" {
+                    if a["confirmed"] != true {
+                        return Err("Payment card entry is a one-way door: confirm the item, total amount, and card with the owner first, then retry with confirmed=true.".into());
+                    }
+                    if field.trim().is_empty() {
+                        return Err("Give field (number | exp | cvv | zip | cardholder) when kind='card'.".into());
+                    }
+                }
+                if tool.is_empty() {
+                    return if kind == "card" { crate::vm::type_card_field(&site, &field).map(|m| json!(m)) }
+                        else { crate::vm::type_password(&site, &user).map(|m| json!(m)) };
+                }
                 let target = match tool.as_str() {
                     "browser_type" => "browser_type_password",
                     "mac_type" | "mac_input" => "mac_type_password",
@@ -1337,9 +1373,12 @@ impl Hive {
                     _ => return Err("tool must be browser_type, mac_type/mac_input, or windows_type/windows_input".into()),
                 };
                 let mut args = serde_json::from_str::<Value>(&s(&a["args"])).ok().filter(Value::is_object).unwrap_or(json!({}));
-                args["site"] = json!(site); args["username"] = json!(user);
+                args["kind"] = json!(kind); args["site"] = json!(site); args["username"] = json!(user); args["field"] = json!(field);
                 let r = self.tool_inner(target, &args, agent, task)?;
-                return Ok(if r["error"].is_null() { json!(format!("Typed the saved password for {site} with {tool}.")) } else { r });
+                return Ok(if r["error"].is_null() {
+                    if kind == "card" { json!(format!("Typed saved card '{}' field '{field}' with {tool}.", if site.is_empty() { "default" } else { &site })) }
+                    else { json!(format!("Typed the saved password for {site} with {tool}.")) }
+                } else { r });
             }
             "lock" => return self.lock_files(&list(&a["files"]), agent),
             "sim" => {
@@ -1405,7 +1444,7 @@ impl Hive {
         }
         // Files cross with the call: vm_path's bytes go to the device, and a file the device sends back lands in Hive's files.
         let mut args = if matches!(name, "browser_type_password" | "mac_type_password" | "windows_type_password") {
-            let mut safe = json!({ "site": s(&a["site"]), "username": s(&a["username"]) });
+            let mut safe = json!({ "kind": s(&a["kind"]), "site": s(&a["site"]), "username": s(&a["username"]), "field": s(&a["field"]) });
             if name == "browser_type_password" { safe["tab"] = a["tab"].clone(); safe["i"] = a["i"].clone(); }
             safe
         } else { a.clone() };
@@ -1414,6 +1453,17 @@ impl Hive {
         }
         let secs = a["timeout"].as_u64().map(|t| t.clamp(1, 1800) + 15).or(decl["timeout"].as_u64()).unwrap_or(120);
         let mut r = self.call_node(&node, name, &args, agent, secs)?;
+        if name == "browser_open" && r["error"].is_null() {
+            let pbs = crate::memory::playbooks_for_host(&self.db, &s(&a["url"]));
+            let hint = crate::memory::format_playbooks_hint(&pbs);
+            if !hint.is_empty() {
+                for p in &pbs {
+                    if let Some(pid) = p["id"].as_i64() { self.db.run("update playbooks set uses=uses+1 where id=?", args!(pid)); }
+                }
+                let base = r["text"].as_str().map(String::from).unwrap_or_else(|| r.to_string());
+                r["text"] = json!(format!("{base}\n\n{hint}"));
+            }
+        }
         if name == "mac_hand_back" || (name == "mac_input" && a["action"] == "hand_back") {
             let lock = format!("{} input", s(&node["id"]));
             self.locks.lock().unwrap().retain(|l, v| !(*l == lock && v.0 == agent));
@@ -1494,13 +1544,13 @@ pub const WORKER: &str = include_str!("../worker.md");
 pub const PROMPTS: [(&str, &str); 2] = [("orchestrator", PLANNER), ("worker", WORKER)];
 
 /// Claude Code has no schema for a turn's final message, so its workers end with a tool instead.
-const CLAUDE_NOTES: &str = "Hive's tools (handoff, request_help, history, rule, info, type_password, and your task's granted device tools) are yours as MCP tools \
+const CLAUDE_NOTES: &str = "Hive's tools (handoff, request_help, history, rule, memory, type_password, and your task's granted device tools) are yours as MCP tools \
 named mcp__hive__<name>. Hive doesn't read your final message: end every turn by calling mcp__hive__end_turn as your very last \
 action, with done true and the outcome, or done false with exactly why you stopped and exactly what you need from the owner.";
 
 const VM_NOTES: &str = "- This VM (Ubuntu, you're root): your shell. Its screen is Xvfb :99: \
 `export DISPLAY=:99 XAUTHORITY=/home/ubuntu/.Xauthority-99`; `vm-chrome [url] &` opens its Chrome, `vm-shot > /tmp/s.png` and \
-view_image show the screen, xdotool clicks and types. Saved logins: `hive-cred list`, and type_password types one, here or in a device. Hive's files \
+view_image show the screen, xdotool clicks and types. Tier 0 encrypted vault: `hive-cred list` shows saved logins and payment card labels/last4; `type_password` blind-types a login password or (only after explicit owner confirmation) a single card field, here or in a device. Hive's files \
 (shared with the dashboard and nodes) are in /var/lib/hive/files.";
 
 /// Execution-verified completion check for done=true (bounded to one rejection per attempt so it never deadlocks).
@@ -2023,5 +2073,30 @@ mod tests {
         let quote = s(&hive.db.get("select quote from tasks where id=?", args!(second)).unwrap()["quote"]);
         assert!(quote.contains("Build-to-Delete") && quote.contains("net-negative LOC"), "{quote}");
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    #[test]
+    fn three_tier_memory_and_card_confirmation_gate() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), Some(std::env::temp_dir()),
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        // Tier 1 + Tier 2 via unified memory tool + secret firewall
+        hive.tool_inner("memory", &json!({"action":"save_profile","key":"school","value":"UW Madison"}), 1, 0).unwrap();
+        hive.tool_inner("memory", &json!({"action":"save_contact","name":"Jordan Lee","relation":"club lead","email":"jordan@example.edu"}), 1, 0).unwrap();
+        hive.tool_inner("memory", &json!({"action":"save_playbook","host":"canvas.wisc.edu","title":"Grades","steps":"Open /grades","selectors":"table.grades"}), 1, 0).unwrap();
+        assert!(hive.tool_inner("memory", &json!({"action":"save_profile","key":"visa","value":"4111 1111 1111 1111"}), 1, 0).is_err());
+        let found = hive.tool_inner("memory", &json!({"action":"search","query":"Madison"}), 1, 0).unwrap();
+        assert!(found.as_str().unwrap().contains("UW Madison"));
+
+        // Tier 0 payment card requires explicit owner confirmation (one-way door)
+        let err = hive.tool_inner("type_password", &json!({"kind":"card","site":"personal","field":"number","username":"","tool":"","args":""}), 1, 0).unwrap_err();
+        assert!(err.contains("one-way door"), "{err}");
+
+        // Browser worker prompt auto-injects verified playbook; hive worker uses draft PR governance
+        let rid = hive.db.run("insert into requests(at, node, agent, text, context) values(?, 'dashboard', '', 'check canvas.wisc.edu grades', '{\"site\":\"canvas.wisc.edu\"}')", args!(now()));
+        let tid = hive.db.run("insert into tasks(request_id, title, quote, nodes, status, at, updated) values(?, 'Check grades', 'check canvas.wisc.edu', '[\"browser\",\"hive\"]', 'open', ?, ?)", args!(rid, now(), now()));
+        let task = hive.db.get("select * from tasks where id=?", args!(tid)).unwrap();
+        let prompt = hive.instructions(&task);
+        assert!(prompt.contains("Verified site playbook(s)") && prompt.contains("Open /grades"), "{prompt}");
+        assert!(prompt.contains("gh pr create --draft") && prompt.contains("NEVER push directly to club `main`"), "{prompt}");
     }
 }

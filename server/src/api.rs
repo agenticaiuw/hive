@@ -275,10 +275,24 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Err(e) => Res::err(403, &e),
         },
         ("GET", ["api", "info"]) => Res::json(&json!(hive.db.all("select * from info order by key", &[]))),
-        ("POST", ["api", "info"]) => {
-            crate::ops::info(hive, &s(&b["key"]), &s(&b["value"]));
-            Res::json(&json!({ "ok": true }))
+        ("POST", ["api", "info"]) => match crate::ops::info(hive, &s(&b["key"]), &s(&b["value"])) {
+            Ok(_) => Res::json(&json!({ "ok": true })),
+            Err(e) => Res::err(400, &e),
+        },
+        ("GET", ["api", "memory"]) => {
+            let q = req.q("q").to_string();
+            let tier = req.q("tier").to_string();
+            let arg = if q.is_empty() { json!({ "action": "get", "tier": tier, "key": req.q("key"), "host": req.q("host") }) }
+                else { json!({ "action": "search", "query": q, "tier": tier, "limit": req.q("limit").parse::<i64>().unwrap_or(10) }) };
+            match crate::ops::memory(hive, &arg) {
+                Ok(v) => Res::json(&v),
+                Err(e) => Res::err(400, &e),
+            }
         }
+        ("POST", ["api", "memory"]) => match crate::ops::memory(hive, &b) {
+            Ok(v) => Res::json(&v),
+            Err(e) => Res::err(400, &e),
+        },
         ("GET", ["api", "files"]) => Res::json(&json!(hive.db.all("select * from files order by id desc limit 500", &[]))),
         ("POST", ["api", "files"]) => {
             let name = if req.q("name").is_empty() { "upload" } else { req.q("name") };
@@ -350,13 +364,19 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                     // The owner sees which task is asking for their Mac, and follows its log while it has it.
                     if tool.ends_with("_take_over") { a["task"] = json!({ "id": c["task"], "title": c["title"] }); }
                     if matches!(tool.as_str(), "browser_type_password" | "mac_type_password" | "windows_type_password") {
-                        // The database holds only the site and username. Resolve the secret at delivery,
-                        // and only for the device token that registered this node.
+                        // The database holds only non-secret selectors (kind, site/label, username/field).
+                        // Resolve the secret at delivery, and only for the device token bound to this node.
                         let authorized = hive.db.get("select 1 from node_tokens where node=? and hash=?", args!(nid, hash(&token(&req)))).is_some();
-                        let login = if authorized { crate::cred::pick(&s(&a["site"]), &s(&a["username"])) }
-                            else { Err("This device token is not bound to the requested node.".into()) };
-                        match login {
-                            Ok(login) => a["password"] = login["password"].clone(),
+                        let secret = if !authorized {
+                            Err("This device token is not bound to the requested node.".into())
+                        } else if s(&a["kind"]) == "card" {
+                            crate::cred::pick_card(&s(&a["site"]), &s(&a["field"]))
+                        } else {
+                            crate::cred::pick(&s(&a["site"]), &s(&a["username"]))
+                                .and_then(|l| l["password"].as_str().map(String::from).ok_or_else(|| "No saved password".into()))
+                        };
+                        match secret {
+                            Ok(val) => a["password"] = json!(val),
                             Err(e) => a["credential_error"] = json!(e),
                         }
                     }

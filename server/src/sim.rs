@@ -14,7 +14,8 @@ pub const PROTOCOL: &str = "Self-Improvement Memory (SIM) & Build-to-Delete prot
 - Call `sim(mode=\"read\")` first to inspect SIM history, raw failure traces, dead/high-failure tools, old-model ablation candidates, rule bloat, and largest files.\n\
 - Reuse an existing root-cause `problem` name when it explains the failure; otherwise name a new one.\n\
 - Actively subtract: delete dead/duplicate code, consolidate overlapping tools, and ablate old-model workarounds (prompt phrasing, parsing, retry thresholds) when newer models no longer need them. Never edit SPECS.md and never delete/weaken tests (`reinstall` rejects test-count regressions).\n\
-- Before calling `reinstall`, call `sim(mode=\"propose\")` with a concrete pre-edit `predicted` fix, then pass that `sim_id` to `reinstall`. After verifying, record `fixed`/`missed` via `sim(mode=\"outcome\")` (never erase failed/reverted history).";
+- Before calling `reinstall`, call `sim(mode=\"propose\")` with a concrete pre-edit `predicted` fix, then pass that `sim_id` to `reinstall`. After verifying, record `fixed`/`missed` via `sim(mode=\"outcome\")` (never erase failed/reverted history).\n\
+- Upstream governance: keep owner-specific edits local; for generalizable club fixes, append an anonymized `sim(mode=\"export\")` line to `server/sim.jsonl`, push a feature branch, and open a draft PR (`gh pr create --draft`)—never push directly to club `main`.";
 
 fn s(v: &Value) -> String { hive_protocol::str_val(v).trim().to_string() }
 fn key(problem: &str) -> String { problem.trim().to_ascii_lowercase() }

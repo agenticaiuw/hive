@@ -131,16 +131,22 @@ pub fn set_page_code(hive: &Hive, rule: i64, css: &str, js: &str) -> Result<Stri
     Ok("Saved: the owner's browsers apply it on that site's pages from their next load.".into())
 }
 
-pub fn info(hive: &Hive, key: &str, value: &str) -> String {
+pub fn info(hive: &Hive, key: &str, value: &str) -> Result<String, String> {
     let (key, value) = (key.trim(), value.trim());
     if !key.is_empty() && !value.is_empty() {
-        hive.db.run("insert into info(key, value, updated) values(?,?,?) on conflict(key) do update set value=excluded.value, updated=excluded.updated",
-            args!(key, value, now()));
-        return "Saved.".into();
+        let msg = crate::memory::save_profile(&hive.db, key, value)?;
+        hive.bump();
+        return Ok(msg);
     }
-    let rows = if key.is_empty() { hive.db.all("select key, value from info order by key", &[]) }
-        else { hive.db.all("select key, value from info where key=?", args!(key)) };
-    rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")
+    Ok(crate::memory::get_profile(&hive.db, key))
+}
+
+pub fn memory(hive: &Hive, a: &Value) -> Result<Value, String> {
+    let res = crate::memory::exec(&hive.db, a)?;
+    if matches!(s(&a["action"]).trim(), "save_profile" | "save_contact" | "save_playbook" | "report_playbook" | "delete") {
+        hive.bump();
+    }
+    Ok(res)
 }
 
 // ---- Orchestrator On-Demand Inspection ----

@@ -9,7 +9,8 @@ use std::io::{BufRead, Write};
 const INSTRUCTIONS: &str = "Hive is the owner's own agent system: every piece of work they give you is saved as one of their Hive \
     tasks, whichever app you run in. When the owner asks for new work, call add_task with their exact words before you start; \
     when it ends, call end_task. When they give a standing instruction (always, never, from now on, a preference), call add_rule. \
-    Call get_rules when you start in a folder and follow every rule it gives. Work for Hive's own agents (on another of the owner's \
+    Call get_rules when you start in a folder and follow every rule it gives. Use memory (search/get/save_profile/save_contact/save_playbook) \
+    to read or update the owner's shared profile, contacts, and verified site playbooks (never secrets). Work for Hive's own agents (on another of the owner's \
     devices, or that should outlast this session) goes to hand_off.";
 
 /// One call to the Hive Server through this computer's door: its answer, or why it didn't come.
@@ -63,6 +64,17 @@ fn tools() -> Vec<Value> {
                 "rule": s("The rule, said plainly"), "quote": s("The owner's exact words") }), &["scope", "rule", "quote"]),
         tool("get_rules", "The owner's rules for a folder/project (and this computer): follow every one.",
             json!({ "folder": s("The folder you work in; this session's folder when left out") }), &[]),
+        tool("memory", "Read or update Hive's shared 3-tier memory (Tier 1: owner profile & contacts; Tier 2: verified site playbooks; \
+            never passwords, tokens, or cards). Actions: search (query, optional tier), get (optional tier/key/host/id), \
+            save_profile (key, value), save_contact (name, relation, email, phone, org, notes), save_playbook (host, title, steps, selectors), \
+            report_playbook (id, ok), delete (tier, key/id/name).",
+            json!({ "action": s("search | get | save_profile | save_contact | save_playbook | report_playbook | delete"),
+                "tier": s("profile | contact | playbook | empty"), "query": s("BM25 search query"),
+                "key": s("Profile key or contact name filter"), "value": s("Profile value"), "id": n("Numeric id"),
+                "name": s("Contact name"), "relation": s("Relation"), "email": s("Email"), "phone": s("Phone"),
+                "org": s("Organization"), "notes": s("Notes"), "host": s("Site host"), "title": s("Playbook title"),
+                "steps": s("Verified steps"), "selectors": s("Stable selectors"),
+                "ok": { "type": "boolean", "description": "Whether a playbook succeeded" } }), &["action"]),
     ]
 }
 
@@ -144,6 +156,10 @@ fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String
             let r = rules(&hive("GET", &format!("/api/rules?folder={}&node={}", q(&folder), crate::os::KIND), None)?);
             Ok(if r.is_empty() { "The owner has no rules for here.".into() } else { format!("The owner's rules here (follow every one):\n{r}") })
         }
+        "memory" => {
+            let r = hive("POST", "/api/memory", Some(a))?;
+            Ok(serde_json::to_string(&r).unwrap_or_default())
+        }
         _ => Err(format!("Hive has no tool {name}")),
     }
 }
@@ -195,6 +211,7 @@ mod tests {
                     "log": [{ "who": "owner", "text": "use the old one" }] }),
                 p if p.starts_with("/api/rules?") => json!([{ "id": 3, "text": "Use tabs", "code": null }, { "id": 4, "text": "x", "code": "js" }]),
                 "/api/tasks/12/end" => json!({ "ok": true }),
+                "/api/memory" => json!({ "results": [{ "tier": "profile", "key": "school", "value": "UW Madison" }] }),
                 _ => return Err("Hive refused".into()),
             })
         };
@@ -203,7 +220,7 @@ mod tests {
         let init = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "Codex MCP" } } }));
         assert!(init["result"]["instructions"].as_str().unwrap().contains("add_task"));
         let names: Vec<Value> = send(json!({ "id": 2, "method": "tools/list" }))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
-        assert_eq!(names, ["add_task", "hand_off", "end_task", "task_status", "add_rule", "get_rules"]);
+        assert_eq!(names, ["add_task", "hand_off", "end_task", "task_status", "add_rule", "get_rules", "memory"]);
         let tool = |send: &mut dyn FnMut(Value) -> Value, name: &str, a: Value| {
             let r = send(json!({ "id": 3, "method": "tools/call", "params": { "name": name, "arguments": a } }));
             (r["result"]["isError"] == true, r["result"]["content"][0]["text"].as_str().unwrap().to_string())
@@ -223,6 +240,7 @@ mod tests {
                 Follow it with task_status (request 8, or a task's id).".into()));
         assert_eq!(tool(&mut send, "task_status", json!({ "request": 8 })).1, "#13 [working] Book it");
         assert_eq!(tool(&mut send, "add_rule", json!({ "scope": "", "rule": "r", "quote": "q" })), (true, "Hive refused".into()));
+        assert!(tool(&mut send, "memory", json!({ "action": "search", "query": "Madison" })).1.contains("UW Madison"));
         let calls = calls.into_inner();
         let session = calls[0].1["agent"].as_str().unwrap();
         assert!(session.starts_with("codex-mcp:"), "{session}");

@@ -30,6 +30,11 @@ create table if not exists calls(id integer primary key, node text, tool text, a
 create table if not exists tokens(hash text primary key, node text, at integer);
 create table if not exists node_tokens(node text primary key, hash text unique);
 create table if not exists info(key text primary key, value text, updated integer);
+create table if not exists contacts(id integer primary key, name text, relation text default '', email text default '',
+  phone text default '', org text default '', notes text default '', updated integer default 0);
+create table if not exists playbooks(id integer primary key, host text, title text default '', steps text default '',
+  selectors text default '', uses integer default 0, fails integer default 0, verified_at integer default 0, updated integer default 0);
+create virtual table if not exists memory_fts using fts5(tier, ref_id unindexed, key_or_host, body, tokenize='porter unicode61');
 create table if not exists files(id integer primary key, name text, size integer, node text, at integer);
 create table if not exists sim(id integer primary key, problem text, what text, files text default '', engine text default '',
   model text default '', predicted text default '', fixed text default '', missed text default '', passed integer default 0,
@@ -38,6 +43,7 @@ create index if not exists log_agent on log(agent_id, id);
 create index if not exists log_task on log(task_id, id);
 create index if not exists tasks_status on tasks(status);
 create index if not exists messages_pair on messages(from_task, to_task, id);
+create index if not exists playbooks_host on playbooks(host, fails);
 ";
 
 pub fn now() -> i64 {
@@ -87,7 +93,9 @@ impl Db {
         c.execute_batch("alter table sim add column net_loc integer default 0").ok();
         c.execute_batch("alter table nodes add column display_name text").ok();
         c.execute_batch("update agents set role='external' where kind='claude' and coalesce(role,'worker')='worker'").ok();
-        Db(Mutex::new(c))
+        let db = Db(Mutex::new(c));
+        crate::memory::sync_fts(&db);
+        db
     }
 
     pub fn all(&self, sql: &str, args: &[Value]) -> Vec<Value> {
