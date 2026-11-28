@@ -18,17 +18,9 @@ The desktop app streams Claude Code and Codex session messages and tool activity
 
 ## Adding Hive to your agents
 
-With the Hive app on your computer, any agent you use there (Claude Code, Codex, Cursor, Claude Desktop, …) saves the work you give it as your Hive tasks, and follows and adds to your rules, through `hive mcp`, an MCP server with six tools: `add_task`, `end_task`, `task_status`, `add_rule` and `get_rules`, and `hand_off` for work Hive's own agents should do (on your phone, say). On a Mac the program is `/Applications/Hive.app/Contents/MacOS/hive`; on Windows use the path of `hive-windows.exe` instead.
+On a Mac, download and open Hive, then click its menu bar icon → **Connect agents…** → **Connect**. Open a new provider session after setup. Ask your agent: “Ask Hive to find purchase links for these electronics and confirm the specifications.” It can use `hand_off` to send the request and `task_status` to read Hive's reply and completed results. Follow-ups can name a Hive task; all messages go through Hive's orchestrator. Only the explicit request and supplied context are shared by these tools.
 
-- **Claude Code:** `claude mcp add --scope user hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`. So every prompt also goes to Hive's orchestrator first, add the hook to `~/.claude/settings.json`: `"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}], "PostToolUse": [{"hooks": [{"type": "command", "command": "/Applications/Hive.app/Contents/MacOS/hive hook"}]}]}`.
-- **Codex:** `codex mcp add hive -- /Applications/Hive.app/Contents/MacOS/hive mcp`, or in `~/.codex/config.toml`:
-
-  ```toml
-  [mcp_servers.hive]
-  command = "/Applications/Hive.app/Contents/MacOS/hive"
-  args = ["mcp"]
-  ```
-- **Anything else** that speaks MCP over stdio: the command `/Applications/Hive.app/Contents/MacOS/hive` with the argument `mcp`.
+The connector configures Claude Code, Codex, Gemini CLI and Antigravity. For T3 Code it also configures existing Antigravity provider directories under the default `.t3` home. T3 sessions using other providers depend on those providers loading their own MCP configuration; custom homes and provider versions that ignore it are not automatically covered. A newly added T3 provider requires connecting again. Other MCP clients can use Hive's stdio MCP interface. Signed Mac installation and the installed T3 provider's live reply flow must be verified before claiming support for that installation.
 
 ## Where things are
 

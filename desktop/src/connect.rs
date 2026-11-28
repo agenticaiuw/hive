@@ -30,9 +30,9 @@ pub fn run(target: &str) -> Result<String, String> {
 fn connect_in(home: &Path, bin: &str, target: &str) -> Result<String, String> {
     let target = target.trim().to_ascii_lowercase();
     let targets: Vec<&str> = match target.as_str() {
-        "" | "all" => vec!["claude", "codex", "antigravity"],
-        "claude" | "codex" | "antigravity" => vec![target.as_str()],
-        other => return Err(format!("Unknown harness '{other}'. Use: claude | codex | antigravity | all")),
+        "" | "all" => vec!["claude", "codex", "gemini", "antigravity", "t3"],
+        "claude" | "codex" | "gemini" | "antigravity" | "t3" => vec![target.as_str()],
+        other => return Err(format!("Unknown harness '{other}'. Use: claude | codex | gemini | antigravity | t3 | all")),
     };
     let mut lines = Vec::new();
     for t in targets {
@@ -40,12 +40,31 @@ fn connect_in(home: &Path, bin: &str, target: &str) -> Result<String, String> {
             "claude" => {
                 let p = home.join(".claude/settings.json");
                 wire_claude_settings(&p, bin)?;
+                wire_mcp_json(&home.join(".claude.json"), bin)?;
                 lines.push(format!("Claude Code: wired MCP + hooks (SessionStart, UserPromptSubmit, PostToolUse, PreCompact) in {}", p.display()));
             }
             "codex" => {
                 let p = home.join(".codex/config.toml");
                 wire_codex_toml(&p, bin)?;
                 lines.push(format!("Codex: wired [mcp_servers.hive] in {}", p.display()));
+            }
+            "gemini" => {
+                wire_mcp_json(&home.join(".gemini/settings.json"), bin)?;
+                lines.push("Gemini CLI connected.".into());
+            }
+            "t3" => {
+                let root = home.join(".t3/userdata/providers/antigravity");
+                let mut count = 0;
+                if root.exists() {
+                    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+                        let path = entry.map_err(|e| e.to_string())?.path();
+                        if path.is_dir() {
+                            wire_mcp_json(&path.join("config/mcp_config.json"), bin)?;
+                            count += 1;
+                        }
+                    }
+                }
+                lines.push(format!("T3 Code: connected {count} existing Antigravity provider(s). Codex, Claude Code and Gemini CLI use their provider configuration. Restart provider sessions to load Hive. Custom provider homes need their own MCP configuration."));
             }
             "antigravity" => {
                 let p = home.join(".gemini/antigravity/mcp_config.json");
@@ -55,9 +74,6 @@ fn connect_in(home: &Path, bin: &str, target: &str) -> Result<String, String> {
             _ => {}
         }
     }
-    lines.push(format!(
-        "T3 Code / other MCP clients: add command `{bin}` with args `[\"mcp\"]` (shared rules, 3-tier memory, tasks, and hand_off)."
-    ));
     Ok(lines.join("\n"))
 }
 
@@ -158,6 +174,8 @@ mod tests {
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         std::fs::write(dir.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
 
+        std::fs::create_dir_all(dir.join(".t3/userdata/providers/antigravity/example/config")).unwrap();
+        std::fs::write(dir.join(".t3/userdata/providers/antigravity/example/config/mcp_config.json"), r#"{"mcpServers":{"other":{"command":"other"}}}"#).unwrap();
         connect_in(&dir, "/Applications/Hive.app/Contents/MacOS/hive", "all").unwrap();
         // Second call is strictly idempotent (no duplicate hooks or TOML sections).
         connect_in(&dir, "/Applications/Hive.app/Contents/MacOS/hive", "all").unwrap();
@@ -176,6 +194,11 @@ mod tests {
         let ag: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(".gemini/antigravity/mcp_config.json")).unwrap()).unwrap();
         assert_eq!(ag["mcpServers"]["hive"]["command"], "/Applications/Hive.app/Contents/MacOS/hive");
 
+        for path in [".claude.json", ".gemini/settings.json", ".t3/userdata/providers/antigravity/example/config/mcp_config.json"] {
+            let config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(path)).unwrap()).unwrap();
+            assert_eq!(config["mcpServers"]["hive"]["args"], json!(["mcp"]));
+            if path.starts_with(".t3") { assert_eq!(config["mcpServers"]["other"]["command"], "other"); }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

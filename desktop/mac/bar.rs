@@ -15,6 +15,29 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
+objc2::define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct HarnessSetup;
+    impl HarnessSetup {
+        #[unsafe(method(connectHarnesses:))]
+        fn connect_harnesses(&self, _sender: Option<&objc2_foundation::NSObject>) {
+            let mtm = MainThreadMarker::new().unwrap();
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str("Connect agents to Hive"));
+            alert.setInformativeText(&NSString::from_str("Connect Claude Code, Codex, Gemini CLI, Antigravity and existing T3 Code providers to this Hive? Their agents can send requests and read replies through Hive."));
+            alert.addButtonWithTitle(&NSString::from_str("Connect"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            if alert.runModal() != NSAlertFirstButtonReturn { return; }
+            let result = crate::connect::run("all").unwrap_or_else(|e| format!("Setup could not finish: {e}"));
+            let done = NSAlert::new(mtm);
+            done.setMessageText(&NSString::from_str("Hive agent connections"));
+            done.setInformativeText(&NSString::from_str(&result));
+            done.runModal();
+        }
+    }
+);
+
 struct Bar { panel: Retained<NSPanel>, field: Retained<NSTextField>, answer: Retained<NSTextField> }
 thread_local! {
     static BAR: RefCell<Option<Bar>> = const { RefCell::new(None) };
@@ -52,6 +75,12 @@ pub fn run() {
         button.setImage(Some(&logo));
     }
     let menu = NSMenu::new(mtm);
+    let setup: Retained<HarnessSetup> = unsafe { objc2::msg_send![HarnessSetup::alloc(mtm), init] };
+    let connect = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str("Connect agents…"),
+        Some(objc2::sel!(connectHarnesses:)), &NSString::from_str("")) };
+    unsafe { connect.setTarget(Some(&setup)) };
+    menu.addItem(&connect);
+    std::mem::forget(setup);
     menu.addItem(&*unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str("Quit Hive"),
         Some(objc2::sel!(terminate:)), &NSString::from_str("q")) });
     item.setMenu(Some(&menu));

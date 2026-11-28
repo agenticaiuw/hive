@@ -11,7 +11,7 @@ const INSTRUCTIONS: &str = "Hive is the owner's own agent system: every piece of
     when it ends, call end_task. When they give a standing instruction (always, never, from now on, a preference), call add_rule. \
     Call get_rules when you start in a folder and follow every rule it gives. Use memory (search/get/save_profile/save_contact/save_playbook) \
     to read or update the owner's shared profile, contacts, and verified site playbooks (never secrets). Work for Hive's own agents (on another of the owner's \
-    devices, or that should outlast this session) goes to hand_off.";
+    devices, or that should outlast this session) goes to hand_off. When asked to message Hive agents, use hand_off; for follow-ups include task. Read replies with task_status(request) and task_status(task). Share explicit context only, never raw transcripts.";
 
 /// One call to the Hive Server through this computer's door: its answer, or why it didn't come.
 pub fn call(method: &str, path: &str, body: Option<&Value>, secs: u64) -> Result<Value, String> {
@@ -48,6 +48,7 @@ fn tools() -> Vec<Value> {
             asked you to pass to Hive. For work you do yourself, use add_task instead. Waits for Hive's orchestrator, then returns \
             its reply, the request's id and the tasks it made; follow them with task_status.",
             json!({ "request": s("What should be done: the owner's exact words when it's their ask, otherwise yours, said fully"),
+                "task": n("Optional existing Hive task to message through its orchestrator"),
                 "context": s("What Hive's agents need to know that the request doesn't say (files, links, what's done so far)") }), &["request"]),
         tool("end_task", "Say how one of your Hive tasks ended: done with the outcome, or not done with exactly why you stopped and \
             exactly what the owner must do. Stop only when you truly need the owner.",
@@ -55,7 +56,7 @@ fn tools() -> Vec<Value> {
                 "outcome": s("When done: what was done"), "why": s("When not done: exactly why you stopped"),
                 "need": s("When not done: exactly what the owner must do") }), &["task", "done"]),
         tool("task_status", "See a Hive task: its status, outcome or what it needs, and its latest log (including the owner's messages \
-            to it). With a request (from hand_off) instead, lists its open tasks; with neither, all of the owner's open tasks.",
+            to it). With a request (from hand_off) instead, returns its reply and all routed task outcomes, including completed tasks; with neither, all of the owner's open tasks.",
             json!({ "task": n("The task's id"), "request": n("A request's id, from hand_off") }), &[]),
         tool("add_rule", "Save a standing instruction from the owner (always, never, from now on, a preference) as a Hive rule, which \
             every agent then follows. Scope it as far as they meant: project:<slug> or folder:<path> for a project, \"\" only when they clearly mean \
@@ -108,7 +109,14 @@ fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String
         "hand_off" => {
             let context = text("context");
             let words = if context.trim().is_empty() { text("request") } else { format!("{}\n\nContext: {context}", text("request")) };
-            let r = ask(hive, &words, &me.folder, None, true)?;
+            if words.trim().is_empty() { return Err("Say what Hive should do.".into()); }
+            let target = match a.get("task") {
+                Some(v) => format!("Message Hive task #{}: ", v.as_i64().filter(|n| *n > 0).ok_or("give task as a positive number")?),
+                None => String::new(),
+            };
+            let body = json!({"text": format!("External agent {} sends on the owner's behalf: {target}{words}", me.name),
+                "node": crate::os::KIND, "context": {"folder": me.folder, "external_agent": me.name, "target_task": a["task"]}});
+            let r = hive("POST", "/api/requests?wait=1", Some(&body))?;
             let tasks: Vec<String> = r["tasks"].as_array().into_iter().flatten()
                 .map(|t| format!("- #{} [{}] {}", t["id"], t["status"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""))).collect();
             let mut out = format!("Hive has it as request #{}. Its orchestrator says: {}", r["id"], r["reply"].as_str().unwrap_or("(still planning)"));
@@ -123,7 +131,10 @@ fn run(name: &str, a: &Value, me: &Session, hive: Hive) -> Result<String, String
         "task_status" => {
             let line = |t: &Value| format!("#{} [{}] {}", t["id"], t["status"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""));
             let Some(task) = a["task"].as_i64() else {
-                let request = a["request"].as_i64();
+                if let Some(request) = a["request"].as_i64() {
+                    return Ok(hive("GET", &format!("/api/requests/{request}"), None)?.to_string());
+                }
+                let request = None::<i64>;
                 let open: Vec<String> = hive("GET", "/api/state", None)?["tasks"].as_array().into_iter().flatten()
                     .filter(|t| request.is_none() || t["request_id"].as_i64() == request).map(line).collect();
                 return Ok(match (open.is_empty(), request) {
@@ -198,6 +209,27 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
+    fn followups_route_to_orchestrator_and_replies_survive_session_restart() {
+        let first = Session::new("Gemini", "/work".into());
+        let hive = |method: &str, path: &str, body: Option<&Value>| {
+            assert_eq!((method, path), ("POST", "/api/requests?wait=1"));
+            let b = body.unwrap();
+            assert_eq!(b["context"]["target_task"], 42);
+            assert!(b["agent"].is_null());
+            assert!(b["text"].as_str().unwrap().contains("Message Hive task #42: Confirm USB-C power"));
+            Ok(json!({"id":9,"reply":"Sent for verification","tasks":[{"id":42,"status":"working"}]}))
+        };
+        assert!(run("hand_off", &json!({"task":42,"request":"Confirm USB-C power"}), &first, &hive).unwrap().contains("request #9"));
+        assert!(run("hand_off", &json!({"task":-1,"request":"Check"}), &first, &hive).is_err());
+        let restarted = Session::new("Gemini", "/work".into());
+        let read = |method: &str, path: &str, _: Option<&Value>| {
+            assert_eq!((method,path), ("GET","/api/requests/9"));
+            Ok(json!({"request":{"reply":"Sent"},"tasks":[{"id":42,"status":"done","outcome":"Supports 100W USB-C PD"}]}))
+        };
+        assert!(run("task_status", &json!({"request":9}), &restarted, &read).unwrap().contains("100W USB-C PD"));
+    }
+
+    #[test]
     fn tools_call_the_servers_api() {
         let calls = RefCell::new(Vec::new());
         let hive = |method: &str, path: &str, body: Option<&Value>| -> Result<Value, String> {
@@ -205,6 +237,7 @@ mod tests {
             Ok(match path {
                 "/api/requests" => json!({ "id": 7 }),
                 "/api/requests?wait=1" => json!({ "id": 8, "reply": "Your phone will do it.", "tasks": [{ "id": 13, "status": "working", "title": "Book it" }] }),
+                "/api/requests/8" => json!({"request":{"id":8,"reply":"Your phone will do it."},"tasks":[{"id":13,"status":"done","outcome":"Booked"}]}),
                 "/api/state" => json!({ "tasks": [{ "id": 13, "request_id": 8, "status": "working", "title": "Book it" }, { "id": 12, "request_id": 7, "status": "needs", "title": "Fix it" }] }),
                 "/api/tasks" => json!({ "id": 12 }),
                 "/api/tasks/12" => json!({ "task": { "id": 12, "status": "needs", "title": "Fix it", "why": "no key", "need": "add one" },
@@ -238,7 +271,7 @@ mod tests {
         assert_eq!(tool(&mut send, "hand_off", json!({ "request": "book the table on my phone", "context": "for 4 at 7pm" })),
             (false, "Hive has it as request #8. Its orchestrator says: Your phone will do it.\nTasks:\n- #13 [working] Book it\n\
                 Follow it with task_status (request 8, or a task's id).".into()));
-        assert_eq!(tool(&mut send, "task_status", json!({ "request": 8 })).1, "#13 [working] Book it");
+        assert!(tool(&mut send, "task_status", json!({ "request": 8 })).1.contains("Booked"));
         assert_eq!(tool(&mut send, "add_rule", json!({ "scope": "", "rule": "r", "quote": "q" })), (true, "Hive refused".into()));
         assert!(tool(&mut send, "memory", json!({ "action": "search", "query": "Madison" })).1.contains("UW Madison"));
         let calls = calls.into_inner();
@@ -249,7 +282,9 @@ mod tests {
         assert_eq!((calls[2].0.as_str(), &calls[2].1["request"]), ("POST /api/tasks", &json!(5)));
         assert_eq!((calls[4].0.as_str(), &calls[4].1), ("POST /api/tasks/12/end", &json!({ "done": true, "outcome": "fixed", "why": "", "need": "" })));
         assert_eq!(calls[5].0, format!("GET /api/rules?folder=/work/my%20app&node={}", crate::os::KIND));
-        assert_eq!((calls[6].0.as_str(), &calls[6].1), ("POST /api/requests?wait=1", &json!({ "text": "book the table on my phone\n\nContext: for 4 at 7pm",
-            "node": crate::os::KIND, "context": { "folder": "/work/my app" } })));
+        assert_eq!(calls[6].0, "POST /api/requests?wait=1");
+        assert!(calls[6].1["text"].as_str().unwrap().contains("sends on the owner's behalf"));
+        assert_eq!(calls[6].1["context"]["external_agent"], session);
+        assert!(calls[6].1["agent"].is_null(), "Hive's orchestrator must execute the handoff");
     }
 }
