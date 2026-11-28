@@ -35,6 +35,9 @@ create table if not exists files(id integer primary key, name text, size integer
 create table if not exists sim(id integer primary key, problem text, what text, files text default '', engine text default '',
   model text default '', predicted text default '', fixed text default '', missed text default '', passed integer default 0,
   total integer default 0, net_loc integer default 0, status text default 'proposed', commit_sha text default '', at integer);
+";
+
+const INDEXES: &str = "
 create index if not exists log_agent on log(agent_id, id);
 create index if not exists log_task on log(task_id, id);
 create index if not exists tasks_status on tasks(status);
@@ -101,6 +104,7 @@ impl Db {
             "alter table nodes add column display_name text",
             "update agents set role='external' where kind='claude' and coalesce(role,'worker')='worker'",
         ] { c.execute_batch(sql).ok(); }
+        c.execute_batch(INDEXES).expect("indexes");
         let db = Db(Mutex::new(c));
         db.migrate_legacy();
         crate::memory::sync_fts(&db);
@@ -336,6 +340,7 @@ mod tests {
         Connection::open(&path).unwrap().execute_batch("
             create table tasks(id integer primary key, title text, status text, updated integer);
             create table agents(id integer primary key, task_id integer, kind text, status text);
+            create table messages(id integer primary key, at integer, from_agent integer, from_task integer, to_task integer, kind text, hops integer, text text);
             create table tokens(hash text primary key, node text, at integer);
             create table node_tokens(node text primary key, hash text unique);
             create table inbox(id integer primary key, agent_id integer, text text, at integer, seen integer default 0);
