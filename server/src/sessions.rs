@@ -1,6 +1,6 @@
 //! Authenticated transcript ingestion. Provider identities keep chats isolated; source offsets make retries harmless.
 use crate::{args, db::now, hive::Hive};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Mutex;
 static INGEST: Mutex<()> = Mutex::new(());
 pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
@@ -12,6 +12,11 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
     if events.len()>500 { return Err("Too many events".into()) }
     let agent=h.db.get("select * from agents where kind='claude' and name=?",args!(name));
     let aid=agent.as_ref().and_then(|a|a["id"].as_i64()).unwrap_or_else(|| h.db.run("insert into agents(kind,role,name,status,at,updated) values('claude','external',?,'idle',?,0)",args!(name,now())));
+    let mut cursors: Map<String, Value> = agent.as_ref()
+        .and_then(|a| a["cursors"].as_str())
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let mut high = cursors.get(source).and_then(|v| v.as_u64());
     // Transcripts are session activity, not owner-created work. Keep their history,
     // but attach it to a task only after the session explicitly saves one in Hive.
     let task=h.db.get("select t.id from tasks t where t.agent_id=? and coalesce(t.quote,'')!='Imported session' order by t.id desc limit 1",args!(aid))
@@ -19,7 +24,8 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
     let mut writes = Vec::new();
     for e in events {
         let key=e["key"].as_u64().ok_or("Missing event offset")?;
-        if h.db.get("select 1 from session_events where agent=? and source=? and offset=?",args!(aid,source,key)).is_some() { continue }
+        if high.is_some_and(|m| key <= m) { continue }
+        high = Some(key);
         let at=h.db.get("select cast((julianday(?)-2440587.5)*86400000 as integer) as at",args!(e["timestamp"])).and_then(|r|r["at"].as_i64()).unwrap_or(0);
         let who=e["who"].as_str().unwrap_or("");
         let text=e["text"].as_str().unwrap_or("");
@@ -29,7 +35,10 @@ pub fn ingest(h: &Hive, b: &Value) -> Result<Value, String> {
         let status=if e["status"]=="working" && at>now()-120_000 {"working"} else {"idle"};
         writes.push(("update agents set status=?,updated=? where id=? and coalesce(updated,0)<=?",args!(status,at,aid,at).to_vec()));
         writes.push(("update tasks set status=?,updated=? where id=? and status in ('idle','working') and coalesce(updated,0)<=?",args!(status,at,task,at).to_vec()));
-        writes.push(("insert into session_events(agent,source,offset) values(?,?,?)",args!(aid,source,key).to_vec()));
+    }
+    if let Some(m) = high {
+        cursors.insert(source.to_string(), json!(m));
+        writes.push(("update agents set cursors=? where id=?", args!(Value::Object(cursors).to_string(), aid).to_vec()));
     }
     h.db.batch(&writes)?;
     h.bump(); Ok(json!({"ok":true,"agent":aid,"task":task}))

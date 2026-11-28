@@ -100,26 +100,48 @@ fn delete_fts(db: &Db, tier: &str, ref_id: &str) {
     db.run("delete from memory_fts where tier=? and ref_id=?", args!(tier, ref_id));
 }
 
-/// Ensure FTS5 index matches existing rows (handles pre-existing `info` rows on upgrade in <5ms).
+fn meta_obj(row: &Value) -> Value {
+    serde_json::from_str(&s(&row["meta"])).unwrap_or_else(|_| json!({}))
+}
+
+fn contact_json(row: &Value) -> Value {
+    let m = meta_obj(row);
+    json!({
+        "id": row["id"], "name": row["key"], "relation": row["title"],
+        "email": m["email"].as_str().unwrap_or(""), "phone": m["phone"].as_str().unwrap_or(""),
+        "org": m["org"].as_str().unwrap_or(""), "notes": row["value"], "updated": row["updated"],
+    })
+}
+
+fn playbook_json(row: &Value) -> Value {
+    let m = meta_obj(row);
+    json!({
+        "id": row["id"], "host": row["key"], "title": row["title"], "steps": row["value"],
+        "selectors": m["selectors"].as_str().unwrap_or(""), "uses": row["uses"],
+        "fails": row["fails"], "verified_at": row["verified_at"], "updated": row["updated"],
+    })
+}
+
+fn fts_body(row: &Value) -> String {
+    let m = meta_obj(row);
+    match s(&row["tier"]).as_str() {
+        "profile" => s(&row["value"]),
+        "contact" => format!("{} {} {} {} {}", s(&row["title"]), s(&m["email"]), s(&m["phone"]), s(&m["org"]), s(&row["value"])).trim().to_string(),
+        "playbook" => format!("{} {} {}", s(&row["title"]), s(&row["value"]), s(&m["selectors"])).trim().to_string(),
+        _ => s(&row["value"]),
+    }
+}
+
+/// Ensure FTS5 index matches existing rows in the unified `memory` table (<5ms).
 pub fn sync_fts(db: &Db) {
-    let want = db.get("select (select count(*) from info) + (select count(*) from contacts) + (select count(*) from playbooks) as n", &[])
-        .and_then(|r| r["n"].as_i64()).unwrap_or(0);
+    let want = db.get("select count(*) as n from memory", &[]).and_then(|r| r["n"].as_i64()).unwrap_or(0);
     let have = db.get("select count(*) as n from memory_fts", &[]).and_then(|r| r["n"].as_i64()).unwrap_or(0);
     if want == have { return; }
     db.run("delete from memory_fts", &[]);
-    for r in db.all("select key, value from info", &[]) {
-        let (k, v) = (s(&r["key"]), s(&r["value"]));
-        index_row(db, "profile", &k, &k, &v);
-    }
-    for r in db.all("select * from contacts", &[]) {
-        let id = r["id"].as_i64().unwrap_or(0).to_string();
-        let body = format!("{} {} {} {} {}", s(&r["relation"]), s(&r["email"]), s(&r["phone"]), s(&r["org"]), s(&r["notes"]));
-        index_row(db, "contact", &id, &s(&r["name"]), body.trim());
-    }
-    for r in db.all("select * from playbooks", &[]) {
-        let id = r["id"].as_i64().unwrap_or(0).to_string();
-        let body = format!("{} {} {}", s(&r["title"]), s(&r["steps"]), s(&r["selectors"]));
-        index_row(db, "playbook", &id, &s(&r["host"]), body.trim());
+    for r in db.all("select * from memory", &[]) {
+        let tier = s(&r["tier"]);
+        let ref_id = if tier == "profile" { s(&r["key"]) } else { r["id"].as_i64().unwrap_or(0).to_string() };
+        index_row(db, &tier, &ref_id, &s(&r["key"]), &fts_body(&r));
     }
 }
 
@@ -130,16 +152,19 @@ pub fn save_profile(db: &Db, key: &str, value: &str) -> Result<String, String> {
     if looks_like_secret(key, value) {
         return Err("Refused to store a secret or payment card in plain memory; use the encrypted Tier 0 vault (hive-cred / type_password) instead.".into());
     }
-    db.run("insert into info(key, value, updated) values(?,?,?) on conflict(key) do update set value=excluded.value, updated=excluded.updated",
-        args!(key, value, now()));
+    if let Some(id) = db.get("select id from memory where tier='profile' and key=?", args!(key)).and_then(|r| r["id"].as_i64()) {
+        db.run("update memory set value=?, updated=? where id=?", args!(value, now(), id));
+    } else {
+        db.run("insert into memory(tier, key, value, updated) values('profile',?,?,?)", args!(key, value, now()));
+    }
     index_row(db, "profile", key, key, value);
     Ok("Saved.".into())
 }
 
 pub fn get_profile(db: &Db, key: &str) -> String {
     let key = key.trim();
-    let rows = if key.is_empty() { db.all("select key, value from info order by key", &[]) }
-        else { db.all("select key, value from info where key=?", args!(key)) };
+    let rows = if key.is_empty() { db.all("select key, value from memory where tier='profile' order by key", &[]) }
+        else { db.all("select key, value from memory where tier='profile' and key=?", args!(key)) };
     rows.iter().map(|r| format!("{}: {}", s(&r["key"]), s(&r["value"]))).collect::<Vec<_>>().join("\n")
 }
 
@@ -159,25 +184,26 @@ pub fn save_contact(db: &Db, a: &Value) -> Result<Value, String> {
         }
     }
     let existing = a["id"].as_i64().filter(|i| *i > 0)
-        .or_else(|| db.get("select id from contacts where lower(name)=lower(?)", args!(name)).and_then(|r| r["id"].as_i64()));
+        .or_else(|| db.get("select id from memory where tier='contact' and lower(key)=lower(?)", args!(name)).and_then(|r| r["id"].as_i64()));
     let id = if let Some(id) = existing {
-        let cur = db.get("select * from contacts where id=?", args!(id)).unwrap_or(json!({}));
+        let cur = db.get("select * from memory where id=? and tier='contact'", args!(id)).map(|r| contact_json(&r)).unwrap_or(json!({}));
         let pick = |new: &str, old: &Value| if new.is_empty() { s(old) } else { new.to_string() };
         let (rel, email, phone, org, notes) = (
             pick(&rel, &cur["relation"]), pick(&email, &cur["email"]), pick(&phone, &cur["phone"]),
             pick(&org, &cur["org"]), pick(&notes, &cur["notes"]),
         );
-        db.run("update contacts set name=?, relation=?, email=?, phone=?, org=?, notes=?, updated=? where id=?",
-            args!(name, rel, email, phone, org, notes, now(), id));
+        let meta = json!({ "email": email, "phone": phone, "org": org }).to_string();
+        db.run("update memory set key=?, title=?, value=?, meta=?, updated=? where id=?",
+            args!(name, rel, notes, meta, now(), id));
         id
     } else {
-        db.run("insert into contacts(name, relation, email, phone, org, notes, updated) values(?,?,?,?,?,?,?)",
-            args!(name, rel, email, phone, org, notes, now()))
+        let meta = json!({ "email": email, "phone": phone, "org": org }).to_string();
+        db.run("insert into memory(tier, key, title, value, meta, updated) values('contact',?,?,?,?,?)",
+            args!(name, rel, notes, meta, now()))
     };
-    let row = db.get("select * from contacts where id=?", args!(id)).unwrap_or(json!({ "id": id }));
-    let body = format!("{} {} {} {} {}", s(&row["relation"]), s(&row["email"]), s(&row["phone"]), s(&row["org"]), s(&row["notes"]));
-    index_row(db, "contact", &id.to_string(), &s(&row["name"]), body.trim());
-    Ok(row)
+    let raw = db.get("select * from memory where id=?", args!(id)).unwrap_or(json!({ "id": id }));
+    index_row(db, "contact", &id.to_string(), &s(&raw["key"]), &fts_body(&raw));
+    Ok(contact_json(&raw))
 }
 
 pub fn save_playbook(db: &Db, a: &Value) -> Result<Value, String> {
@@ -194,33 +220,33 @@ pub fn save_playbook(db: &Db, a: &Value) -> Result<Value, String> {
         return Err("Refused to store a secret or payment card in a site playbook; use Tier 0 (hive-cred) instead.".into());
     }
     let ts = now();
+    let meta = json!({ "selectors": selectors }).to_string();
     let existing = a["id"].as_i64().filter(|i| *i > 0)
-        .or_else(|| db.get("select id from playbooks where host=? and lower(title)=lower(?)", args!(host, title)).and_then(|r| r["id"].as_i64()));
+        .or_else(|| db.get("select id from memory where tier='playbook' and key=? and lower(title)=lower(?)", args!(host, title)).and_then(|r| r["id"].as_i64()));
     let id = if let Some(id) = existing {
-        db.run("update playbooks set host=?, title=?, steps=?, selectors=?, fails=0, verified_at=?, updated=? where id=?",
-            args!(host, title, steps, selectors, ts, ts, id));
+        db.run("update memory set key=?, title=?, value=?, meta=?, fails=0, verified_at=?, updated=? where id=?",
+            args!(host, title, steps, meta, ts, ts, id));
         id
     } else {
-        db.run("insert into playbooks(host, title, steps, selectors, uses, fails, verified_at, updated) values(?,?,?,?,0,0,?,?)",
-            args!(host, title, steps, selectors, ts, ts))
+        db.run("insert into memory(tier, key, title, value, meta, uses, fails, verified_at, updated) values('playbook',?,?,?,?,0,0,?,?)",
+            args!(host, title, steps, meta, ts, ts))
     };
-    let row = db.get("select * from playbooks where id=?", args!(id)).unwrap_or(json!({ "id": id }));
-    let body = format!("{} {} {}", s(&row["title"]), s(&row["steps"]), s(&row["selectors"]));
-    index_row(db, "playbook", &id.to_string(), &s(&row["host"]), body.trim());
-    Ok(row)
+    let raw = db.get("select * from memory where id=?", args!(id)).unwrap_or(json!({ "id": id }));
+    index_row(db, "playbook", &id.to_string(), &s(&raw["key"]), &fts_body(&raw));
+    Ok(playbook_json(&raw))
 }
 
 pub fn report_playbook(db: &Db, id: i64, ok: bool) -> Result<String, String> {
-    if id <= 0 || db.get("select 1 from playbooks where id=?", args!(id)).is_none() {
+    if id <= 0 || db.get("select 1 from memory where id=? and tier='playbook'", args!(id)).is_none() {
         return Err(format!("No playbook #{id}."));
     }
     let ts = now();
     if ok {
-        db.run("update playbooks set uses=uses+1, fails=0, verified_at=?, updated=? where id=?", args!(ts, ts, id));
+        db.run("update memory set uses=uses+1, fails=0, verified_at=?, updated=? where id=?", args!(ts, ts, id));
         Ok(format!("Playbook #{id} verified (uses incremented, fails reset)."))
     } else {
-        db.run("update playbooks set fails=fails+1, updated=? where id=?", args!(ts, id));
-        let fails = db.get("select fails from playbooks where id=?", args!(id)).and_then(|r| r["fails"].as_i64()).unwrap_or(1);
+        db.run("update memory set fails=fails+1, updated=? where id=?", args!(ts, id));
+        let fails = db.get("select fails from memory where id=?", args!(id)).and_then(|r| r["fails"].as_i64()).unwrap_or(1);
         if fails >= STALE_FAILS {
             Ok(format!("Playbook #{id} marked stale ({fails} failures) and removed from auto-injection; update it after re-verifying."))
         } else {
@@ -233,12 +259,13 @@ pub fn report_playbook(db: &Db, id: i64, ok: bool) -> Result<String, String> {
 pub fn playbooks_for_host(db: &Db, host_or_url: &str) -> Vec<Value> {
     let h = normalize_host(host_or_url);
     if h.is_empty() { return vec![]; }
-    db.all("select * from playbooks where fails < ? order by uses desc, verified_at desc", args!(STALE_FAILS)).into_iter()
+    db.all("select * from memory where tier='playbook' and fails < ? order by uses desc, verified_at desc", args!(STALE_FAILS)).into_iter()
         .filter(|p| {
-            let ph = s(&p["host"]);
+            let ph = s(&p["key"]);
             !ph.is_empty() && (h == ph || h.ends_with(&format!(".{ph}")))
         })
         .take(3)
+        .map(|r| playbook_json(&r))
         .collect()
 }
 
@@ -275,10 +302,10 @@ pub fn search(db: &Db, query: &str, tier: &str, limit: i64) -> Vec<Value> {
         let rid = s(&h["ref_id"]);
         match t.as_str() {
             "profile" => json!({ "tier": "profile", "key": h["key_or_host"], "value": h["body"] }),
-            "contact" => db.get("select * from contacts where id=?", args!(rid.parse::<i64>().unwrap_or(0)))
-                .map(|mut c| { c["tier"] = json!("contact"); c }).unwrap_or(h),
-            "playbook" => db.get("select * from playbooks where id=?", args!(rid.parse::<i64>().unwrap_or(0)))
-                .map(|mut p| { p["tier"] = json!("playbook"); p["stale"] = json!(p["fails"].as_i64().unwrap_or(0) >= STALE_FAILS); p }).unwrap_or(h),
+            "contact" => db.get("select * from memory where id=? and tier='contact'", args!(rid.parse::<i64>().unwrap_or(0)))
+                .map(|r| { let mut c = contact_json(&r); c["tier"] = json!("contact"); c }).unwrap_or(h),
+            "playbook" => db.get("select * from memory where id=? and tier='playbook'", args!(rid.parse::<i64>().unwrap_or(0)))
+                .map(|r| { let mut p = playbook_json(&r); p["tier"] = json!("playbook"); p["stale"] = json!(p["fails"].as_i64().unwrap_or(0) >= STALE_FAILS); p }).unwrap_or(h),
             _ => h,
         }
     }).collect()
@@ -307,21 +334,21 @@ pub fn exec(db: &Db, a: &Value) -> Result<Value, String> {
                 "profile" => {
                     let k = s(&a["key"]).trim().to_string();
                     if k.is_empty() { return Err("Give key to delete a profile entry.".into()); }
-                    db.run("delete from info where key=?", args!(k));
+                    db.run("delete from memory where tier='profile' and key=?", args!(k));
                     delete_fts(db, "profile", &k);
                     Ok(json!({ "ok": true, "deleted": k }))
                 }
                 "contact" => {
                     let id = a["id"].as_i64().filter(|i| *i > 0)
-                        .or_else(|| db.get("select id from contacts where lower(name)=lower(?)", args!(s(&a["name"]).trim())).and_then(|r| r["id"].as_i64()))
+                        .or_else(|| db.get("select id from memory where tier='contact' and lower(key)=lower(?)", args!(s(&a["name"]).trim())).and_then(|r| r["id"].as_i64()))
                         .ok_or("Give contact id or name to delete.")?;
-                    db.run("delete from contacts where id=?", args!(id));
+                    db.run("delete from memory where id=? and tier='contact'", args!(id));
                     delete_fts(db, "contact", &id.to_string());
                     Ok(json!({ "ok": true, "deleted": id }))
                 }
                 "playbook" => {
                     let id = a["id"].as_i64().filter(|i| *i > 0).ok_or("Give playbook id to delete.")?;
-                    db.run("delete from playbooks where id=?", args!(id));
+                    db.run("delete from memory where id=? and tier='playbook'", args!(id));
                     delete_fts(db, "playbook", &id.to_string());
                     Ok(json!({ "ok": true, "deleted": id }))
                 }
@@ -335,33 +362,33 @@ pub fn exec(db: &Db, a: &Value) -> Result<Value, String> {
 fn get(db: &Db, tier: &str, key: &str, host: &str, id: i64) -> Result<Value, String> {
     match tier.trim().to_ascii_lowercase().as_str() {
         "profile" => {
-            let rows = if key.trim().is_empty() { db.all("select key, value, updated from info order by key", &[]) }
-                else { db.all("select key, value, updated from info where key=?", args!(key.trim())) };
+            let rows = if key.trim().is_empty() { db.all("select key, value, updated from memory where tier='profile' order by key", &[]) }
+                else { db.all("select key, value, updated from memory where tier='profile' and key=?", args!(key.trim())) };
             Ok(json!({ "profile": rows }))
         }
         "contact" => {
-            let rows = if id > 0 { db.all("select * from contacts where id=?", args!(id)) }
-                else if !key.trim().is_empty() { db.all("select * from contacts where lower(name) like lower(?) order by name", args!(format!("%{}%", key.trim()))) }
-                else { db.all("select * from contacts order by name limit 50", &[]) };
-            Ok(json!({ "contacts": rows }))
+            let rows = if id > 0 { db.all("select * from memory where id=? and tier='contact'", args!(id)) }
+                else if !key.trim().is_empty() { db.all("select * from memory where tier='contact' and lower(key) like lower(?) order by key", args!(format!("%{}%", key.trim()))) }
+                else { db.all("select * from memory where tier='contact' order by key limit 50", &[]) };
+            Ok(json!({ "contacts": rows.iter().map(contact_json).collect::<Vec<_>>() }))
         }
         "playbook" => {
-            let rows = if id > 0 { db.all("select * from playbooks where id=?", args!(id)) }
-                else if !host.trim().is_empty() { playbooks_for_host(db, host) }
-                else { db.all("select * from playbooks order by fails asc, uses desc, updated desc limit 50", &[]) };
-            Ok(json!({ "playbooks": rows }))
+            if !host.trim().is_empty() && id <= 0 { return Ok(json!({ "playbooks": playbooks_for_host(db, host) })); }
+            let rows = if id > 0 { db.all("select * from memory where id=? and tier='playbook'", args!(id)) }
+                else { db.all("select * from memory where tier='playbook' order by fails asc, uses desc, updated desc limit 50", &[]) };
+            Ok(json!({ "playbooks": rows.iter().map(playbook_json).collect::<Vec<_>>() }))
         }
         "" => {
             if !key.trim().is_empty() {
-                return Ok(json!({ "profile": db.all("select key, value from info where key=?", args!(key.trim())) }));
+                return Ok(json!({ "profile": db.all("select key, value from memory where tier='profile' and key=?", args!(key.trim())) }));
             }
             if !host.trim().is_empty() {
                 return Ok(json!({ "playbooks": playbooks_for_host(db, host) }));
             }
             Ok(json!({
-                "profile": db.all("select key, value from info order by key", &[]),
-                "contacts": db.all("select id, name, relation, email, phone, org from contacts order by name limit 30", &[]),
-                "playbooks": db.all("select id, host, title, uses, fails from playbooks order by fails asc, uses desc limit 30", &[]),
+                "profile": db.all("select key, value from memory where tier='profile' order by key", &[]),
+                "contacts": db.all("select * from memory where tier='contact' order by key limit 30", &[]).iter().map(contact_json).collect::<Vec<_>>(),
+                "playbooks": db.all("select * from memory where tier='playbook' order by fails asc, uses desc limit 30", &[]).iter().map(playbook_json).collect::<Vec<_>>(),
             }))
         }
         other => Err(format!("Unknown memory tier '{other}' (use profile, contact, playbook, or empty).")),

@@ -587,7 +587,7 @@ impl Hive {
         for entry in self.db.all("select who, text from log where task_id=? and who='owner' order by id", args!(task["id"].clone())) {
             t += &format!("\nOwner follow-up: {}\n", s(&entry["text"]));
         }
-        for m in self.db.all("select from_task, kind, text from messages where to_task=? order by id limit 10", args!(task["id"].clone())) {
+        for m in self.db.all("select from_task, kind, text from messages where to_task=? and kind!='inbox' order by id limit 10", args!(task["id"].clone())) {
             t += &format!("\nHandoff [{}] from task #{}: {}\n", s(&m["kind"]), m["from_task"], s(&m["text"]));
         }
         if !ctx.as_object().map(|o| o.is_empty()).unwrap_or(true) { t += &format!("Its context: {ctx}\n"); }
@@ -791,7 +791,8 @@ impl Hive {
         let a = self.db.get("select * from agents where id=?", args!(agent)).ok_or("no such agent")?;
         if s(&a["kind"]) == "claude" {
             self.db.run("update tasks set status='idle', why=null, need=null, updated=? where id=? and status in ('needs','done','dropped')", args!(now(), task_id));
-            self.db.run("insert into inbox(agent_id, text, at) values(?,?,?)", args!(agent, format!("From {from} about task #{task_id}: {text}"), now()));
+            self.db.run("insert into messages(at, from_agent, from_task, to_agent, to_task, kind, hops, text, seen) values(?,0,0,?,?,'inbox',1,?,0)",
+                args!(now(), agent, task_id, format!("From {from} about task #{task_id}: {text}")));
             self.bump();
             return Ok(());
         }
@@ -850,10 +851,7 @@ impl Hive {
     }
 
     fn save_usage(&self, thread: &str, agent: i64, usage: &Value) {
-        if usage["totalTokens"].is_number() {
-            self.db.run("insert into usage(thread,agent_id,total,input,output,cached) values(?,?,?,?,?,?) on conflict(thread) do update set total=excluded.total,input=excluded.input,output=excluded.output,cached=excluded.cached",
-                args!(thread, agent, usage["totalTokens"], usage["inputTokens"], usage["outputTokens"], usage["cachedInputTokens"]));
-        }
+        self.db.save_usage(thread, agent, usage);
     }
 
     fn record_evidence(&self, agent: i64, edited: bool, failed: Option<String>) {
@@ -1459,7 +1457,7 @@ impl Hive {
             let hint = crate::memory::format_playbooks_hint(&pbs);
             if !hint.is_empty() {
                 for p in &pbs {
-                    if let Some(pid) = p["id"].as_i64() { self.db.run("update playbooks set uses=uses+1 where id=?", args!(pid)); }
+                    if let Some(pid) = p["id"].as_i64() { self.db.run("update memory set uses=uses+1 where id=? and tier='playbook'", args!(pid)); }
                 }
                 let base = r["text"].as_str().map(String::from).unwrap_or_else(|| r.to_string());
                 r["text"] = json!(format!("{base}\n\n{hint}"));
@@ -1469,15 +1467,14 @@ impl Hive {
             let act = s(&a["action"]);
             if matches!(act.as_str(), "delete_reminder" | "delete_event") {
                 let ext = s(&a["external_id"]);
-                if !ext.is_empty() { self.db.run("delete from apple_links where external_id=?", args!(ext)); }
-            } else if let Some(ext) = r["external_id"].as_str().filter(|v| !v.is_empty()) {
-                let project = if task > 0 {
-                    self.db.get("select project from tasks where id=?", args!(task)).map(|row| s(&row["project"])).unwrap_or_default()
-                } else { String::new() };
-                let kind = r["apple_kind"].as_str().unwrap_or("reminder");
-                self.db.run("insert into apple_links(external_id, kind, task_id, project, updated) values(?,?,?,?,?) \
-                    on conflict(external_id) do update set task_id=excluded.task_id, project=excluded.project, updated=excluded.updated",
-                    args!(ext, kind, task, project, now()));
+                if !ext.is_empty() {
+                    self.db.run("update tasks set external_ref='' where external_ref like ?", args!(format!("%:{ext}")));
+                }
+            } else if task > 0 {
+                if let Some(ext) = r["external_id"].as_str().filter(|v| !v.is_empty()) {
+                    let kind = r["apple_kind"].as_str().unwrap_or("reminder");
+                    self.db.run("update tasks set external_ref=? where id=?", args!(format!("{kind}:{ext}"), task));
+                }
             }
         }
         if name == "mac_hand_back" || (name == "mac_input" && a["action"] == "hand_back") {
@@ -1694,14 +1691,17 @@ mod tests {
     fn session_usage_replaces_cumulative_totals_without_double_counting() {
         let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
             Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into agents(id, kind, role, name, status, at, updated) values(7, 'codex', 'worker', 'w7', 'working', 1, 1)", &[]);
         for total in [100, 120, 120] {
             hive.save_usage("session", 7, &json!({"totalTokens":total,"inputTokens":90,"outputTokens":30,"cachedInputTokens":50}));
         }
         hive.save_usage("session", 7, &Value::Null);
-        let usage = hive.db.get("select * from usage where agent_id=7", &[]).unwrap();
+        let usage = hive.db.usage_for(7).unwrap();
         assert_eq!(usage["total"], 120);
         assert_eq!(usage["cached"], 50);
-        assert_eq!(hive.db.all("select * from usage", &[]).len(), 1);
+        // Orchestrator usage (agent 0) auto-creates its system row and aggregates cleanly.
+        hive.save_usage("orch-1", 0, &json!({"totalTokens":40,"inputTokens":30,"outputTokens":10,"cachedInputTokens":5}));
+        assert_eq!(hive.db.usage_for(0).unwrap()["total"], 40);
     }
 
     #[test]
@@ -1772,7 +1772,7 @@ mod tests {
         let later = hive.tool_inner("info", &json!({"key":"email", "value":""}), 2, 2).unwrap();
         assert!(later.as_str().unwrap().contains("owner@example.test"));
         hive.tool_inner("info", &json!({"key":"email", "value":"updated@example.test"}), 2, 2).unwrap();
-        assert_eq!(hive.db.all("select * from info", &[]).len(), 1);
+        assert_eq!(hive.db.all("select * from memory where tier='profile'", &[]).len(), 1);
         assert!(hive.tool_inner("info", &json!({"key":"", "value":""}), 3, 3).unwrap().as_str().unwrap().contains("updated@example.test"));
         assert!(hive.db.all("select * from rules", &[]).is_empty());
     }

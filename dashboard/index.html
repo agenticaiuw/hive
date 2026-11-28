@@ -268,12 +268,21 @@ async function sendComposer(key, path) {
 async function send() { await sendComposer('main', 'api/requests?wait=1'); refresh(); }
 $('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
 
-const TABS = ['Sessions', 'Tasks', 'Rules', 'Instructions', 'Info', 'Files', 'Nodes', 'Screen', 'Database', 'Tools', 'Log'];
-let tab = location.hash.slice(1) || 'Sessions', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
-if (['Agents', 'Past'].includes(tab)) tab = 'Sessions';
+const TABS = ['Sessions', 'Tasks', 'Rules', 'Memory', 'Files', 'Nodes', 'Database'];
+let tab = 'Sessions', subTab = '', state = null, chat = null, chatAfter = 0, timer = null, remoteScreen = null, screenRetry = null;
+function applyHash(raw) {
+  const h = raw || 'Sessions';
+  if (['Agents', 'Past'].includes(h)) { tab = 'Sessions'; subTab = ''; }
+  else if (h === 'Instructions') { tab = 'Rules'; subTab = 'Instructions'; }
+  else if (h === 'Info') { tab = 'Memory'; subTab = ''; }
+  else if (h === 'Screen' || h === 'Tools') { tab = 'Nodes'; subTab = h; }
+  else if (h === 'Log') { tab = 'Database'; subTab = 'Log'; }
+  else { tab = TABS.includes(h) ? h : 'Sessions'; subTab = ''; }
+}
+applyHash(location.hash.slice(1));
 function tabs() { $('#tabs').innerHTML = TABS.map(t => `<a href="#${t}" class="${t === tab ? 'on' : ''}">${t}</a>`).join(''); }
 let boardSelection = null;
-addEventListener('hashchange', () => { tab = location.hash.slice(1); if (['Agents', 'Past'].includes(tab)) tab = 'Sessions'; chat = tab === 'Sessions' && boardSelection !== null ? sessionId(boardSelection) : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
+addEventListener('hashchange', () => { applyHash(location.hash.slice(1)); chat = tab === 'Sessions' && boardSelection !== null ? sessionId(boardSelection) : null; boardSelection = null; chatAfter = 0; tabs(); render(); });
 function openTask(id) { if (tab === 'Sessions') { openChat(id); return; } boardSelection = id; location.hash = 'Sessions'; }
 
 // Adapted from OpenAI Codex's Apache-2.0 terminal history renderer; see codex-rendering.README.md.
@@ -536,56 +545,70 @@ async function render() {
     v.innerHTML = '<div id="task-board" class="task-board"></div>';
     updateTasks();
   } else if (tab === 'Rules') {
-    const rules = await api('api/rules');
-    v.innerHTML = `<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, project:slug, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
-      ${rules.map(r => `<div class="card row"><b>R${r.id}</b>${r.scope ? `<span class="badge">${esc(r.scope)}</span>` : ''}<span style="flex:1">${esc(r.text)}${r.code ? ' <span class="muted">(page change)</span>' : ''}${r.quote ? `<br><span class="muted">"${esc(r.quote)}"</span>` : ''}</span><button class="plain" onclick="delRule(${r.id})">Remove</button></div>`).join('')}`;
-  } else if (tab === 'Instructions') {
-    const prompts = [['orchestrator', 'Orchestrator agent', 'what the orchestrator hears with every request, before your rules'], ['worker', 'Worker agents', 'what each worker agent hears first, before its task']];
-    const texts = await Promise.all(prompts.map(([name]) => api(`api/instructions/${name}`)));
-    v.innerHTML = prompts.map(([name, title, hint], i) => `<div class="card"><b>${title}</b> <span class="muted">${hint}. Save empty to go back to Hive's.</span>
-      <textarea id="prompt-${name}" rows="16">${esc(texts[i].text)}</textarea><div class="row"><button onclick="savePrompt('${name}')">Save</button></div></div>`).join('');
-  } else if (tab === 'Info') {
-    const info = await api('api/info');
-    v.innerHTML = `<div class="card row"><input id="ikey" placeholder="Key" style="flex:1"><input id="ival" placeholder="Value" style="flex:3"><button onclick="addInfo()">Save</button></div>${table(info)}`;
+    const mode = subTab === 'Instructions' ? 'Instructions' : 'Rules';
+    const sub = `<div class="row">${['Rules', 'Instructions'].map(m => `<button class="${m === mode ? '' : 'plain'}" onclick="subTab='${m}';render()">${m}</button>`).join('')}</div>`;
+    if (mode === 'Instructions') {
+      const prompts = [['orchestrator', 'Orchestrator agent', 'what the orchestrator hears with every request, before your rules'], ['worker', 'Worker agents', 'what each worker agent hears first, before its task']];
+      const texts = await Promise.all(prompts.map(([name]) => api(`api/instructions/${name}`)));
+      v.innerHTML = sub + prompts.map(([name, title, hint], i) => `<div class="card"><b>${title}</b> <span class="muted">${hint}. Save empty to go back to Hive's.</span>
+        <textarea id="prompt-${name}" rows="16">${esc(texts[i].text)}</textarea><div class="row"><button onclick="savePrompt('${name}')">Save</button></div></div>`).join('');
+    } else {
+      const rules = await api('api/rules');
+      v.innerHTML = `${sub}<div class="card row"><input id="rtext" placeholder="New rule" style="flex:3"><input id="rscope" placeholder="Scope: blank, project:slug, site:x.com, app:Notes, folder:/path, node:mac" style="flex:2"><button onclick="addRule()">Add</button></div>
+        ${rules.map(r => `<div class="card row"><b>R${r.id}</b>${r.scope ? `<span class="badge">${esc(r.scope)}</span>` : ''}<span style="flex:1">${esc(r.text)}${r.code ? ' <span class="muted">(page change)</span>' : ''}${r.quote ? `<br><span class="muted">"${esc(r.quote)}"</span>` : ''}</span><button class="plain" onclick="delRule(${r.id})">Remove</button></div>`).join('')}`;
+    }
+  } else if (tab === 'Memory') {
+    const mem = await api('api/memory');
+    v.innerHTML = `<div class="card row"><input id="ikey" placeholder="Profile key" style="flex:1"><input id="ival" placeholder="Value (never passwords/cards)" style="flex:3"><button onclick="addInfo()">Save</button></div>
+      <p class="muted">Profile</p>${table(mem.profile || [])}
+      ${(mem.contacts || []).length ? `<p class="muted">Contacts</p>${table(mem.contacts)}` : ''}
+      ${(mem.playbooks || []).length ? `<p class="muted">Site Playbooks</p>${table(mem.playbooks)}` : ''}`;
   } else if (tab === 'Files') {
     const files = await api('api/files');
     v.innerHTML = `<div class="card row"><input type="file" id="up" multiple style="flex:1"><button onclick="upload()">Upload to Hive</button></div>
       ${files.map(f => `<div class="card row"><a href="api/files/${f.id}" target="_blank">${esc(f.name)}</a><span class="muted">${(f.size / 1024).toFixed(0)} KB · from ${esc(f.node)} · ${ago(f.at)}</span>${/\.(mp4|mov|webm)$/i.test(f.name) ? '<span class="badge">recording</span>' : ''}</div>`).join('') || '<p class="muted">No files yet.</p>'}`;
   } else if (tab === 'Nodes') {
-    v.innerHTML = state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="renameNode(this.dataset.id, this.dataset.name)">Rename</button> <button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>';
-    const phone = await api('api/phone');
-    v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span></div>
-      <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div>
-      ${phone.unregistered.map(u => `<p>An iPhone plugged into your Mac can't install Hive until it's added to your Apple developer account. <b>Add this iPhone</b> copies its UDID and opens GitHub: choose <i>Run workflow</i>, paste it, and run. In about 20 minutes, open ${phone.install ? `<a href="${esc(phone.install)}">this link</a>` : 'the Hive install link'} on that iPhone.</p>
-        <div class="row"><input readonly value="${esc(u)}" style="flex:1"><button data-udid="${esc(u)}" data-github="${esc(phone.register)}" onclick="addPhone(this.dataset.udid, this.dataset.github)">Add this iPhone</button></div>`).join('')}</div>`;
-    v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
-  } else if (tab === 'Screen') {
-    v.innerHTML = `<div class="row"><span id="screen-status" class="muted">Connecting…</span><button onclick="render()">Reconnect</button></div><div id="remote-screen" style="height:75vh;min-height:240px;overflow:hidden"></div>`;
-    const screen = $('#remote-screen');
-    const retry = () => { if (screen.isConnected && tab === 'Screen') { $('#screen-status').textContent = 'Disconnected · reconnecting…'; screenRetry = setTimeout(render, 2000); } };
-    try {
-      const [credentials, {default: HiveRFB}] = await Promise.all([api('api/vm/credentials'), import('./api/vm/client.js')]);
-      if (!screen.isConnected || tab !== 'Screen') return;
-      const url = new URL('api/vm/control', location.href);
-      url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const rfb = remoteScreen = new HiveRFB(screen, url.href, {credentials, shared:true});
-      rfb.scaleViewport = true;
-      rfb.addEventListener('connect', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Connected · click the screen to control it'; });
-      rfb.addEventListener('disconnect', () => { if (remoteScreen === rfb) { remoteScreen = null; retry(); } });
-      rfb.addEventListener('securityfailure', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Screen authentication failed'; });
-    } catch (e) { retry(); }
+    const mode = ['Screen', 'Tools'].includes(subTab) ? subTab : 'Devices';
+    const sub = `<div class="row">${[['Devices', 'Devices'], ['Screen', 'VM Screen'], ['Tools', 'Tools']].map(([k, lbl]) => `<button class="${k === mode ? '' : 'plain'}" onclick="subTab='${k}';render()">${lbl}</button>`).join('')}</div>`;
+    if (mode === 'Screen') {
+      v.innerHTML = `${sub}<div class="row"><span id="screen-status" class="muted">Connecting…</span><button onclick="render()">Reconnect</button></div><div id="remote-screen" style="height:75vh;min-height:240px;overflow:hidden"></div>`;
+      const screen = $('#remote-screen');
+      const retry = () => { if (screen.isConnected && tab === 'Nodes' && subTab === 'Screen') { $('#screen-status').textContent = 'Disconnected · reconnecting…'; screenRetry = setTimeout(render, 2000); } };
+      try {
+        const [credentials, {default: HiveRFB}] = await Promise.all([api('api/vm/credentials'), import('./api/vm/client.js')]);
+        if (!screen.isConnected || tab !== 'Nodes' || subTab !== 'Screen') return;
+        const url = new URL('api/vm/control', location.href);
+        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const rfb = remoteScreen = new HiveRFB(screen, url.href, {credentials, shared:true});
+        rfb.scaleViewport = true;
+        rfb.addEventListener('connect', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Connected · click the screen to control it'; });
+        rfb.addEventListener('disconnect', () => { if (remoteScreen === rfb) { remoteScreen = null; retry(); } });
+        rfb.addEventListener('securityfailure', () => { if ($('#screen-status')) $('#screen-status').textContent = 'Screen authentication failed'; });
+      } catch (e) { retry(); }
+    } else if (mode === 'Tools') {
+      const tools = await api('api/tools');
+      v.innerHTML = sub + tools.map(g => `<div class="card"><b>${esc(g.node)}</b>${g.tools.map(t => `<div><code>${esc(t.name)}</code> <span class="muted">${esc(t.description)}</span></div>`).join('')}</div>`).join('');
+    } else {
+      v.innerHTML = sub + (state.nodes.map(n => `<div class="card row"><b>${esc(n.name)}</b><span class="muted" style="flex:1">${esc(n.kind)} · seen ${ago(n.seen)} · ${esc(n.version || '')}</span><button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="renameNode(this.dataset.id, this.dataset.name)">Rename</button> <button data-id="${esc(n.id)}" data-name="${esc(n.name)}" onclick="forget(this.dataset.id, this.dataset.name)">Forget</button></div>`).join('') || '<p class="muted">No devices yet.</p>');
+      const phone = await api('api/phone');
+      v.innerHTML += `<div class="card"><div class="row"><b>iPhone</b><span class="muted" style="flex:1">${phone.connected ? 'Hive Phone is connected' : 'Hive Phone isn\'t connected'} · ${phone.paused ? 'unlocking paused: check the phone, then save the passcode again' : phone.passcode ? 'passcode saved' : 'no passcode saved'}</span></div>
+        <div class="row"><input id="pin" type="password" autocomplete="off" placeholder="The iPhone's passcode: Hive may type it at the lock screen"><button onclick="savePin()">Save</button></div>
+        ${phone.unregistered.map(u => `<p>An iPhone plugged into your Mac can't install Hive until it's added to your Apple developer account. <b>Add this iPhone</b> copies its UDID and opens GitHub: choose <i>Run workflow</i>, paste it, and run. In about 20 minutes, open ${phone.install ? `<a href="${esc(phone.install)}">this link</a>` : 'the Hive install link'} on that iPhone.</p>
+          <div class="row"><input readonly value="${esc(u)}" style="flex:1"><button data-udid="${esc(u)}" data-github="${esc(phone.register)}" onclick="addPhone(this.dataset.udid, this.dataset.github)">Add this iPhone</button></div>`).join('')}</div>`;
+      v.innerHTML += '<p class="muted">Locks</p>' + table(state.locks);
+    }
   } else if (tab === 'Database') {
     const tables = await api('api/db');
-    v.innerHTML = `<div class="row">${tables.map(t => `<button class="plain" onclick="showTable('${t.table}')">${t.table} (${t.rows})</button>`).join('')}</div><div id="rows"></div>`;
-  } else if (tab === 'Tools') {
-    const tools = await api('api/tools');
-    v.innerHTML = tools.map(g => `<div class="card"><b>${esc(g.node)}</b>${g.tools.map(t => `<div><code>${esc(t.name)}</code> <span class="muted">${esc(t.description)}</span></div>`).join('')}</div>`).join('');
-  } else if (tab === 'Log') {
-    const log = await api('api/log?limit=300');
-    v.innerHTML = `<div class="card log">${log.map(l => `<div><span class="muted">${ago(l.at)} ${l.task_id ? '#' + l.task_id : ''}</span> <span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`).join('')}</div>`;
+    v.innerHTML = `<div class="row"><button class="${subTab === 'Log' ? '' : 'plain'}" onclick="showLiveLog()">Live Log</button>${tables.map(t => `<button class="plain" onclick="subTab='';showTable('${t.table}')">${t.table} (${t.rows})</button>`).join('')}</div><div id="rows"></div>`;
+    if (subTab === 'Log') await showLiveLog();
   }
 }
 async function showTable(t) { $('#rows').innerHTML = table(await api(`api/db/${t}?limit=200`)); }
+async function showLiveLog() {
+  subTab = 'Log';
+  const log = await api('api/log?limit=300');
+  $('#rows').innerHTML = `<div class="card log">${log.map(l => `<div><span class="muted">${ago(l.at)} ${l.task_id ? '#' + l.task_id : ''}</span> <span class="who">${esc(l.who)}</span>${esc(l.text)}</div>`).join('')}</div>`;
+}
 async function addRule() { await api('api/rules', { method: 'POST', body: { text: $('#rtext').value, scope: $('#rscope').value, quote: $('#rtext').value } }); render(); }
 async function savePrompt(name) { await api(`api/instructions/${name}`, { method: 'PUT', body: { text: $(`#prompt-${name}`).value } }); render(); }
 async function delRule(id) { await api(`api/rules/${id}`, { method: 'DELETE' }); render(); }

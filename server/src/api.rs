@@ -178,7 +178,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             "version": hive.version,
             "projects": crate::ops::list_projects(hive),
             "tasks": hive.db.all("select t.*, (select max(id) from log where task_id=t.id and agent_id>0 and who in ('agent','done','needs you')) as latest_message from tasks t where coalesce(t.quote,'')!='Imported session' order by id desc", &[]),
-            "planner_usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=0 having count(*)>0", &[]),
+            "planner_usage": hive.db.usage_for(0),
             "agents": hive.db.all("select a.*, t.title from agents a left join tasks t on t.id=a.task_id where (a.kind!='claude' or exists (select 1 from tasks real where real.agent_id=a.id and coalesce(real.quote,'')!='Imported session')) and (a.status in ('working','idle') or exists (select 1 from tasks q where q.agent_id=a.id and q.status='queued')) order by a.id desc", &[]),
             "nodes": hive.db.all("select id, kind, coalesce(display_name,name) as name, seen, version from nodes order by seen desc", &[]),
             "requests": if req.q("view") == "dashboard" { vec![] } else { hive.db.all("select * from requests order by id desc limit 30", &[]) },
@@ -201,12 +201,16 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
         ("GET", ["api", "tasks", _, "context"]) => match hive.session_context(id(2)) {
             Ok(v) => Res::json(&v), Err(e) => Res::err(409, &e),
         },
-        ("GET", ["api", "tasks", _]) => Res::json(&json!({
-            "task": hive.db.get("select * from tasks where id=?", args!(id(2))),
-            "usage": hive.db.get("select sum(total) as total,sum(input) as input,sum(output) as output,sum(cached) as cached from usage where agent_id=(select agent_id from tasks where id=?) having count(*)>0", args!(id(2))),
-            "log": hive.db.all("select * from log where id>?2 and task_id=?1 and agent_id>0
-                order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
-        })),
+        ("GET", ["api", "tasks", _]) => {
+            let task = hive.db.get("select * from tasks where id=?", args!(id(2)));
+            let usage = task.as_ref().and_then(|t| t["agent_id"].as_i64()).and_then(|aid| hive.db.usage_for(aid));
+            Res::json(&json!({
+                "task": task,
+                "usage": usage,
+                "log": hive.db.all("select * from log where id>?2 and task_id=?1 and agent_id>0
+                    order by id limit 2000", args!(id(2), req.q("after").parse::<i64>().unwrap_or(0))),
+            }))
+        }
         ("POST", ["api", "tasks"]) => Res::json(&json!({ "id": hive.add_task(b["request"].as_i64().unwrap_or(0), &b) })),
         ("POST", ["api", "tasks", _, "grant"]) => match crate::ops::grant_nodes(hive, crate::ops::Actor::owner(), id(2), &crate::hive::list(&b["nodes"])) {
             Ok(nodes) => Res::json(&json!({ "ok": true, "nodes": nodes })),
@@ -265,7 +269,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             }
         }
         ("DELETE", ["api", "nodes", node]) => {
-            hive.db.run("delete from tokens where node=?", args!(node));
+            hive.db.run("delete from tokens where node=? or node_id=?", args!(node, node));
             hive.db.run("delete from nodes where id=?", args!(node));
             hive.bump();
             Res::json(&json!({ "ok": true }))
@@ -274,7 +278,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             Ok(()) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(403, &e),
         },
-        ("GET", ["api", "info"]) => Res::json(&json!(hive.db.all("select * from info order by key", &[]))),
+        ("GET", ["api", "info"]) => Res::json(&json!(hive.db.all("select key, value, updated from memory where tier='profile' order by key", &[]))),
         ("POST", ["api", "info"]) => match crate::ops::info(hive, &s(&b["key"]), &s(&b["value"])) {
             Ok(_) => Res::json(&json!({ "ok": true })),
             Err(e) => Res::err(400, &e),
@@ -342,7 +346,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let th = hash(&token(&req));
             let label = format!("{}:{}", s(&b["kind"]), s(&b["name"]));
             if hive.db.get("select 1 from tokens where hash=? and node=?", args!(th.clone(), label)).is_some() {
-                hive.db.run("insert into node_tokens(node, hash) values(?,?) on conflict(node) do update set hash=excluded.hash", args!(nid, th));
+                hive.db.run("update tokens set node_id='' where node_id=? and hash!=?", args!(nid.clone(), th.clone()));
+                hive.db.run("update tokens set node_id=? where hash=?", args!(nid, th));
             }
             hive.bump();
             Res::json(&json!({ "ok": true, "version": hive_protocol::DEVICES }))
@@ -366,7 +371,7 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
                     if matches!(tool.as_str(), "browser_type_password" | "mac_type_password" | "windows_type_password") {
                         // The database holds only non-secret selectors (kind, site/label, username/field).
                         // Resolve the secret at delivery, and only for the device token bound to this node.
-                        let authorized = hive.db.get("select 1 from node_tokens where node=? and hash=?", args!(nid, hash(&token(&req)))).is_some();
+                        let authorized = hive.db.get("select 1 from tokens where node_id=? and hash=?", args!(nid, hash(&token(&req)))).is_some();
                         let secret = if !authorized {
                             Err("This device token is not bound to the requested node.".into())
                         } else if s(&a["kind"]) == "card" {
@@ -396,8 +401,8 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             // The session's hook asks on every prompt and tool call: that is how Hive knows an outside session is still working.
             if agent > 0 { hive.external_check_in(agent); }
 
-            let rows = hive.db.all("select * from inbox where agent_id=? and seen=0 order by id", args!(agent));
-            hive.db.run("update inbox set seen=1 where agent_id=?", args!(agent));
+            let rows = hive.db.all("select id, to_agent as agent_id, text, at, seen from messages where to_agent=? and kind='inbox' and seen=0 order by id", args!(agent));
+            hive.db.run("update messages set seen=1 where to_agent=? and kind='inbox' and seen=0", args!(agent));
             let tasks = hive.db.all("select id, title, status from tasks where agent_id=? and status in ('working','needs')", args!(agent));
             Res::json(&json!({ "messages": rows, "tasks": tasks }))
         }
