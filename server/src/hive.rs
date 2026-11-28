@@ -1300,7 +1300,7 @@ impl Hive {
         let tid = task["id"].as_i64().unwrap_or(0);
         let tools = || {
             let mut t: Vec<Value> = self.tools_for(&self.task_kinds(&task)).iter().map(tools::for_mcp).collect();
-            t.push(crate::claude::end_turn());
+            t.push(json!({ "name": "end_turn", "description": "Say how your turn ended; call it as your turn's last action.", "inputSchema": end_schema() }));
             t
         };
         Ok(hive_protocol::mcp::answer(m, "", tools, |name, a| {
@@ -1503,10 +1503,13 @@ impl Hive {
 }
 
 /// The final message of every worker turn.
+// Both engines use one completion contract: Codex outputSchema and Claude end_turn.
 fn end_schema() -> Value {
-    let st = json!({ "type": "string" });
+    let st = |d: &str| json!({ "type": "string", "description": d });
     json!({ "type": "object", "additionalProperties": false, "required": ["done", "outcome", "why", "need"],
-        "properties": { "done": { "type": "boolean" }, "outcome": st, "why": st, "need": st } })
+        "properties": { "done": { "type": "boolean", "description": "Every part of what the owner asked for is done." },
+            "outcome": st("When done: what was done."), "why": st("When not done: exactly why you stopped."),
+            "need": st("When not done: exactly what you need from the owner.") } })
 }
 
 fn ended(text: &str) -> Option<Value> {
@@ -1988,6 +1991,10 @@ mod tests {
     fn completion_gate_checks_execution_evidence_without_deadlocking() {
         let done = json!({ "done": true, "outcome": "fixed", "why": "", "need": "" });
         let not_done = json!({ "done": false, "outcome": "", "why": "blocked", "need": "approval" });
+        let schema = end_schema();
+        assert_eq!(schema["required"], json!(["done", "outcome", "why", "need"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["done"]["type"], "boolean");
         // Pure conversational / 0-action tasks pass straight through.
         assert!(gate_completion(&done, &TurnEvidence::default()).is_none());
         assert!(gate_completion(&not_done, &TurnEvidence { last_failed: Some("err".into()), edited: true, done_checks: 0 }).is_none());

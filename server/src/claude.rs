@@ -139,16 +139,6 @@ impl Parser {
     }
 }
 
-/// The tool a Claude agent ends every turn with, since stream-json has no final-message schema like Codex's.
-pub fn end_turn() -> Value {
-    let st = |d: &str| json!({ "type": "string", "description": d });
-    json!({ "name": "end_turn", "description": "Say how your turn ended; call it as your turn's last action.",
-        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["done", "outcome", "why", "need"], "properties": {
-            "done": { "type": "boolean", "description": "Every part of what the owner asked for is done." },
-            "outcome": st("When done: what was done."), "why": st("When not done: exactly why you stopped."),
-            "need": st("When not done: exactly what you need from the owner.") } } })
-}
-
 /// The orchestrator planner: one `claude -p` with a JSON schema for its answer and optional read-only MCP tools.
 pub fn plan(cmd: &str, env: &[(String, String)], cwd: &Path, model: (&str, &str), prompt: &str, schema: &Value, input: &str, mcp: Option<&str>) -> Result<Value, String> {
     let mut cmd_exec = command(cmd, env, cwd);
