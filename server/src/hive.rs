@@ -940,7 +940,7 @@ impl Hive {
             (Some(e), None) if e["done"] != true && self.rechecked.lock().unwrap().insert(agent) => {
                 self.log(agent, task, 0, "gate", "done:false recheck");
                 let me = self.clone();
-                std::thread::spawn(move || { me.start_turn(agent, RECHECK).ok(); });
+                std::thread::spawn(move || { me.start_turn(agent, &me.stop_recheck(task)).ok(); });
             }
             (Some(e), None) if self.finish(agent, task, &e) => {}
             _ => {
@@ -961,6 +961,16 @@ impl Hive {
             }
         }
         self.bump();
+    }
+
+    /// Refresh discovery context at the existing bounded stop gate, without granting tools.
+    fn stop_recheck(&self, task: i64) -> String {
+        let mut text = format!("{RECHECK}\nGranted node kinds: {}.\nConnected-node inventory:", self.task_kinds(&self.db.get("select nodes from tasks where id=?", args!(task)).unwrap_or_default()).join(", "));
+        for node in self.db.all("select id, kind, coalesce(display_name,name) as name, seen from nodes order by kind", &[]) {
+            text += &format!("\n- {} ({}, {}): {}", s(&node["name"]), s(&node["kind"]), s(&node["id"]),
+                if node_online(&node) { "online" } else { "offline" });
+        }
+        text
     }
 
     /// A task ended: done with the outcome, or needs the owner (exact why and need). False if it says neither.
@@ -1546,7 +1556,10 @@ pub const PLANNER: &str = include_str!("../orchestrator.md");
 
 /// What a worker that's about to stop for the owner hears first.
 const RECHECK: &str = "Before this goes to the owner: is it truly something only they can do (their own decision, a one-way door like \
-sending as them, deleting or paying, or their finger or face)? A tool falling short isn't. If you need an extra device capability not \
+sending as them, deleting or paying, or their finger or face)? A tool falling short isn't. Missing task information is a discovery problem: search memory and history, then relevant sources \
+on every accessible node (such as files, mail, browser sessions or phone apps) before asking the owner to supply it. Search only \
+for information needed for this task, verify that any result belongs to the owner and task, and never guess. State which sources \
+you checked and which were unavailable if you still cannot find it. If you need an extra device capability not \
 granted to this task (such as phone for 2FA, mac, browser, or hive), call request_help(kind=\"capability\", ...) so the orchestrator can \
 grant it. Then keep going. If it truly is theirs, end the same way again.";
 
@@ -1647,6 +1660,23 @@ mod tests {
         hive.db.run("update calls set status='done', result='{}' where id=?", args!(call["id"].clone()));
         hive.bump();
         assert!(hive.wait_until(5000, || hive.locks().as_array().unwrap().is_empty().then_some(())).is_some());
+    }
+
+    #[test]
+    fn stop_recheck_refreshes_nodes_without_expanding_grants() {
+        let hive = Hive::new(Db::open(":memory:"), std::env::temp_dir(), None,
+            Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        hive.db.run("insert into tasks(id,title,nodes) values(10,'lookup','[\"vm\"]')", &[]);
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('mac-test','mac','Test Mac','[]',?)", args!(now()));
+        hive.db.run("insert into nodes(id,kind,name,tools,seen) values('browser-test','browser','Old browser','[]',0)", &[]);
+        let text = hive.stop_recheck(10);
+        assert!(text.contains("Granted node kinds: vm"));
+        assert!(text.contains("Test Mac (mac, mac-test): online"));
+        assert!(text.contains("Old browser (browser, browser-test): offline"));
+        assert!(text.contains("search memory and history") && text.contains("every accessible node"));
+        assert!(hive.require_node(10, "mac").is_err());
+        hive.db.run("update nodes set seen=0 where id='mac-test'", &[]);
+        assert!(hive.stop_recheck(10).contains("Test Mac (mac, mac-test): offline"));
     }
 
     #[test]
