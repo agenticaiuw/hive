@@ -378,7 +378,9 @@ fn windows(app: &str) -> Result<Vec<(Target, String)>, String> {
 
 /// The whole screen, or one app's front window (even under other windows); the other tools then act in what it showed.
 pub fn screenshot(app: &str) -> Result<Value, String> {
-    let file = std::env::temp_dir().join(format!("hive-shot-{}.jpg", std::process::id()));
+    let dir = std::env::temp_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare screenshot directory: {e}"))?;
+    let file = dir.join(format!("hive-shot-{}.jpg", std::process::id()));
     let p = file.to_string_lossy().into_owned();
     let tries = if app.trim().is_empty() { vec![(Target::Mac, String::new())] } else { windows(app)? };
     let mut failed = Vec::new();
