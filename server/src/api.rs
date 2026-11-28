@@ -157,6 +157,15 @@ pub fn handle(hive: &Arc<Hive>, req: Req) -> Res {
             let rules = crate::ops::rules_for(hive, &[s(&b["node"])], &s(&ctx["site"]), &s(&ctx["app"]), &s(&ctx["folder"]), &s(&ctx["project"]));
             Res::json(&json!({ "id": rid, "status": r["status"], "reply": r["reply"], "tasks": tasks, "rules": rules }))
         }
+        ("GET", ["api", "requests", _]) => {
+            let Some(r) = hive.db.get("select id,status,reply from requests where id=?", args!(id(2))) else {
+                return Res::err(404, "There is no such request.");
+            };
+            // Include existing tasks the orchestrator routed this request to, even after completion.
+            let tasks = hive.db.all("select id,title,status,outcome,why,need from tasks where request_id=?1
+                or id in (select task_id from log where request_id=?1 and task_id>0 and who='owner')", args!(id(2)));
+            Res::json(&json!({ "request": r, "tasks": tasks }))
+        }
         ("GET", ["api", "instructions", name]) => match hive.prompt(name) {
             Some(text) => Res::json(&json!({ "text": text })), None => Res::err(404, "There are no such instructions.") },
         ("PUT", ["api", "instructions", name]) => match hive.set_prompt(name, &s(&b["text"])) {
@@ -454,6 +463,27 @@ fn mime(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_replies_include_completed_and_routed_tasks_and_require_auth() {
+        let state = std::env::temp_dir().join(format!("hive-request-reply-test-{}", std::process::id()));
+        let hive = Hive::new(crate::db::Db::open(":memory:"), state.clone(), None, crate::hive::Engine::Codex { cmd: String::new(), env: vec![] }, String::new(), String::new());
+        let key = new_token(&hive, "test");
+        hive.db.run("insert into requests(id,status,reply) values(1,'planned','Checking specifications')", &[]);
+        hive.db.run("insert into tasks(id,request_id,status,outcome) values(10,1,'done','Purchase link verified'),(11,0,'done','Specs confirmed'),(12,2,'done','Unrelated')", &[]);
+        hive.log(2, 11, 1, "owner", "Confirm specs");
+        let get = |id: i64, auth: &str| handle(&hive, Req { method: "GET".into(), path: format!("/api/requests/{id}"),
+            query: Default::default(), headers: [("authorization".into(), format!("Bearer {auth}"))].into_iter().collect(),
+            body: vec![], peer: "192.0.2.10".into() });
+        assert_eq!(get(1, "wrong").status, 401);
+        assert_eq!(get(99, &key).status, 404);
+        let res = get(1, &key);
+        assert_eq!(res.status, 200);
+        let body: Value = serde_json::from_slice(&res.body).unwrap();
+        assert_eq!(body["request"]["reply"], "Checking specifications");
+        assert_eq!(body["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(body["tasks"][1]["outcome"], "Specs confirmed");
+        std::fs::remove_dir_all(state).ok();
+    }
     #[test]
     fn dashboard_sessions_include_history_and_orchestrator_log_has_a_cursor() {
         let state = std::env::temp_dir().join(format!("hive-session-api-test-{}", std::process::id()));
